@@ -2,6 +2,7 @@ import { createMemo, createResource, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
+import { engine } from "../lib/engine";
 import { persisted } from "../lib/persist";
 import { bytes } from "../lib/format";
 
@@ -37,7 +38,11 @@ function since(span: Span): number {
 export function Usage() {
   const [span, setSpan] = persisted<Span>("usage.span", "day");
 
-  const [totals] = createResource(span, async (s): Promise<AppTotal[]> => {
+  // key on the engine's online state too, so history loads once the service
+  // connects even if this tab was opened during startup
+  const [totals] = createResource(
+    () => ({ span: span(), online: engine.online() }),
+    async ({ span: s }): Promise<AppTotal[]> => {
     const from = since(s);
     const now = Date.now();
     let buckets: UsageBucket[] = [];

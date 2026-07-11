@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import { engine } from "../lib/engine";
@@ -14,7 +14,12 @@ function fileName(path: string): string {
 export function Protect() {
   const [q, setQ] = createSignal("");
   const [adding, setAdding] = createSignal(false);
-  onMount(refreshRules);
+  // (re)load rules whenever the engine is connected, so a view opened while the
+  // service is still starting fills in once it comes online instead of staying
+  // stuck on "No rules yet"
+  createEffect(() => {
+    if (engine.online()) refreshRules();
+  });
 
   const list = createMemo(() => {
     const needle = q().trim().toLowerCase();

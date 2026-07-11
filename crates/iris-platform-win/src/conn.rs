@@ -146,18 +146,26 @@ fn tcp_state(dw: u32) -> ConnState {
 }
 
 unsafe fn fetch_tcp(af: u32) -> Vec<u8> {
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
     let mut size = 0u32;
+    // prime the required size, then fetch. on a busy machine the table can grow
+    // between the probe and the fetch; on ERROR_INSUFFICIENT_BUFFER the call
+    // updates `size` to the new requirement, so retry rather than blanking the
+    // whole connection view for this tick
     let _ = GetExtendedTcpTable(None, &mut size, false, af, TCP_TABLE_OWNER_PID_ALL, 0);
-    if size == 0 {
-        return Vec::new();
+    for _ in 0..5 {
+        if size == 0 {
+            return Vec::new();
+        }
+        let mut buf = vec![0u8; size as usize];
+        let ptr = Some(buf.as_mut_ptr() as *mut core::ffi::c_void);
+        match GetExtendedTcpTable(ptr, &mut size, false, af, TCP_TABLE_OWNER_PID_ALL, 0) {
+            0 => return buf,
+            ERROR_INSUFFICIENT_BUFFER => continue,
+            _ => return Vec::new(),
+        }
     }
-    let mut buf = vec![0u8; size as usize];
-    let ptr = Some(buf.as_mut_ptr() as *mut core::ffi::c_void);
-    let rc = GetExtendedTcpTable(ptr, &mut size, false, af, TCP_TABLE_OWNER_PID_ALL, 0);
-    if rc != 0 {
-        return Vec::new();
-    }
-    buf
+    Vec::new()
 }
 
 unsafe fn tcp4(out: &mut Vec<RawConn>) {

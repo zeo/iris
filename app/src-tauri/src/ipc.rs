@@ -43,6 +43,7 @@ pub enum EngineCmd {
     ListAlerts(bool),
     AckAlert(i64),
     KillConnection(u16, String, u16),
+    GetEnrichment(Vec<EnrichTarget>),
 }
 pub struct Command {
     cmd: EngineCmd,
@@ -186,6 +187,22 @@ pub async fn get_usage(
     }
 }
 
+#[tauri::command]
+pub async fn get_enrichment(app: AppHandle, ips: Vec<String>) -> Result<Vec<EnrichmentEvent>, String> {
+    let targets: Vec<EnrichTarget> = ips
+        .iter()
+        .filter_map(|s| s.parse::<std::net::IpAddr>().ok().map(EnrichTarget::Endpoint))
+        .collect();
+    match dispatch(&app, EngineCmd::GetEnrichment(targets)).await? {
+        Reply::Enrichment(list) => Ok(list
+            .into_iter()
+            .map(|(target, annotations)| EnrichmentEvent { target, annotations })
+            .collect()),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
 fn parse_direction(s: &str) -> Direction {
     match s {
         "inbound" => Direction::Inbound,
@@ -264,6 +281,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     EngineCmd::AckAlert(id) => ClientMessage::AckAlert { req, id },
                     EngineCmd::KillConnection(local_port, remote_addr, remote_port) =>
                         ClientMessage::KillConnection { req, local_port, remote_addr, remote_port },
+                    EngineCmd::GetEnrichment(targets) => ClientMessage::GetEnrichment { req, targets },
                 };
                 pending.insert(req, command.resp);
                 if let Err(e) = transport::write_frame(&mut send, &msg).await {

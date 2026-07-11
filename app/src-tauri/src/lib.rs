@@ -40,6 +40,7 @@ pub fn run() {
             ipc::ack_alert,
             ipc::get_usage,
             ipc::kill_connection,
+            ipc::get_enrichment,
             net::reverse_dns,
             geo::geo_country,
             svcctl::install_service,

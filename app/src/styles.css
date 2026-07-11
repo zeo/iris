@@ -1441,6 +1441,18 @@ html {
   align-items: center;
   gap: 5px;
 }
+.picker-row .block-tag.allow {
+  color: var(--steel);
+  border-color: var(--line2);
+}
+.picker-opts {
+  display: flex;
+  gap: var(--s2);
+  align-items: center;
+}
+.picker-opts .seg button {
+  text-transform: lowercase;
+}
 .picker-empty {
   padding: var(--s3);
   color: var(--faint);

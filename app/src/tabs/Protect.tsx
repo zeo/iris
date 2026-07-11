@@ -2,7 +2,7 @@ import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import { engine } from "../lib/engine";
-import { blockApp, refreshRules, removeRule, rules, setRuleEnabled } from "../lib/rules";
+import { addRule, refreshRules, removeRule, rules, setRuleEnabled } from "../lib/rules";
 
 function fileName(path: string): string {
   const seg = path.split(/[\\/]/).pop();
@@ -14,6 +14,9 @@ function fileName(path: string): string {
 export function Protect() {
   const [q, setQ] = createSignal("");
   const [adding, setAdding] = createSignal(false);
+  const [action, setAction] = createSignal<"block" | "allow">("block");
+  const [direction, setDirection] = createSignal<"outbound" | "inbound">("outbound");
+  const add = (path: string) => addRule(path, direction(), action());
   // (re)load rules whenever the engine is connected, so a view opened while the
   // service is still starting fills in once it comes online instead of staying
   // stuck on "No rules yet"
@@ -28,10 +31,15 @@ export function Protect() {
   });
   const blockedCount = () => rules().filter((r) => r.enabled && r.rule.action === "block").length;
 
-  // apps not already covered by a rule, offered in the add picker
+  // apps without a rule for the currently-selected action+direction, offered in
+  // the add picker (a covered app can still get a rule for the other direction)
   const candidates = createMemo(() => {
-    const have = new Set(rules().map((r) => r.rule.app));
-    return engine.apps().filter((a) => !have.has(a.app));
+    const covered = new Set(
+      rules()
+        .filter((r) => r.rule.action === action() && r.rule.direction === direction())
+        .map((r) => r.rule.app),
+    );
+    return engine.apps().filter((a) => !covered.has(a.app));
   });
 
   return (
@@ -62,17 +70,29 @@ export function Protect() {
       <Show when={adding()}>
         <div class="panel picker">
           <div class="picker-head">
-            <span class="label">block an active app</span>
+            <span class="label">add a rule for an active app</span>
+            <div class="picker-opts">
+              <div class="seg" role="group" aria-label="action">
+                <button classList={{ on: action() === "block" }} onClick={() => setAction("block")}>block</button>
+                <button classList={{ on: action() === "allow" }} onClick={() => setAction("allow")}>allow</button>
+              </div>
+              <div class="seg" role="group" aria-label="direction">
+                <button classList={{ on: direction() === "outbound" }} onClick={() => setDirection("outbound")}>out</button>
+                <button classList={{ on: direction() === "inbound" }} onClick={() => setDirection("inbound")}>in</button>
+              </div>
+            </div>
             <button class="iconbtn" onClick={() => setAdding(false)} aria-label="close"><Icon name="x" /></button>
           </div>
           <div class="picker-list">
             <For each={candidates()} fallback={<div class="picker-empty">no other active apps</div>}>
               {(a) => (
-                <button class="picker-row" onClick={() => blockApp(a.app)}>
+                <button class="picker-row" onClick={() => add(a.app)}>
                   <AppIcon path={a.app} />
                   <span class="name">{a.name ?? fileName(a.app)}</span>
                   <span class="grow" />
-                  <span class="block-tag"><Icon name="block" size={13} /> block</span>
+                  <span class="block-tag" classList={{ allow: action() === "allow" }}>
+                    <Icon name={action() === "allow" ? "shield" : "block"} size={13} /> {action()} {direction() === "outbound" ? "out" : "in"}
+                  </span>
                 </button>
               )}
             </For>

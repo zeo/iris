@@ -31,6 +31,15 @@ export function isBlocked(path: string): boolean {
   return rules().some((r) => r.enabled && r.rule.action === "block" && r.rule.app === p);
 }
 
+export async function addRule(
+  path: string,
+  direction: "inbound" | "outbound",
+  action: "allow" | "block",
+): Promise<void> {
+  await invoke("add_rule", { path, direction, action });
+  await refreshRules();
+}
+
 export async function blockApp(path: string): Promise<void> {
   await invoke("add_rule", { path, direction: "outbound", action: "block" });
   await refreshRules();

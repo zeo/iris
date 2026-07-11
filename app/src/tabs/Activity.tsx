@@ -1,11 +1,46 @@
-import { createSignal } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import { Icon } from "../components/Icon";
+import { engine, type AppSample } from "../lib/engine";
+import { bytes, rate } from "../lib/format";
+
+function fileName(path: string): string {
+  const seg = path.split(/[\\/]/).pop();
+  return seg && seg.length ? seg : path;
+}
+function label(s: AppSample): string {
+  return s.name ?? fileName(s.app);
+}
+
+type Sort = "rate" | "down" | "up" | "conns" | "name";
 
 // live per-app / per-connection table (NetLimiter "Activity"), monitor-only.
-// the toolbar and columns are the real chrome; rows stream in over IPC once the
-// ETW monitor is running.
 export function Activity() {
   const [q, setQ] = createSignal("");
+  const [sort, setSort] = createSignal<Sort>("rate");
+
+  const rows = createMemo(() => {
+    const needle = q().trim().toLowerCase();
+    let list = engine.apps();
+    if (needle) list = list.filter((s) => label(s).toLowerCase().includes(needle) || s.app.toLowerCase().includes(needle));
+    const s = sort();
+    return [...list].sort((a, b) => {
+      switch (s) {
+        case "down": return b.rate_recv - a.rate_recv;
+        case "up": return b.rate_sent - a.rate_sent;
+        case "conns": return b.connections - a.connections;
+        case "name": return label(a).localeCompare(label(b));
+        default: return b.rate_recv + b.rate_sent - (a.rate_recv + a.rate_sent);
+      }
+    });
+  });
+
+  const connTotal = () => engine.apps().reduce((n, s) => n + s.connections, 0);
+  const th = (key: Sort, cls: string, text: string) => (
+    <th class={cls} classList={{ sorted: sort() === key }} onClick={() => setSort(key)}>
+      {text}
+      <span class="sort">▾</span>
+    </th>
+  );
 
   return (
     <section>
@@ -17,45 +52,75 @@ export function Activity() {
         <div class="actions">
           <label class="field">
             <Icon name="search" />
-            <input
-              placeholder="filter apps…"
-              value={q()}
-              onInput={(e) => setQ(e.currentTarget.value)}
-            />
+            <input placeholder="filter apps…" value={q()} onInput={(e) => setQ(e.currentTarget.value)} />
           </label>
-          <button class="btn icon" title="columns" aria-label="columns">
-            <Icon name="filter" />
-          </button>
         </div>
       </div>
 
       <div class="tiles">
         <div class="tile">
           <div class="k">active apps</div>
-          <div class="v">0</div>
+          <div class="v">{engine.apps().length}</div>
         </div>
         <div class="tile">
           <div class="k">connections</div>
-          <div class="v">0</div>
+          <div class="v">{connTotal()}</div>
         </div>
         <div class="tile">
           <div class="k">download</div>
-          <div class="v">0<span class="unit">B/s</span></div>
+          <div class="v">{rate(engine.down())}</div>
         </div>
         <div class="tile">
           <div class="k">upload</div>
-          <div class="v">0<span class="unit">B/s</span></div>
+          <div class="v">{rate(engine.up())}</div>
         </div>
       </div>
 
-      <div class="empty">
-        <Icon name="activity" class="glyph" size={44} />
-        <h3>Waiting for the engine</h3>
-        <p>
-          Up and down rates, connection counts, and the remote endpoints each app is talking to will
-          stream in here in real time.
-        </p>
-      </div>
+      <Show
+        when={rows().length > 0}
+        fallback={
+          <div class="empty">
+            <Icon name="activity" class="glyph" size={44} />
+            <h3>{engine.online() ? "No traffic yet" : "Waiting for the engine"}</h3>
+            <p>
+              Up and down rates, connection counts, and the remote endpoints each app is talking to
+              will stream in here in real time.
+            </p>
+          </div>
+        }
+      >
+        <div class="panel table-wrap">
+          <table class="tbl">
+            <thead>
+              <tr>
+                {th("name", "", "Application")}
+                {th("down", "num", "↓ rate")}
+                {th("up", "num", "↑ rate")}
+                {th("conns", "num", "conns")}
+                <th class="num">session</th>
+              </tr>
+            </thead>
+            <tbody>
+              <For each={rows()}>
+                {(s) => (
+                  <tr>
+                    <td>
+                      <div class="app-cell">
+                        <span class="app-ico"><Icon name="globe" size={11} /></span>
+                        <span>{label(s)}</span>
+                      </div>
+                    </td>
+                    <td class="num">{rate(s.rate_recv)}</td>
+                    <td class="num">{rate(s.rate_sent)}</td>
+                    <td class="num">{s.connections}</td>
+                    <td class="num">{bytes(s.total.sent + s.total.recv)}</td>
+                  </tr>
+                )}
+              </For>
+            </tbody>
+          </table>
+        </div>
+      </Show>
     </section>
   );
 }

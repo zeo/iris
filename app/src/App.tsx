@@ -1,7 +1,8 @@
-import { createSignal, For, Show, type JSX } from "solid-js";
+import { createSignal, For, onMount, Show, type JSX } from "solid-js";
 import { Titlebar } from "./components/Titlebar";
 import { Icon } from "./components/Icon";
 import { createTheme } from "./lib/theme";
+import { engine, initEngine } from "./lib/engine";
 import { Protect } from "./tabs/Protect";
 import { Activity } from "./tabs/Activity";
 import { Graph } from "./tabs/Graph";
@@ -23,15 +24,16 @@ export function App() {
   const [tab, setTab] = createSignal<TabId>("activity");
   const current = () => TABS.find((t) => t.id === tab()) ?? TABS[1];
 
-  // live readout — zero until the engine streams; kept here so every tab shares
-  // one source of truth for the always-on monitor.
-  const [down] = createSignal(0);
-  const [up] = createSignal(0);
-  const online = () => false;
+  onMount(initEngine);
 
   return (
     <div class="app">
-      <Titlebar theme={theme.pref()} onCycleTheme={theme.cycle} down={down()} up={up()} />
+      <Titlebar
+        theme={theme.pref()}
+        onCycleTheme={theme.cycle}
+        down={engine.down()}
+        up={engine.up()}
+      />
 
       <nav class="bar tabs" role="tablist" aria-label="sections">
         <For each={TABS}>
@@ -62,8 +64,8 @@ export function App() {
 
       <footer class="sb">
         <span class="cell">
-          <span class="lamp" classList={{ live: online(), off: !online() }} />
-          engine <b>{online() ? "online" : "offline"}</b>
+          <span class="lamp" classList={{ live: engine.online(), off: !engine.online() }} />
+          engine <b>{engine.online() ? "online" : "offline"}</b>
         </span>
         <span class="cell">
           section <b>{current().label}</b>

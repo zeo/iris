@@ -1,5 +1,7 @@
 import { createSignal, For } from "solid-js";
 import { BandwidthGraph } from "../components/BandwidthGraph";
+import { engine } from "../lib/engine";
+import { rate } from "../lib/format";
 
 const RANGES = ["5m", "1h", "24h", "7d"] as const;
 
@@ -7,6 +9,7 @@ const RANGES = ["5m", "1h", "24h", "7d"] as const;
 // idles as a powered-on instrument until the engine feeds real samples.
 export function Graph() {
   const [range, setRange] = createSignal<(typeof RANGES)[number]>("5m");
+  const peak = () => engine.ring().reduce((m, s) => Math.max(m, s.sent, s.recv), 0);
 
   return (
     <section>
@@ -32,14 +35,14 @@ export function Graph() {
         </div>
       </div>
 
-      <BandwidthGraph height={340} />
+      <BandwidthGraph height={340} data={engine.ring} />
 
       <div class="scope-foot">
         <span class="label">window</span>
         <b>{range()}</b>
         <span class="sp" />
         <span class="label">peak</span>
-        <b>—</b>
+        <b>{peak() > 0 ? rate(peak()) : "—"}</b>
       </div>
     </section>
   );

@@ -2,6 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Icon } from "./Icon";
 import { Sparkline } from "./Sparkline";
 import { rate } from "../lib/format";
+import { engine } from "../lib/engine";
 import type { ThemePref } from "../lib/theme";
 import eye from "../assets/eye.png";
 
@@ -40,7 +41,7 @@ export function Titlebar(props: {
           <span class="val" classList={{ hot: props.up > 0 }}>{rate(props.up)}</span>
         </span>
         <div class="spark">
-          <Sparkline />
+          <Sparkline data={engine.ring} />
         </div>
       </div>
       <div class="tools">

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/iris-core",
     "crates/iris-ipc",
+    "service",
     "app/src-tauri",
 ]
 
@@ -24,6 +25,9 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time", "sync"] }
+interprocess = { version = "2.2", features = ["tokio"] }
+windows-service = "0.8"
 
 [profile.release]
 lto = true

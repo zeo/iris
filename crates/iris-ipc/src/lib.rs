@@ -8,6 +8,8 @@
 
 pub mod codec;
 pub mod message;
+#[cfg(feature = "transport")]
+pub mod transport;
 
 pub use codec::{encode, read_frame, write_frame, CodecError, MAX_FRAME_LEN};
 pub use message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};

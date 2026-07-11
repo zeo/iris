@@ -7,8 +7,15 @@ repository.workspace = true
 authors.workspace = true
 description = "framed wire protocol shared by the iris service and UI"
 
+[features]
+# the async named-pipe transport (server + client). off by default so the
+# protocol types stay dependency-light; the service and app turn it on.
+transport = ["dep:tokio", "dep:interprocess"]
+
 [dependencies]
 iris-core = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, optional = true }
+interprocess = { workspace = true, optional = true }

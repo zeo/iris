@@ -29,34 +29,85 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 ";
 
+/// bump when the schema changes; drives the migration ladder in [`Store::migrate`]
+const SCHEMA_VERSION: i64 = 1;
+
 pub struct Store {
     conn: Connection,
 }
 
 impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Store> {
-        let conn = Connection::open(path)?;
+        let conn = Self::open_checked(path)?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
-        conn.execute_batch(SCHEMA)?;
-        Ok(Store { conn })
+        let store = Store { conn };
+        store.migrate()?;
+        Ok(store)
     }
 
     pub fn open_in_memory() -> rusqlite::Result<Store> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(Store { conn })
+        let store = Store {
+            conn: Connection::open_in_memory()?,
+        };
+        store.migrate()?;
+        Ok(store)
+    }
+
+    /// open the db, and if it fails an integrity check (a torn write on power
+    /// loss leaves SQLITE_CORRUPT) set the bad file aside and start fresh, so a
+    /// corrupt history never degrades every read and write to a silent no-op.
+    fn open_checked(path: &Path) -> rusqlite::Result<Connection> {
+        let conn = Connection::open(path)?;
+        let ok = conn
+            .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
+            .map(|s| s == "ok")
+            .unwrap_or(false);
+        if ok {
+            return Ok(conn);
+        }
+        tracing::error!(
+            "history db {} failed its integrity check, recreating it",
+            path.display()
+        );
+        drop(conn);
+        let corrupt = path.with_extension("db.corrupt");
+        let _ = std::fs::remove_file(&corrupt);
+        let _ = std::fs::rename(path, &corrupt);
+        // clear the WAL/SHM siblings so the fresh db does not inherit them
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        Connection::open(path)
+    }
+
+    /// apply schema migrations in order, stamping PRAGMA user_version so an
+    /// upgraded install evolves the existing db in place rather than silently
+    /// running against the old shape.
+    fn migrate(&self) -> rusqlite::Result<()> {
+        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 1 {
+            self.conn.execute_batch(SCHEMA)?;
+        }
+        // future steps append here: `if version < 2 { ...alter... }`
+        if version < SCHEMA_VERSION {
+            self.conn
+                .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        Ok(())
     }
 
     /// record an app in the first-seen registry; returns true the first time an
     /// app is ever seen, which drives the "new app connected" alert
     pub fn ensure_app(&self, path: &str, name: Option<&str>, at_ms: u64) -> bool {
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO apps(path, first_seen, name) VALUES (?1, ?2, ?3)",
-                params![path, at_ms as i64, name],
-            )
-            .map(|rows| rows > 0)
-            .unwrap_or(false)
+        match self.conn.execute(
+            "INSERT OR IGNORE INTO apps(path, first_seen, name) VALUES (?1, ?2, ?3)",
+            params![path, at_ms as i64, name],
+        ) {
+            Ok(rows) => rows > 0,
+            Err(e) => {
+                tracing::warn!("could not register app {path}: {e}");
+                false
+            }
+        }
     }
 
     /// add bytes to an app's current-minute usage bucket
@@ -65,11 +116,13 @@ impl Store {
             return;
         }
         let bucket = Granularity::Minute.bucket_start(at_ms) as i64;
-        let _ = self.conn.execute(
+        if let Err(e) = self.conn.execute(
             "INSERT INTO usage(path, bucket, sent, recv) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(path, bucket) DO UPDATE SET sent = sent + ?3, recv = recv + ?4",
             params![path, bucket, sent as i64, recv as i64],
-        );
+        ) {
+            tracing::warn!("could not record usage for {path}: {e}");
+        }
     }
 
     /// per-app usage aggregated into the requested granularity over a window
@@ -146,12 +199,25 @@ impl Store {
 
     pub fn insert_alert(&self, kind: &AlertKind, at_ms: u64) -> Alert {
         let kind_json = serde_json::to_string(kind).unwrap_or_default();
-        let _ = self.conn.execute(
+        // only trust last_insert_rowid when the insert actually wrote a row;
+        // otherwise the returned Alert would carry a stale id for a row that was
+        // never persisted
+        let id = match self.conn.execute(
             "INSERT INTO alerts(at_ms, kind, acknowledged) VALUES (?1, ?2, 0)",
             params![at_ms as i64, kind_json],
-        );
+        ) {
+            Ok(rows) if rows > 0 => self.conn.last_insert_rowid(),
+            Ok(_) => {
+                tracing::warn!("alert insert wrote no rows");
+                0
+            }
+            Err(e) => {
+                tracing::warn!("could not persist alert: {e}");
+                0
+            }
+        };
         Alert {
-            id: self.conn.last_insert_rowid(),
+            id,
             at_ms,
             kind: kind.clone(),
             acknowledged: false,
@@ -192,21 +258,28 @@ impl Store {
     }
 
     pub fn ack_alert(&self, id: i64) {
-        let _ = self
+        if let Err(e) = self
             .conn
-            .execute("UPDATE alerts SET acknowledged = 1 WHERE id = ?1", params![id]);
+            .execute("UPDATE alerts SET acknowledged = 1 WHERE id = ?1", params![id])
+        {
+            tracing::warn!("could not ack alert {id}: {e}");
+        }
     }
 
     pub fn ack_all_alerts(&self) {
-        let _ = self.conn.execute("UPDATE alerts SET acknowledged = 1", []);
+        if let Err(e) = self.conn.execute("UPDATE alerts SET acknowledged = 1", []) {
+            tracing::warn!("could not ack alerts: {e}");
+        }
     }
 
     /// drop usage buckets older than the cutoff to bound the file
     pub fn prune_usage(&self, older_than_ms: u64) {
-        let _ = self.conn.execute(
+        if let Err(e) = self.conn.execute(
             "DELETE FROM usage WHERE bucket < ?1",
             params![older_than_ms as i64],
-        );
+        ) {
+            tracing::warn!("could not prune usage: {e}");
+        }
     }
 
     pub fn first_seen(&self, path: &str) -> Option<u64> {

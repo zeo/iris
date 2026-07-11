@@ -72,7 +72,7 @@ fn run_service() -> anyhow::Result<()> {
         crate::monitor::spawn(engine.clone(), store.clone(), enrich.clone());
         let rules = std::sync::Arc::new(std::sync::Mutex::new(crate::rules::RuleStore::new()));
         tokio::select! {
-            r = server::serve(engine, rules, store, enrich) => {
+            r = server::serve(engine, rules.clone(), store, enrich) => {
                 match r {
                     Err(e) => {
                         tracing::error!("serve loop failed: {e}");
@@ -85,6 +85,10 @@ fn run_service() -> anyhow::Result<()> {
                         true
                     }
                 }
+            }
+            r = server::serve_admin(rules) => {
+                tracing::error!("admin serve loop ended: {r:?}");
+                true
             }
             _ = wait_for_stop(stop_rx) => {
                 tracing::info!("stop requested");

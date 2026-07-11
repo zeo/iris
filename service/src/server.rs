@@ -70,23 +70,8 @@ async fn handle(
 ) -> io::Result<()> {
     let (mut recv, mut send) = transport::split(stream);
 
-    // the first frame must be Hello; anything else is a protocol violation
-    match transport::read_frame::<_, ClientMessage>(&mut recv).await? {
-        Some(ClientMessage::Hello { protocol }) => {
-            transport::write_frame(
-                &mut send,
-                &ServerMessage::Welcome {
-                    protocol: PROTOCOL_VERSION,
-                    engine_version: env!("CARGO_PKG_VERSION").to_string(),
-                },
-            )
-            .await?;
-            if protocol != PROTOCOL_VERSION {
-                tracing::warn!(client = protocol, ours = PROTOCOL_VERSION, "protocol mismatch");
-                return Ok(());
-            }
-        }
-        _ => return Ok(()),
+    if !negotiate(&mut recv, &mut send).await? {
+        return Ok(());
     }
 
     let mut subscribed = false;
@@ -107,34 +92,16 @@ async fn handle(
                         let list = rules.lock().map(|r| r.list()).unwrap_or_default();
                         reply(&mut send, req, Reply::Rules(list)).await?;
                     }
-                    ClientMessage::AddRule { req, rule } => {
-                        let result = rules
-                            .lock()
-                            .map(|mut r| r.add(rule))
-                            .map(Reply::RuleAdded)
-                            .unwrap_or_else(|_| Reply::Error("rule store unavailable".into()));
-                        reply(&mut send, req, result).await?;
-                    }
-                    ClientMessage::RemoveRule { req, id } => {
-                        let removed = rules.lock().map(|mut r| r.remove(id)).unwrap_or(false);
-                        let result = if removed {
-                            Reply::Ok
-                        } else {
-                            Reply::Error("no rule with that id".into())
-                        };
-                        reply(&mut send, req, result).await?;
-                    }
-                    ClientMessage::SetRuleEnabled { req, id, enabled } => {
-                        let updated = rules
-                            .lock()
-                            .ok()
-                            .and_then(|mut r| r.set_enabled(id, enabled));
-                        let result = if updated.is_some() {
-                            Reply::Ok
-                        } else {
-                            Reply::Error("no rule with that id".into())
-                        };
-                        reply(&mut send, req, result).await?;
+                    // rule mutations are privileged: they run WFP changes as
+                    // LocalSystem, so they are only accepted on the admin pipe
+                    // (which the OS lets only an elevated caller open). reject
+                    // them here rather than let an unprivileged client change the
+                    // firewall.
+                    ClientMessage::AddRule { req, .. }
+                    | ClientMessage::RemoveRule { req, .. }
+                    | ClientMessage::SetRuleEnabled { req, .. } => {
+                        reply(&mut send, req, Reply::Error("rule changes require elevation".into()))
+                            .await?;
                     }
                     ClientMessage::GetUsage { req, mut query } => {
                         // bound the window so a caller cannot force a scan of the
@@ -213,6 +180,113 @@ async fn handle(
         }
     }
     Ok(())
+}
+
+/// accept elevated clients on the admin pipe and run their rule mutations. only
+/// an elevated process can open this pipe (its DACL grants SYSTEM + admins only),
+/// so a message arriving here is authorized to change the firewall.
+pub async fn serve_admin(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
+    let listener = transport::listen_admin()?;
+    tracing::info!(pipe = iris_ipc::ADMIN_PIPE_NAME, "admin channel listening");
+    let slots = Arc::new(tokio::sync::Semaphore::new(8));
+    loop {
+        let conn = match transport::accept(&listener).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::warn!("admin accept failed: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        let permit = match Arc::clone(&slots).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                drop(conn);
+                continue;
+            }
+        };
+        let rules = rules.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(e) = handle_admin(conn, rules).await {
+                tracing::debug!("admin client disconnected: {e}");
+            }
+        });
+    }
+}
+
+async fn handle_admin(stream: transport::Stream, rules: Arc<Mutex<RuleStore>>) -> io::Result<()> {
+    let (mut recv, mut send) = transport::split(stream);
+    if !negotiate(&mut recv, &mut send).await? {
+        return Ok(());
+    }
+    while let Some(msg) = transport::read_frame::<_, ClientMessage>(&mut recv).await? {
+        match msg {
+            ClientMessage::AddRule { req, rule } => {
+                let result = rules
+                    .lock()
+                    .map(|mut r| r.add(rule))
+                    .map(Reply::RuleAdded)
+                    .unwrap_or_else(|_| Reply::Error("rule store unavailable".into()));
+                reply(&mut send, req, result).await?;
+            }
+            ClientMessage::RemoveRule { req, id } => {
+                let removed = rules.lock().map(|mut r| r.remove(id)).unwrap_or(false);
+                let result = if removed {
+                    Reply::Ok
+                } else {
+                    Reply::Error("no rule with that id".into())
+                };
+                reply(&mut send, req, result).await?;
+            }
+            ClientMessage::SetRuleEnabled { req, id, enabled } => {
+                let updated = rules.lock().ok().and_then(|mut r| r.set_enabled(id, enabled));
+                let result = if updated.is_some() {
+                    Reply::Ok
+                } else {
+                    Reply::Error("no rule with that id".into())
+                };
+                reply(&mut send, req, result).await?;
+            }
+            ClientMessage::Ping { req } => reply(&mut send, req, Reply::Pong).await?,
+            other => {
+                if let Some(req) = req_of(&other) {
+                    reply(
+                        &mut send,
+                        req,
+                        Reply::Error("the admin channel accepts only rule changes".into()),
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// the shared Hello/Welcome handshake; returns false when the client should be
+/// dropped (a protocol mismatch or a non-Hello first frame).
+async fn negotiate(
+    recv: &mut transport::RecvHalf,
+    send: &mut transport::SendHalf,
+) -> io::Result<bool> {
+    match transport::read_frame::<_, ClientMessage>(recv).await? {
+        Some(ClientMessage::Hello { protocol }) => {
+            transport::write_frame(
+                send,
+                &ServerMessage::Welcome {
+                    protocol: PROTOCOL_VERSION,
+                    engine_version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+            )
+            .await?;
+            if protocol != PROTOCOL_VERSION {
+                tracing::warn!(client = protocol, ours = PROTOCOL_VERSION, "protocol mismatch");
+            }
+            Ok(protocol == PROTOCOL_VERSION)
+        }
+        _ => Ok(false),
+    }
 }
 
 async fn reply(

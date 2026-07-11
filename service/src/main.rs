@@ -2,6 +2,7 @@
 //! foreground with `--console` for development. it owns the OS integration
 //! (ETW monitor, WFP rules) and serves the UI over the named-pipe IPC.
 
+mod adminclient;
 mod engine;
 #[cfg(windows)]
 mod install;
@@ -44,6 +45,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // elevated one-shot rule mutations (launched by the UI with a UAC prompt)
+    if let Some(idx) = args.iter().position(|a| a.starts_with("--rule-")) {
+        return adminclient::run(&args[idx..]);
+    }
+
     if has("--console") {
         return run_console();
     }
@@ -76,6 +82,9 @@ fn run_console() -> anyhow::Result<()> {
         let enrich = plugins::builtin_registry();
         monitor::spawn(engine.clone(), store.clone(), enrich.clone());
         let rules = Arc::new(Mutex::new(RuleStore::new()));
-        server::serve(engine, rules, store, enrich).await
+        tokio::select! {
+            r = server::serve(engine, rules.clone(), store, enrich) => r,
+            r = server::serve_admin(rules) => r,
+        }
     })
 }

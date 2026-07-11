@@ -6,13 +6,13 @@
 #[cfg(windows)]
 #[tauri::command]
 pub async fn install_service(app: tauri::AppHandle) -> Result<(), String> {
-    run_elevated(app, "--install").await
+    run_engine_elevated(app, "--install".into()).await
 }
 
 #[cfg(windows)]
 #[tauri::command]
 pub async fn uninstall_service(app: tauri::AppHandle) -> Result<(), String> {
-    run_elevated(app, "--uninstall").await
+    run_engine_elevated(app, "--uninstall".into()).await
 }
 
 #[cfg(not(windows))]
@@ -27,8 +27,14 @@ pub fn uninstall_service(_app: tauri::AppHandle) -> Result<(), String> {
     Err("service control is Windows-only".into())
 }
 
+/// run the bundled engine binary elevated with `params` (a full parameter
+/// string) and wait for it to finish. shared by service install/uninstall and by
+/// the elevated rule mutations in `rulectl`.
 #[cfg(windows)]
-async fn run_elevated(app: tauri::AppHandle, arg: &'static str) -> Result<(), String> {
+pub(crate) async fn run_engine_elevated(
+    app: tauri::AppHandle,
+    params: String,
+) -> Result<(), String> {
     use tauri::Manager;
 
     let exe = app
@@ -38,14 +44,14 @@ async fn run_elevated(app: tauri::AppHandle, arg: &'static str) -> Result<(), St
 
     // ShellExecuteExW + waiting on the elevated process both block, so run them
     // off the UI thread; the closure reports whether the operation truly finished
-    tauri::async_runtime::spawn_blocking(move || elevate_and_wait(&exe, arg))
+    tauri::async_runtime::spawn_blocking(move || elevate_and_wait(&exe, &params))
         .await
         .map_err(|e| format!("elevation task failed: {e}"))?
 }
 
-/// launch the engine elevated with `arg` and wait for it to finish, mapping its
-/// exit code to success or failure. reporting Ok the moment ShellExecute returns
-/// (as a bare launch would) tells the UI the service is installed when the
+/// launch the engine elevated with `params` and wait for it to finish, mapping
+/// its exit code to success or failure. reporting Ok the moment ShellExecute
+/// returns (as a bare launch would) tells the UI the operation succeeded when the
 /// elevated run may still have failed.
 #[cfg(windows)]
 fn elevate_and_wait(exe: &std::path::Path, arg: &str) -> Result<(), String> {

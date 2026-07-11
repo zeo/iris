@@ -1,12 +1,12 @@
-//! the UI's client to the engine. a background task keeps a connection to the
-//! service's named pipe, negotiates the protocol, subscribes to the live stream,
-//! and forwards pushes to the webview as Tauri events. it also carries
-//! request/response commands (rules today) correlated by id, so the UI can drive
-//! the privileged engine. it reconnects on its own.
+//! the UI's client to the engine's telemetry pipe. a background task keeps a
+//! connection open, negotiates the protocol, subscribes to the live stream, and
+//! forwards pushes to the webview as Tauri events. it also carries the
+//! unprivileged request/response commands (reads, kills, enrichment) correlated
+//! by id. privileged rule mutations do not go here; they run elevated over the
+//! admin pipe (see `rulectl`). it reconnects on its own.
 
 use iris_core::{
-    Alert, Annotation, AppId, Direction, EnrichTarget, Granularity, Rule, RuleAction, StoredRule,
-    UsageBucket, UsageQuery,
+    Alert, Annotation, EnrichTarget, Granularity, StoredRule, UsageBucket, UsageQuery,
 };
 use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
@@ -36,9 +36,6 @@ pub struct StatusState(pub Mutex<Status>);
 /// what the UI asks the engine to do; the session task assigns the wire id
 pub enum EngineCmd {
     ListRules,
-    AddRule(Rule),
-    RemoveRule(i64),
-    SetRuleEnabled(i64, bool),
     GetUsage(UsageQuery),
     ListAlerts(bool),
     AckAlert(i64),
@@ -88,44 +85,6 @@ async fn dispatch(app: &AppHandle, cmd: EngineCmd) -> Result<Reply, String> {
 pub async fn list_rules(app: AppHandle) -> Result<Vec<StoredRule>, String> {
     match dispatch(&app, EngineCmd::ListRules).await? {
         Reply::Rules(r) => Ok(r),
-        Reply::Error(e) => Err(e),
-        _ => Err("unexpected reply".into()),
-    }
-}
-
-#[tauri::command]
-pub async fn add_rule(
-    app: AppHandle,
-    path: String,
-    direction: String,
-    action: String,
-) -> Result<StoredRule, String> {
-    let rule = Rule {
-        app: AppId::from_path(&path),
-        direction: parse_direction(&direction),
-        action: parse_action(&action),
-        label: None,
-    };
-    match dispatch(&app, EngineCmd::AddRule(rule)).await? {
-        Reply::RuleAdded(r) => Ok(r),
-        Reply::Error(e) => Err(e),
-        _ => Err("unexpected reply".into()),
-    }
-}
-
-#[tauri::command]
-pub async fn remove_rule(app: AppHandle, id: i64) -> Result<(), String> {
-    match dispatch(&app, EngineCmd::RemoveRule(id)).await? {
-        Reply::Ok => Ok(()),
-        Reply::Error(e) => Err(e),
-        _ => Err("unexpected reply".into()),
-    }
-}
-
-#[tauri::command]
-pub async fn set_rule_enabled(app: AppHandle, id: i64, enabled: bool) -> Result<(), String> {
-    match dispatch(&app, EngineCmd::SetRuleEnabled(id, enabled)).await? {
-        Reply::Ok => Ok(()),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
     }
@@ -203,19 +162,6 @@ pub async fn get_enrichment(app: AppHandle, ips: Vec<String>) -> Result<Vec<Enri
     }
 }
 
-fn parse_direction(s: &str) -> Direction {
-    match s {
-        "inbound" => Direction::Inbound,
-        _ => Direction::Outbound,
-    }
-}
-fn parse_action(s: &str) -> RuleAction {
-    match s {
-        "allow" => RuleAction::Allow,
-        _ => RuleAction::Block,
-    }
-}
-
 /// start the reconnecting client loop. `rx` carries UI commands across the loop's
 /// lifetime; each connection drains it.
 pub fn spawn(app: AppHandle, mut rx: mpsc::Receiver<Command>) {
@@ -273,9 +219,6 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                 next_id += 1;
                 let msg = match command.cmd {
                     EngineCmd::ListRules => ClientMessage::ListRules { req },
-                    EngineCmd::AddRule(rule) => ClientMessage::AddRule { req, rule },
-                    EngineCmd::RemoveRule(id) => ClientMessage::RemoveRule { req, id },
-                    EngineCmd::SetRuleEnabled(id, enabled) => ClientMessage::SetRuleEnabled { req, id, enabled },
                     EngineCmd::GetUsage(query) => ClientMessage::GetUsage { req, query },
                     EngineCmd::ListAlerts(unacked_only) => ClientMessage::ListAlerts { req, unacked_only },
                     EngineCmd::AckAlert(id) => ClientMessage::AckAlert { req, id },

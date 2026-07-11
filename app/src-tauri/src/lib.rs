@@ -7,6 +7,7 @@ mod icon;
 mod ipc;
 mod net;
 mod report;
+mod rulectl;
 mod startup;
 mod svcctl;
 
@@ -35,9 +36,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::engine_status,
             ipc::list_rules,
-            ipc::add_rule,
-            ipc::remove_rule,
-            ipc::set_rule_enabled,
             ipc::list_alerts,
             ipc::ack_alert,
             ipc::get_usage,
@@ -47,6 +45,9 @@ pub fn run() {
             geo::geo_country,
             svcctl::install_service,
             svcctl::uninstall_service,
+            rulectl::rule_add,
+            rulectl::rule_remove,
+            rulectl::rule_set_enabled,
             startup::get_launch_at_login,
             startup::set_launch_at_login,
             report::save_download,

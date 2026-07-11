@@ -16,13 +16,28 @@ pub use interprocess::local_socket::tokio::{Listener, RecvHalf, SendHalf, Stream
 
 /// bind the service listener to the iris pipe.
 ///
-/// note: this uses the default pipe security descriptor, which is correct when
-/// the service and UI run in the same session (development / console mode). the
-/// installed LocalSystem service widens the DACL to the interactive user at
-/// setup time via the platform layer.
+/// on Windows the pipe carries an explicit security descriptor: full control to
+/// SYSTEM and Administrators, read/write to authenticated users, and a medium
+/// integrity label so the unprivileged UI can connect to a pipe owned by the
+/// LocalSystem service while low-integrity (sandboxed) processes cannot.
 pub fn listen() -> io::Result<Listener> {
     let name = PIPE_NAME.to_fs_name::<GenericFilePath>()?;
-    ListenerOptions::new().name(name).create_tokio()
+    let opts = ListenerOptions::new().name(name);
+
+    #[cfg(windows)]
+    let opts = {
+        use interprocess::os::windows::local_socket::ListenerOptionsExt;
+        use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+        use widestring::U16CString;
+
+        const SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)S:(ML;;NW;;;ME)";
+        let wide = U16CString::from_str(SDDL)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let sd = SecurityDescriptor::deserialize(wide.as_ucstr())?;
+        opts.security_descriptor(sd)
+    };
+
+    opts.create_tokio()
 }
 
 /// connect the UI client to the iris pipe.

@@ -1,0 +1,20 @@
+[package]
+name = "iris-platform-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Windows engine backend for iris: ETW monitoring and WFP rules"
+
+[dependencies]
+iris-core = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+ferrisetw = "1.2"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }

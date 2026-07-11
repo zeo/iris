@@ -22,3 +22,4 @@ tracing-subscriber = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = { workspace = true }
+iris-platform-win = { workspace = true }

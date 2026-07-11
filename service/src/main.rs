@@ -3,6 +3,7 @@
 //! (ETW monitor, WFP rules) and serves the UI over the named-pipe IPC.
 
 mod engine;
+mod monitor;
 mod server;
 #[cfg(windows)]
 mod svc;
@@ -41,7 +42,7 @@ fn run_console() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let engine = Engine::new();
-        // slice 3 wires the ETW monitor here: crate::monitor::spawn(engine.clone());
+        monitor::spawn(engine.clone());
         server::serve(engine).await
     })
 }

@@ -62,7 +62,7 @@ fn run_service() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let engine = Engine::new();
-        // slice 3 wires the ETW monitor here: crate::monitor::spawn(engine.clone());
+        crate::monitor::spawn(engine.clone());
         tokio::select! {
             r = server::serve(engine) => {
                 if let Err(e) = r {

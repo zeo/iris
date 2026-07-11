@@ -117,7 +117,10 @@ fn stop_stale_session(name: &str) {
         let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         const NAME_ROOM: usize = 1024;
         let size = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() + 2 * NAME_ROOM;
-        let mut buf = vec![0u8; size];
+        // EVENT_TRACE_PROPERTIES holds 64-bit fields and needs 8-byte alignment,
+        // which a Vec<u8> does not guarantee; back the blob with u64 storage so
+        // the cast pointer is properly aligned
+        let mut buf = vec![0u64; size.div_ceil(std::mem::size_of::<u64>())];
         let props = buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
         (*props).Wnode.BufferSize = size as u32;
         (*props).Wnode.Flags = WNODE_FLAG_TRACED_GUID;

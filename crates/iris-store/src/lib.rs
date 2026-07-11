@@ -151,19 +151,22 @@ impl Store {
             rows.collect()
         };
 
+        // cap the number of returned rows so a wide query cannot dump the whole
+        // history into memory / the pipe at once
+        const MAX_ROWS: i64 = 200_000;
         let result = if let Some(app) = &q.app {
             run(
                 "SELECT path, (bucket / ?1) * ?1 AS b, SUM(sent), SUM(recv)
                  FROM usage WHERE bucket >= ?2 AND bucket < ?3 AND path = ?4
-                 GROUP BY path, b ORDER BY b",
-                params![width, from, to, app.as_str()],
+                 GROUP BY path, b ORDER BY b LIMIT ?5",
+                params![width, from, to, app.as_str(), MAX_ROWS],
             )
         } else {
             run(
                 "SELECT path, (bucket / ?1) * ?1 AS b, SUM(sent), SUM(recv)
                  FROM usage WHERE bucket >= ?2 AND bucket < ?3
-                 GROUP BY path, b ORDER BY b",
-                params![width, from, to],
+                 GROUP BY path, b ORDER BY b LIMIT ?4",
+                params![width, from, to, MAX_ROWS],
             )
         };
         if let Ok(rows) = result {

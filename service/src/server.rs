@@ -19,6 +19,10 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     let listener = transport::listen()?;
     tracing::info!(pipe = iris_ipc::PIPE_NAME, "engine listening");
+    // cap concurrent clients so a local process cannot exhaust the engine by
+    // opening connections in a loop; a real deployment has one UI plus headroom
+    const MAX_CONNECTIONS: usize = 32;
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
         // a transient accept error (a client aborting the pipe handshake, a
         // momentary resource shortage) must never take the listener down, or one
@@ -34,11 +38,20 @@ pub async fn serve(
                 continue;
             }
         };
+        let permit = match Arc::clone(&slots).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                tracing::warn!("connection limit reached, refusing client");
+                drop(conn);
+                continue;
+            }
+        };
         let engine = engine.clone();
         let rules = rules.clone();
         let store = store.clone();
         let enrich = enrich.clone();
         tokio::spawn(async move {
+            let _permit = permit; // held for the session, released on disconnect
             if let Err(e) = handle(conn, engine, rules, store, enrich).await {
                 tracing::debug!("client disconnected: {e}");
             }
@@ -123,7 +136,13 @@ async fn handle(
                         };
                         reply(&mut send, req, result).await?;
                     }
-                    ClientMessage::GetUsage { req, query } => {
+                    ClientMessage::GetUsage { req, mut query } => {
+                        // bound the window so a caller cannot force a scan of the
+                        // entire history (a from=0,to=MAX dump / DoS)
+                        const MAX_WINDOW_MS: u64 = 400 * 86_400_000;
+                        if query.to_ms.saturating_sub(query.from_ms) > MAX_WINDOW_MS {
+                            query.from_ms = query.to_ms.saturating_sub(MAX_WINDOW_MS);
+                        }
                         // a wide history query can touch many rows; run it on the
                         // blocking pool so it never stalls the reactor or the tick
                         let store = store.clone();

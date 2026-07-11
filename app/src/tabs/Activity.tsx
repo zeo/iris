@@ -1,5 +1,7 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { Icon } from "../components/Icon";
+import { AppIcon } from "../components/AppIcon";
+import { ConnDetails } from "../components/ConnDetails";
 import { engine, type AppSample, type Conn } from "../lib/engine";
 import { bytes, rate } from "../lib/format";
 
@@ -22,6 +24,7 @@ export function Activity() {
   const [sort, setSort] = createSignal<Sort>("rate");
   const [filter, setFilter] = createSignal<Filter>("all");
   const [open, setOpen] = createSignal<Set<string>>(new Set());
+  const [sel, setSel] = createSignal<{ app: string; conn: Conn } | null>(null);
 
   const toggle = (app: string) =>
     setOpen((s) => {
@@ -143,7 +146,7 @@ export function Activity() {
                           >
                             <Icon name="chevron" size={12} />
                           </button>
-                          <span class="app-ico"><Icon name="globe" size={11} /></span>
+                          <AppIcon path={s.app} />
                           <span class="name" classList={{ offline: !s.online }}>{label(s)}</span>
                         </div>
                       </td>
@@ -153,7 +156,9 @@ export function Activity() {
                       <td class="num">{bytes(s.total.sent + s.total.recv)}</td>
                     </tr>
                     <Show when={open().has(s.app)}>
-                      <For each={s.conns}>{(c) => <ConnRow c={c} />}</For>
+                      <For each={s.conns}>
+                        {(c) => <ConnRow c={c} onSelect={() => setSel({ app: s.app, conn: c })} />}
+                      </For>
                       <Show when={s.conns.length === 0}>
                         <tr class="conn-row">
                           <td colSpan={5} class="conn-empty">no active connections</td>
@@ -167,14 +172,18 @@ export function Activity() {
           </table>
         </div>
       </Show>
+
+      <Show when={sel()} keyed>
+        {(s) => <ConnDetails app={s.app} conn={s.conn} onClose={() => setSel(null)} />}
+      </Show>
     </section>
   );
 }
 
-function ConnRow(props: { c: Conn }) {
+function ConnRow(props: { c: Conn; onSelect: () => void }) {
   const c = props.c;
   return (
-    <tr class="conn-row">
+    <tr class="conn-row" onClick={props.onSelect}>
       <td>
         <div class="conn-cell">
           <span class="dir">{c.direction === "outbound" ? "↗" : "↘"}</span>

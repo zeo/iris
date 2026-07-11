@@ -12,6 +12,7 @@
     "core:window:allow-unmaximize",
     "core:window:allow-close",
     "core:window:allow-is-maximized",
-    "opener:default"
+    "opener:default",
+    "opener:allow-open-url"
   ]
 }

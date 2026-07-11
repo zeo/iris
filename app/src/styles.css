@@ -915,6 +915,115 @@ html {
   color: var(--faint);
   font-style: italic;
 }
+.tbl.activity .conn-row {
+  cursor: pointer;
+}
+
+/* connection detail drawer */
+.details {
+  position: fixed;
+  top: calc(var(--tb) + var(--bar));
+  bottom: var(--sb);
+  right: 0;
+  width: 340px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  padding: var(--s4);
+  background: var(--plate);
+  border-left: 1px solid var(--line2);
+  box-shadow: var(--e3);
+  overflow-y: auto;
+  animation: drawer-in var(--t-slow) var(--spring);
+}
+@keyframes drawer-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+.details-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+.details-head .dir {
+  font-family: var(--mono);
+  font-size: var(--fz-h);
+  color: var(--live);
+  text-shadow: 0 0 8px var(--live-glow);
+}
+.details-head .titles {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.details-head h3 {
+  margin: 0;
+  font-size: var(--fz-h);
+  font-weight: 600;
+}
+.details-head .sub {
+  font-family: var(--mono);
+  font-size: var(--fz-sm);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plabel {
+  font-family: var(--mono);
+  font-size: var(--fz-cap);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: var(--s2);
+}
+.props,
+.tools {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--recess);
+  box-shadow: var(--well);
+  padding: var(--s3);
+}
+.prow {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fz-ui);
+}
+.prow:last-child {
+  border-bottom: 0;
+}
+.prow .pk {
+  color: var(--muted);
+}
+.prow .pv {
+  font-family: var(--mono);
+  color: var(--text-2);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resolving {
+  color: var(--faint);
+  font-style: italic;
+}
+.unresolved {
+  color: var(--faint);
+}
+.tool-row {
+  display: flex;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
 
 .table-wrap {
   overflow: hidden;

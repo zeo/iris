@@ -3,6 +3,8 @@
 //! (ETW monitor, WFP rules) and serves the UI over the named-pipe IPC.
 
 mod engine;
+#[cfg(windows)]
+mod install;
 mod monitor;
 mod rules;
 mod server;
@@ -27,10 +29,21 @@ fn open_store() -> Store {
 }
 
 fn main() -> anyhow::Result<()> {
-    let console = std::env::args().any(|a| a == "--console");
+    let args: Vec<String> = std::env::args().collect();
+    let has = |flag: &str| args.iter().any(|a| a == flag);
     init_logging();
 
-    if console {
+    #[cfg(windows)]
+    {
+        if has("--install") {
+            return install::install();
+        }
+        if has("--uninstall") {
+            return install::uninstall();
+        }
+    }
+
+    if has("--console") {
         return run_console();
     }
 

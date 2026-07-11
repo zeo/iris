@@ -25,3 +25,8 @@ tracing-subscriber = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows-service = { workspace = true }
 iris-platform-win = { workspace = true }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Services",
+    "Win32_Security",
+] }

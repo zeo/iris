@@ -6,6 +6,7 @@ mod geo;
 mod icon;
 mod ipc;
 mod net;
+mod svcctl;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
@@ -25,6 +26,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(ipc::StatusState::default())
         .manage(ipc::Commander(cmd_tx))
         .invoke_handler(tauri::generate_handler![
@@ -39,6 +42,8 @@ pub fn run() {
             ipc::kill_connection,
             net::reverse_dns,
             geo::geo_country,
+            svcctl::install_service,
+            svcctl::uninstall_service,
             icon::app_icon
         ])
         .setup(move |app| {

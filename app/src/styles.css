@@ -484,6 +484,32 @@ html {
   overflow: auto;
   padding: var(--s5) var(--s6) var(--s6);
 }
+
+/* one-click service install prompt when the engine is unreachable */
+.install-banner {
+  position: fixed;
+  top: calc(var(--tb) + var(--bar) + var(--s3));
+  left: var(--s6);
+  right: var(--s6);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--line2);
+  border-radius: var(--r-lg);
+  background: var(--plate);
+  box-shadow: var(--e2);
+  font-size: var(--fz-ui);
+  color: var(--text);
+  animation: rise var(--t-slow) var(--spring-soft);
+}
+.install-banner svg {
+  width: 16px;
+  height: 16px;
+  color: var(--steel);
+  flex: none;
+}
 .view {
   animation: rise var(--t-slow) var(--spring-soft);
 }

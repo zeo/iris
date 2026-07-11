@@ -1,9 +1,11 @@
-import { createSignal, For, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { invoke } from "@tauri-apps/api/core";
 import { Titlebar } from "./components/Titlebar";
 import { Icon } from "./components/Icon";
 import { createTheme } from "./lib/theme";
 import { engine, initEngine } from "./lib/engine";
 import { initAlerts, unackedCount } from "./lib/alerts";
+import { autoUpdate } from "./lib/updater";
 import { Protect } from "./tabs/Protect";
 import { Activity } from "./tabs/Activity";
 import { Graph } from "./tabs/Graph";
@@ -28,7 +30,30 @@ export function App() {
   onMount(() => {
     initEngine();
     initAlerts();
+    autoUpdate();
   });
+
+  // offer to install the background service if the engine stays unreachable
+  const [offerInstall, setOfferInstall] = createSignal(false);
+  const [installing, setInstalling] = createSignal(false);
+  createEffect(() => {
+    if (engine.online()) {
+      setOfferInstall(false);
+      return;
+    }
+    const t = setTimeout(() => !engine.online() && setOfferInstall(true), 8000);
+    onCleanup(() => clearTimeout(t));
+  });
+  const installService = async () => {
+    setInstalling(true);
+    try {
+      await invoke("install_service");
+      setOfferInstall(false);
+    } catch {
+      /* prompt declined */
+    }
+    setInstalling(false);
+  };
 
   return (
     <div class="app">
@@ -58,6 +83,17 @@ export function App() {
           )}
         </For>
       </nav>
+
+      <Show when={offerInstall()}>
+        <div class="install-banner">
+          <Icon name="shield" />
+          <span>The Iris engine service isn't running. Install it to start monitoring in the background.</span>
+          <span class="grow" />
+          <button class="btn" onClick={installService} disabled={installing()}>
+            {installing() ? "Installing…" : "Install service"}
+          </button>
+        </div>
+      </Show>
 
       <main class="content" role="tabpanel">
         <Show when={current()} keyed>

@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1423",
     "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build"
+    "beforeBuildCommand": "cargo build --release -p iris-service && pnpm build"
   },
   "app": {
     "windows": [
@@ -29,10 +29,22 @@
     },
     "withGlobalTauri": false
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/lintowe/iris/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgxQUYxRjhBNzgxMUQ5QkUKUldTKzJSRjRpaCt2Z2RVVmZJcEZLbVExYXJyTFZJQTB6S0VUNkFXdXUvZ1Y0THZUV3VYeVZTN3UK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["msi"],
-    "resources": ["resources/geo/dbip-country.mmdb"],
+    "createUpdaterArtifacts": true,
+    "resources": {
+      "resources/geo/dbip-country.mmdb": "resources/geo/dbip-country.mmdb",
+      "../../target/release/iris-engine.exe": "engine/iris-engine.exe"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

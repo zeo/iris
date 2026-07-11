@@ -16,3 +16,16 @@ export async function autoUpdate(): Promise<void> {
     /* no reachable feed or no newer build */
   }
 }
+
+// a manual check from Settings; returns a short status to show the user
+export async function checkNow(): Promise<string> {
+  try {
+    const update = await check();
+    if (!update) return "You are on the latest version.";
+    await update.downloadAndInstall();
+    await relaunch();
+    return "Installing update…";
+  } catch {
+    return "Could not reach the update feed.";
+  }
+}

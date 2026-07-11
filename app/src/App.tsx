@@ -11,8 +11,9 @@ import { Activity } from "./tabs/Activity";
 import { Graph } from "./tabs/Graph";
 import { Usage } from "./tabs/Usage";
 import { Alerts } from "./tabs/Alerts";
+import { Settings } from "./tabs/Settings";
 
-type TabId = "protect" | "activity" | "graph" | "usage" | "alerts";
+type TabId = "protect" | "activity" | "graph" | "usage" | "alerts" | "settings";
 
 const TABS: { id: TabId; label: string; icon: string; view: () => JSX.Element }[] = [
   { id: "protect", label: "Protect", icon: "shield", view: Protect },
@@ -20,6 +21,7 @@ const TABS: { id: TabId; label: string; icon: string; view: () => JSX.Element }[
   { id: "graph", label: "Graph", icon: "graph", view: Graph },
   { id: "usage", label: "Usage", icon: "clock", view: Usage },
   { id: "alerts", label: "Alerts", icon: "bell", view: Alerts },
+  { id: "settings", label: "Settings", icon: "settings", view: Settings },
 ];
 
 export function App() {

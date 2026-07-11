@@ -48,6 +48,14 @@ pub fn engine_status(state: tauri::State<'_, StatusState>) -> Status {
 }
 
 async fn dispatch(app: &AppHandle, cmd: EngineCmd) -> Result<Reply, String> {
+    // fail fast when the engine is known to be offline, so a UI action during an
+    // outage returns at once instead of buffering on a queue nobody is draining
+    if let Some(state) = app.try_state::<StatusState>() {
+        let online = state.0.lock().map(|s| s.online).unwrap_or(false);
+        if !online {
+            return Err("engine offline".into());
+        }
+    }
     let tx = {
         let state = app.try_state::<Commander>().ok_or("ipc not ready")?;
         state.0.clone()
@@ -56,7 +64,13 @@ async fn dispatch(app: &AppHandle, cmd: EngineCmd) -> Result<Reply, String> {
     tx.send(Command { cmd, resp })
         .await
         .map_err(|_| "engine offline".to_string())?;
-    rx.await.map_err(|_| "engine offline".to_string())
+    // backstop the wait: if the engine drops mid-request the reconnect can take a
+    // moment, but the UI promise must never hang forever
+    match tokio::time::timeout(Duration::from_secs(10), rx).await {
+        Ok(Ok(reply)) => Ok(reply),
+        Ok(Err(_)) => Err("engine offline".into()),
+        Err(_) => Err("engine timed out".into()),
+    }
 }
 
 #[tauri::command]

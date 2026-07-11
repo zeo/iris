@@ -6,6 +6,7 @@ mod engine;
 #[cfg(windows)]
 mod install;
 mod monitor;
+mod plugins;
 mod rules;
 mod server;
 mod tracker;
@@ -72,8 +73,9 @@ fn run_console() -> anyhow::Result<()> {
     rt.block_on(async {
         let engine = Engine::new();
         let store = Arc::new(Mutex::new(open_store()));
-        monitor::spawn(engine.clone(), store.clone());
+        let enrich = plugins::builtin_registry();
+        monitor::spawn(engine.clone(), store.clone(), enrich.clone());
         let rules = Arc::new(Mutex::new(RuleStore::new()));
-        server::serve(engine, rules, store).await
+        server::serve(engine, rules, store, enrich).await
     })
 }

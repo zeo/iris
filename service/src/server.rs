@@ -1,4 +1,5 @@
 use crate::engine::Engine;
+use crate::plugins::registry::EnrichmentRegistry;
 use crate::rules::RuleStore;
 use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
@@ -14,6 +15,7 @@ pub async fn serve(
     engine: Engine,
     rules: Arc<Mutex<RuleStore>>,
     store: Arc<Mutex<Store>>,
+    enrich: Arc<EnrichmentRegistry>,
 ) -> anyhow::Result<()> {
     let listener = transport::listen()?;
     tracing::info!(pipe = iris_ipc::PIPE_NAME, "engine listening");
@@ -31,8 +33,9 @@ pub async fn serve(
         let engine = engine.clone();
         let rules = rules.clone();
         let store = store.clone();
+        let enrich = enrich.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(conn, engine, rules, store).await {
+            if let Err(e) = handle(conn, engine, rules, store, enrich).await {
                 tracing::debug!("client disconnected: {e}");
             }
         });
@@ -46,6 +49,7 @@ async fn handle(
     engine: Engine,
     rules: Arc<Mutex<RuleStore>>,
     store: Arc<Mutex<Store>>,
+    enrich: Arc<EnrichmentRegistry>,
 ) -> io::Result<()> {
     let (mut recv, mut send) = transport::split(stream);
 
@@ -154,10 +158,10 @@ async fn handle(
                         reply(&mut send, req, result).await?;
                     }
                     ClientMessage::GetEnrichment { req, targets } => {
-                        let _ = &targets;
-                        // the enrichment registry is wired in the next commit;
-                        // answer now so the UI never awaits a reply that never comes
-                        reply(&mut send, req, Reply::Enrichment(Vec::new())).await?;
+                        // cache-only read; a miss is filled by the monitor's
+                        // resolve-and-push path, so this never blocks on an enricher
+                        let anns = enrich.cached_for(&targets);
+                        reply(&mut send, req, Reply::Enrichment(anns)).await?;
                     }
                     // commands whose engine support arrives in later slices: answer
                     // rather than leave the UI awaiting a reply that never comes

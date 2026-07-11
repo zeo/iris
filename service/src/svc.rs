@@ -68,10 +68,11 @@ fn run_service() -> anyhow::Result<()> {
     let failed = rt.block_on(async {
         let engine = Engine::new();
         let store = std::sync::Arc::new(std::sync::Mutex::new(crate::open_store()));
-        crate::monitor::spawn(engine.clone(), store.clone());
+        let enrich = crate::plugins::builtin_registry();
+        crate::monitor::spawn(engine.clone(), store.clone(), enrich.clone());
         let rules = std::sync::Arc::new(std::sync::Mutex::new(crate::rules::RuleStore::new()));
         tokio::select! {
-            r = server::serve(engine, rules, store) => {
+            r = server::serve(engine, rules, store, enrich) => {
                 match r {
                     Err(e) => {
                         tracing::error!("serve loop failed: {e}");

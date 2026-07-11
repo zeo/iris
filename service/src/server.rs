@@ -27,6 +27,10 @@ pub async fn serve(
             Ok(conn) => conn,
             Err(e) => {
                 tracing::warn!("accept failed: {e}");
+                // a brief pause so a hypothetical persistent accept error backs
+                // off instead of spinning the CPU; imperceptible for the normal
+                // rare transient case
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 continue;
             }
         };

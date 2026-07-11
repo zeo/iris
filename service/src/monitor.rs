@@ -1,8 +1,10 @@
-//! ties the platform network monitor to the engine: raw byte events accumulate
-//! in a shared aggregator, and a timer flushes them into a sample tick once a
-//! second, published to every subscribed UI.
+//! ties the platform data sources to the engine: the ETW byte monitor fills a
+//! shared aggregator, the [`Tracker`] merges that with live connections and the
+//! online/offline lifecycle, and a one-second timer publishes the resulting
+//! sample tick to every subscribed UI.
 
 use crate::engine::Engine;
+use crate::tracker::Tracker;
 use iris_core::Aggregator;
 use iris_ipc::ServerMessage;
 use std::sync::{Arc, Mutex};
@@ -16,42 +18,37 @@ fn now_ms() -> u64 {
 }
 
 /// start monitoring and the flush loop. on Windows this opens the ETW trace
-/// (which needs admin); if it cannot start, the engine still runs and simply
-/// reports no traffic rather than failing outright.
+/// (which needs admin) for byte counts; connection enumeration works without it,
+/// so the activity view still populates if ETW cannot start.
 pub fn spawn(engine: Engine) {
     let agg = Arc::new(Mutex::new(Aggregator::new(now_ms())));
 
     #[cfg(windows)]
-    let monitor = match iris_platform_win::Monitor::start(agg.clone()) {
+    let byte_monitor = match iris_platform_win::Monitor::start(agg.clone()) {
         Ok(m) => Some(m),
         Err(e) => {
-            tracing::error!("network monitor unavailable: {e}");
+            tracing::error!("byte monitor unavailable (connections still shown): {e}");
             None
         }
     };
 
+    let mut tracker = Tracker::new(agg);
+
     tokio::spawn(async move {
         #[cfg(windows)]
-        let monitor = monitor; // keep the trace alive for the task's lifetime
+        let byte_monitor = byte_monitor; // keep the ETW trace alive for the loop
         let mut ticks: u64 = 0;
 
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let tick = {
-                let mut a = agg.lock().expect("aggregator poisoned");
-                a.flush(now_ms())
-            };
+            let tick = tracker.tick(now_ms());
             engine.publish(ServerMessage::Tick(tick));
 
             ticks += 1;
-            // every 30s: drop idle apps and refresh PID->path so a reused PID
-            // stops resolving to a dead process
             if ticks % 30 == 0 {
-                if let Ok(mut a) = agg.lock() {
-                    a.prune_idle();
-                }
+                tracker.clear_cache();
                 #[cfg(windows)]
-                if let Some(m) = monitor.as_ref() {
+                if let Some(m) = byte_monitor.as_ref() {
                     m.clear_cache();
                 }
             }

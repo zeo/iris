@@ -5,6 +5,17 @@ import type { Sample } from "../components/BandwidthGraph";
 
 // shapes mirror iris-core's serialized types. AppId is a newtype over String, so
 // it arrives as a plain path string.
+export interface Endpoint {
+  addr: string;
+  port: number;
+  protocol: "tcp" | "udp";
+}
+export interface Conn {
+  remote: Endpoint;
+  local_port: number;
+  direction: "inbound" | "outbound";
+  state: "listen" | "active" | "closing";
+}
 export interface AppSample {
   app: string;
   name: string | null;
@@ -12,6 +23,8 @@ export interface AppSample {
   rate_recv: number;
   total: { sent: number; recv: number };
   connections: number;
+  online: boolean;
+  conns: Conn[];
 }
 export interface StatsTick {
   at_ms: number;

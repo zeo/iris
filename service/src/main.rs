@@ -5,6 +5,7 @@
 mod engine;
 mod monitor;
 mod server;
+mod tracker;
 #[cfg(windows)]
 mod svc;
 

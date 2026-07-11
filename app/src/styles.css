@@ -838,6 +838,82 @@ html {
   place-items: center;
   color: var(--steel-dim);
   flex: none;
+  overflow: hidden;
+}
+.tbl .app-ico img {
+  width: 16px;
+  height: 16px;
+}
+
+/* activity: expandable app rows + connection sub-rows */
+.tbl.activity .app-row {
+  cursor: pointer;
+}
+.chev {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  padding: 0;
+  flex: none;
+  transition: transform var(--t) var(--spring), color var(--t-fast);
+}
+.chev.open {
+  transform: rotate(180deg);
+  color: var(--steel);
+}
+.chev:disabled {
+  visibility: hidden;
+}
+.tbl.activity .name.offline {
+  color: var(--err);
+}
+.tbl.activity .app-row.off .num {
+  color: var(--muted);
+}
+.tbl.activity .conn-row td {
+  background: var(--recess);
+  padding-top: 5px;
+  padding-bottom: 5px;
+  font-family: var(--mono);
+  font-size: var(--fz-sm);
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+.tbl.activity .conn-row:hover td {
+  background: var(--bg1);
+}
+.conn-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 30px;
+}
+.conn-cell .dir {
+  color: var(--steel-dim);
+}
+.conn-cell .addr {
+  color: var(--text);
+}
+.tbl.activity .proto,
+.tbl.activity .state {
+  font-family: var(--mono);
+  font-size: var(--fz-cap);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.tbl.activity .local {
+  color: var(--faint);
+}
+.conn-empty {
+  padding-left: 30px !important;
+  color: var(--faint);
+  font-style: italic;
 }
 
 .table-wrap {

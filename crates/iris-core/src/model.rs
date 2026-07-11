@@ -77,6 +77,15 @@ impl ByteCounts {
     }
 }
 
+/// one open connection an app holds, for the activity row's drill-down
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Conn {
+    pub remote: Endpoint,
+    pub local_port: u16,
+    pub direction: Direction,
+    pub state: ConnState,
+}
+
 /// instantaneous per-app throughput plus cumulative totals for one sample tick.
 /// this is the unit the monitor pushes to the UI ~1/sec for the live graph and
 /// the activity table.
@@ -92,6 +101,11 @@ pub struct AppSample {
     pub total: ByteCounts,
     /// open connection count at sample time
     pub connections: u32,
+    /// whether the app has any active connection or traffic right now; false
+    /// while it lingers in the post-disconnect grace window
+    pub online: bool,
+    /// current connections, capped for the wire; empty unless the app is active
+    pub conns: Vec<Conn>,
 }
 
 /// one monitor sample tick: a wall-clock stamp plus every active app's sample

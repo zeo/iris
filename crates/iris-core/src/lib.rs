@@ -20,7 +20,7 @@ pub use alert::{Alert, AlertKind};
 pub use engine::{FirewallController, MonitorSink, NetworkMonitor};
 pub use error::{EngineError, EngineResult};
 pub use model::{
-    AppId, AppSample, ByteCounts, ConnState, Direction, Endpoint, LiveConnection, ProcessKey,
+    AppId, AppSample, ByteCounts, Conn, ConnState, Direction, Endpoint, LiveConnection, ProcessKey,
     Protocol, StatsTick,
 };
 pub use rule::{Rule, RuleAction, StoredRule};

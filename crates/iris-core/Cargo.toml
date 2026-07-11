@@ -10,3 +10,6 @@ description = "platform-neutral domain models and engine traits for iris"
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

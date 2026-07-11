@@ -10,12 +10,14 @@
 pub mod aggregate;
 pub mod alert;
 pub mod engine;
+pub mod enrich;
 pub mod error;
 pub mod model;
 pub mod rule;
 pub mod usage;
 
 pub use aggregate::{Aggregator, PidSample};
+pub use enrich::{Annotation, AnnotationValue, EnrichTarget, Enricher, Observer, Severity, TargetKind};
 pub use alert::{Alert, AlertKind};
 pub use engine::{FirewallController, MonitorSink, NetworkMonitor};
 pub use error::{EngineError, EngineResult};

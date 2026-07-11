@@ -15,5 +15,7 @@ pub use codec::{encode, read_frame, write_frame, CodecError, MAX_FRAME_LEN};
 pub use message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 
 /// the named-pipe path the service listens on and the UI connects to. the
-/// service applies a DACL restricting it to the interactive user.
+/// service applies a DACL that grants access to interactively-logged-on users
+/// (the UI's context) and admins, and a medium integrity label so sandboxed
+/// low-integrity processes cannot reach it.
 pub const PIPE_NAME: &str = r"\\.\pipe\iris-engine";

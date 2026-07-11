@@ -17,9 +17,12 @@ pub use interprocess::local_socket::tokio::{Listener, RecvHalf, SendHalf, Stream
 /// bind the service listener to the iris pipe.
 ///
 /// on Windows the pipe carries an explicit security descriptor: full control to
-/// SYSTEM and Administrators, read/write to authenticated users, and a medium
-/// integrity label so the unprivileged UI can connect to a pipe owned by the
-/// LocalSystem service while low-integrity (sandboxed) processes cannot.
+/// SYSTEM and Administrators, read/write to interactively-logged-on users (which
+/// the desktop UI is), and a medium integrity label so the unprivileged UI can
+/// connect to a pipe owned by the LocalSystem service while low-integrity
+/// (sandboxed) processes cannot. granting the INTERACTIVE SID rather than all
+/// authenticated users keeps another user's sessions and non-interactive logons
+/// (network, batch, service) off the pipe on a multi-user machine.
 pub fn listen() -> io::Result<Listener> {
     let name = PIPE_NAME.to_fs_name::<GenericFilePath>()?;
     let opts = ListenerOptions::new().name(name);
@@ -30,7 +33,7 @@ pub fn listen() -> io::Result<Listener> {
         use interprocess::os::windows::security_descriptor::SecurityDescriptor;
         use widestring::U16CString;
 
-        const SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)S:(ML;;NW;;;ME)";
+        const SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)S:(ML;;NW;;;ME)";
         let wide = U16CString::from_str(SDDL)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let sd = SecurityDescriptor::deserialize(wide.as_ucstr())?;

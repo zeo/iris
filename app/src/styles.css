@@ -1201,8 +1201,118 @@ html {
   white-space: nowrap;
   max-width: 52ch;
 }
-.row .grow {
+.grow {
   flex: 1;
+}
+.row.dim {
+  opacity: 0.55;
+}
+.row .tag,
+.picker .block-tag {
+  font-family: var(--mono);
+  font-size: var(--fz-cap);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 99px;
+  border: 1px solid var(--line2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.row .tag.block {
+  color: #e7b3a8;
+  border-color: #6e3b34;
+  background: linear-gradient(180deg, #3a2825, #2a1e1c);
+}
+.row .tag.allow {
+  color: var(--ok);
+}
+.iconbtn.danger:hover {
+  background: #b23a2c;
+  color: #fff;
+}
+
+/* the block toggle on activity app rows */
+.block-btn {
+  width: 24px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  opacity: 0;
+  flex: none;
+  transition: opacity var(--t-fast), color var(--t-fast), background var(--t-fast);
+}
+.app-row:hover .block-btn {
+  opacity: 1;
+}
+.block-btn:hover {
+  color: var(--err);
+  background: var(--surf2);
+}
+.block-btn.on {
+  opacity: 1;
+  color: var(--err);
+  border-color: #6e3b34;
+  background: linear-gradient(180deg, #3a2825, #2a1e1c);
+}
+.tbl.activity .name.blocked {
+  color: var(--err);
+  text-decoration: line-through;
+  text-decoration-color: rgba(207, 106, 86, 0.6);
+}
+
+/* protect add-rule picker */
+.picker {
+  padding: var(--s3);
+  margin-bottom: var(--s4);
+}
+.picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--s2);
+}
+.picker-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 7px var(--s2);
+  border: 0;
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--ui);
+  font-size: var(--fz-ui);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--t-fast);
+}
+.picker-row:hover {
+  background: var(--surf);
+}
+.picker-row .block-tag {
+  color: #e7b3a8;
+  border-color: #6e3b34;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.picker-empty {
+  padding: var(--s3);
+  color: var(--faint);
+  font-size: var(--fz-ui);
+  text-align: center;
 }
 
 /* empty states — honest, and quietly alive */

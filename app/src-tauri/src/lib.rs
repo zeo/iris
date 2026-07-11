@@ -15,16 +15,23 @@ pub fn run() {
         )
         .init();
 
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(ipc::StatusState::default())
+        .manage(ipc::Commander(cmd_tx))
         .invoke_handler(tauri::generate_handler![
             ipc::engine_status,
+            ipc::list_rules,
+            ipc::add_rule,
+            ipc::remove_rule,
+            ipc::set_rule_enabled,
             net::reverse_dns,
             icon::app_icon
         ])
-        .setup(|app| {
-            ipc::spawn(app.handle().clone());
+        .setup(move |app| {
+            ipc::spawn(app.handle().clone(), cmd_rx);
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -33,14 +33,16 @@ impl Rule {
     }
 }
 
-/// a rule as stored, carrying the platform-assigned filter identity so it can be
-/// re-applied on service restart and deleted by id
+/// a rule as stored, carrying the platform-assigned filter identities so it can
+/// be re-applied on service restart and deleted by id
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredRule {
     pub id: i64,
     pub rule: Rule,
-    /// opaque platform filter id (WFP filter id on windows); None until applied
-    pub filter_id: Option<u64>,
+    /// opaque platform filter ids (one WFP filter per IP family); empty when the
+    /// rule is disabled or not applied
+    #[serde(default)]
+    pub filter_ids: Vec<u64>,
     /// whether the rule is currently enforced in the OS
     pub enabled: bool,
 }

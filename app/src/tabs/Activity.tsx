@@ -3,6 +3,7 @@ import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import { ConnDetails } from "../components/ConnDetails";
 import { engine, type AppSample, type Conn } from "../lib/engine";
+import { blockApp, isBlocked, unblockApp } from "../lib/rules";
 import { bytes, rate } from "../lib/format";
 
 function fileName(path: string): string {
@@ -137,7 +138,19 @@ export function Activity() {
                             <Icon name="chevron" size={12} />
                           </button>
                           <AppIcon path={app.app} />
-                          <span class="name" classList={{ offline: !app.online }}>{label(app)}</span>
+                          <span class="name" classList={{ offline: !app.online, blocked: isBlocked(app.app) }}>{label(app)}</span>
+                          <span class="grow" />
+                          <button
+                            class="block-btn"
+                            classList={{ on: isBlocked(app.app) }}
+                            title={isBlocked(app.app) ? "unblock" : "block"}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              isBlocked(app.app) ? unblockApp(app.app) : blockApp(app.app);
+                            }}
+                          >
+                            <Icon name="block" size={13} />
+                          </button>
                         </div>
                       </td>
                       <td class="num">{rate(app.rate_recv)}</td>

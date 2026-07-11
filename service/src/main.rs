@@ -4,12 +4,15 @@
 
 mod engine;
 mod monitor;
+mod rules;
 mod server;
 mod tracker;
 #[cfg(windows)]
 mod svc;
 
 use engine::Engine;
+use rules::RuleStore;
+use std::sync::{Arc, Mutex};
 
 fn main() -> anyhow::Result<()> {
     let console = std::env::args().any(|a| a == "--console");
@@ -44,6 +47,7 @@ fn run_console() -> anyhow::Result<()> {
     rt.block_on(async {
         let engine = Engine::new();
         monitor::spawn(engine.clone());
-        server::serve(engine).await
+        let rules = Arc::new(Mutex::new(RuleStore::new()));
+        server::serve(engine, rules).await
     })
 }

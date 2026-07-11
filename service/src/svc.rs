@@ -63,8 +63,9 @@ fn run_service() -> anyhow::Result<()> {
     rt.block_on(async {
         let engine = Engine::new();
         crate::monitor::spawn(engine.clone());
+        let rules = std::sync::Arc::new(std::sync::Mutex::new(crate::rules::RuleStore::new()));
         tokio::select! {
-            r = server::serve(engine) => {
+            r = server::serve(engine, rules) => {
                 if let Err(e) = r {
                     tracing::error!("serve loop failed: {e}");
                 }

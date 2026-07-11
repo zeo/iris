@@ -1,10 +1,33 @@
-import { createSignal } from "solid-js";
+import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { Icon } from "../components/Icon";
+import { AppIcon } from "../components/AppIcon";
+import { engine } from "../lib/engine";
+import { blockApp, refreshRules, removeRule, rules, setRuleEnabled } from "../lib/rules";
 
-// per-app allow/block rules (GlassWire "Protect"). the rule list, add-rule flow,
-// and per-app toggles wire to the WFP rule manager over IPC.
+function fileName(path: string): string {
+  const seg = path.split(/[\\/]/).pop();
+  return seg && seg.length ? seg : path;
+}
+
+// per-app allow/block rules (GlassWire "Protect"), enforced at the Windows
+// Filtering Platform. blocking also works from the Activity tab.
 export function Protect() {
   const [q, setQ] = createSignal("");
+  const [adding, setAdding] = createSignal(false);
+  onMount(refreshRules);
+
+  const list = createMemo(() => {
+    const needle = q().trim().toLowerCase();
+    const r = rules();
+    return needle ? r.filter((x) => x.rule.app.includes(needle)) : r;
+  });
+  const blockedCount = () => rules().filter((r) => r.enabled && r.rule.action === "block").length;
+
+  // apps not already covered by a rule, offered in the add picker
+  const candidates = createMemo(() => {
+    const have = new Set(rules().map((r) => r.rule.app));
+    return engine.apps().filter((a) => !have.has(a.app));
+  });
 
   return (
     <section>
@@ -16,13 +39,9 @@ export function Protect() {
         <div class="actions">
           <label class="field">
             <Icon name="search" />
-            <input
-              placeholder="find an app…"
-              value={q()}
-              onInput={(e) => setQ(e.currentTarget.value)}
-            />
+            <input placeholder="find a rule…" value={q()} onInput={(e) => setQ(e.currentTarget.value)} />
           </label>
-          <button class="btn" title="add a rule">
+          <button class="btn" onClick={() => setAdding((v) => !v)}>
             <Icon name="plus" />
             Add rule
           </button>
@@ -30,28 +49,75 @@ export function Protect() {
       </div>
 
       <div class="tiles">
-        <div class="tile">
-          <div class="k">enforced rules</div>
-          <div class="v">0</div>
-        </div>
-        <div class="tile">
-          <div class="k">blocked apps</div>
-          <div class="v">0</div>
-        </div>
-        <div class="tile">
-          <div class="k">mode</div>
-          <div class="v" style={{ "font-size": "var(--fz-h)" }}>Ask</div>
-        </div>
+        <div class="tile"><div class="k">rules</div><div class="v">{rules().length}</div></div>
+        <div class="tile"><div class="k">blocked apps</div><div class="v">{blockedCount()}</div></div>
+        <div class="tile"><div class="k">enforcement</div><div class="v" style={{ "font-size": "var(--fz-h)" }}>WFP</div></div>
       </div>
 
-      <div class="empty">
-        <Icon name="shield" class="glyph" size={44} />
-        <h3>No rules yet</h3>
-        <p>
-          Every app that reaches the network shows up here. Block one and Iris stops it at the
-          Windows filtering layer — the rule holds even while this window is closed.
-        </p>
-      </div>
+      <Show when={adding()}>
+        <div class="panel picker">
+          <div class="picker-head">
+            <span class="label">block an active app</span>
+            <button class="iconbtn" onClick={() => setAdding(false)} aria-label="close"><Icon name="x" /></button>
+          </div>
+          <div class="picker-list">
+            <For each={candidates()} fallback={<div class="picker-empty">no other active apps</div>}>
+              {(a) => (
+                <button class="picker-row" onClick={() => blockApp(a.app)}>
+                  <AppIcon path={a.app} />
+                  <span class="name">{a.name ?? fileName(a.app)}</span>
+                  <span class="grow" />
+                  <span class="block-tag"><Icon name="block" size={13} /> block</span>
+                </button>
+              )}
+            </For>
+          </div>
+        </div>
+      </Show>
+
+      <Show
+        when={list().length > 0}
+        fallback={
+          <div class="empty">
+            <Icon name="shield" class="glyph" size={44} />
+            <h3>No rules yet</h3>
+            <p>
+              Block an app here or from Activity and Iris stops it at the Windows filtering layer.
+              The rule holds even while this window is closed.
+            </p>
+          </div>
+        }
+      >
+        <div class="rows">
+          <For each={list()}>
+            {(r) => (
+              <div class="row" classList={{ dim: !r.enabled }}>
+                <AppIcon path={r.rule.app} />
+                <div class="meta">
+                  <span class="name">{fileName(r.rule.app)}</span>
+                  <span class="path">{r.rule.app}</span>
+                </div>
+                <span class="grow" />
+                <span class="tag" classList={{ block: r.rule.action === "block", allow: r.rule.action === "allow" }}>
+                  {r.rule.action} · {r.rule.direction === "outbound" ? "out" : "in"}
+                </span>
+                <button
+                  class="rocker"
+                  role="switch"
+                  aria-checked={r.enabled}
+                  onClick={() => setRuleEnabled(r.id, !r.enabled)}
+                  title={r.enabled ? "enforcing" : "paused"}
+                >
+                  <span class="knob" />
+                </button>
+                <button class="iconbtn danger" onClick={() => removeRule(r.id)} aria-label="remove rule">
+                  <Icon name="x" />
+                </button>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
     </section>
   );
 }

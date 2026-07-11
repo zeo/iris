@@ -11,6 +11,8 @@ mod dns;
 mod etw;
 #[cfg(windows)]
 mod proc;
+#[cfg(windows)]
+mod wfp;
 
 #[cfg(windows)]
 pub use conn::ConnCounter;
@@ -18,3 +20,5 @@ pub use conn::ConnCounter;
 pub use dns::{new_map, DnsMap};
 #[cfg(windows)]
 pub use etw::Monitor;
+#[cfg(windows)]
+pub use wfp::Wfp;

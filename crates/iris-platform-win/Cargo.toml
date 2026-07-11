@@ -22,6 +22,7 @@ windows = { version = "0.62", features = [
     "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_System_Diagnostics_Etw",
+    "Win32_System_RemoteDesktop",
     "Win32_System_Rpc",
     "Win32_System_Services",
 ] }

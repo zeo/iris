@@ -44,17 +44,15 @@ export function Titlebar(props: {
           <Sparkline data={engine.ring} />
         </div>
       </div>
-      <div class="tools">
+      <div class="wc">
         <button
-          class="iconbtn"
+          class="theme"
           onClick={props.onCycleTheme}
           aria-label={`theme: ${props.theme}`}
           title={`theme: ${props.theme}`}
         >
           <Icon name={themeIcon()} />
         </button>
-      </div>
-      <div class="wc">
         <button class="w-min" onClick={() => win()?.minimize()} aria-label="minimize">
           <Icon name="minimize" />
         </button>

@@ -1,8 +1,8 @@
-import { createResource, createSignal, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Icon } from "./Icon";
-import type { Conn } from "../lib/engine";
+import { engine, fetchEnrichment, type Annotation, type Conn } from "../lib/engine";
 
 // the connection detail drawer: properties + tools for one connection, opened by
 // clicking a connection row. rules are handled in Protect, so this omits them.
@@ -15,6 +15,20 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
     () => props.conn.remote.addr,
     (ip) => invoke<string | null>("geo_country", { ip }),
   );
+  // pull any cached engine annotations for this endpoint; live pushes keep the
+  // store current while the drawer is open
+  createEffect(() => {
+    fetchEnrichment([props.conn.remote.addr]);
+  });
+  const annotations = () => engine.annotationsFor(props.conn.remote.addr);
+  const annText = (a: Annotation): string => {
+    if ("Text" in a.value) return a.value.Text;
+    if ("Badge" in a.value) return a.value.Badge;
+    return a.value.Link.label;
+  };
+  const annClick = (a: Annotation) => {
+    if ("Link" in a.value) openUrl(a.value.Link.url);
+  };
 
   const [killed, setKilled] = createSignal(false);
   const [killErr, setKillErr] = createSignal("");
@@ -80,6 +94,19 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
             {country() ?? <span class="unresolved">Unresolved</span>}
           </Show>,
         )}
+        <For each={annotations()}>
+          {(a) => (
+            <div class="prow" classList={{ warn: a.severity === "warn", danger: a.severity === "danger" }}>
+              <span class="pk">{a.label}</span>
+              <Show
+                when={"Link" in a.value}
+                fallback={<span class="pv">{annText(a)}</span>}
+              >
+                <button class="pv linklike" onClick={() => annClick(a)}>{annText(a)}</button>
+              </Show>
+            </div>
+          )}
+        </For>
         {row("State", props.conn.state)}
       </div>
 

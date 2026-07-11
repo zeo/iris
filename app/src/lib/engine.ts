@@ -47,6 +47,27 @@ interface Status {
   version: string | null;
 }
 
+// mirrors iris-core's enrichment types (externally-tagged enums over the wire)
+export type EnrichTarget = { Endpoint: string } | { App: string };
+export type AnnotationValue =
+  | { Text: string }
+  | { Badge: string }
+  | { Link: { label: string; url: string } };
+export interface Annotation {
+  key: string;
+  label: string;
+  value: AnnotationValue;
+  severity: "info" | "warn" | "danger";
+}
+interface EnrichmentEvent {
+  target: EnrichTarget;
+  annotations: Annotation[];
+}
+
+function endpointIp(t: EnrichTarget): string | null {
+  return "Endpoint" in t ? t.Endpoint : null;
+}
+
 // how many live samples the in-memory ring keeps for the graph and sparkline
 // (300 == five minutes at one tick per second). longer ranges come from history.
 const RING = 300;
@@ -55,8 +76,20 @@ const [online, setOnline] = createSignal(false);
 const [version, setVersion] = createSignal<string | null>(null);
 const [tick, setTick] = createSignal<StatsTick | null>(null);
 const [ring, setRing] = createSignal<Sample[]>([]);
+// annotations resolved by the engine, keyed by endpoint ip
+const [enrichment, setEnrichment] = createSignal<Map<string, Annotation[]>>(new Map());
 
 let started = false;
+
+function mergeEnrichment(target: EnrichTarget, annotations: Annotation[]) {
+  const ip = endpointIp(target);
+  if (!ip) return;
+  setEnrichment((m) => {
+    const next = new Map(m);
+    next.set(ip, annotations);
+    return next;
+  });
+}
 
 // register the Tauri event listeners once. safe to call from any component's
 // onMount; subsequent calls are no-ops.
@@ -82,6 +115,10 @@ export function initEngine() {
     });
   });
 
+  listen<EnrichmentEvent>("engine-enrichment", (e) => {
+    mergeEnrichment(e.payload.target, e.payload.annotations);
+  });
+
   // seed from managed state so a status event that fired before this listener
   // registered is not missed
   invoke<Status>("engine_status")
@@ -92,11 +129,23 @@ export function initEngine() {
     .catch(() => {});
 }
 
+// fetch any cached annotations for these ips now; live pushes keep them current
+export async function fetchEnrichment(ips: string[]) {
+  try {
+    const list = await invoke<EnrichmentEvent[]>("get_enrichment", { ips });
+    for (const e of list) mergeEnrichment(e.target, e.annotations);
+  } catch {
+    // engine offline; the live push path fills these in once it connects
+  }
+}
+
 export const engine = {
   online,
   version,
   tick,
   ring,
+  enrichment,
+  annotationsFor: (ip: string): Annotation[] => enrichment().get(ip) ?? [],
   down: () => tick()?.total_rate_recv ?? 0,
   up: () => tick()?.total_rate_sent ?? 0,
   apps: () => tick()?.apps ?? [],

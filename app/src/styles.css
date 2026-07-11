@@ -1170,6 +1170,26 @@ html {
 .unresolved {
   color: var(--faint);
 }
+/* engine annotation rows: severity tints the value, links stay understated */
+.prow.warn .pv {
+  color: var(--steel);
+}
+.prow.danger .pv {
+  color: var(--err);
+}
+.prow .pv.linklike {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: var(--steel);
+  font-family: var(--mono);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.prow .pv.linklike:hover {
+  color: var(--live);
+}
 .tool-row {
   display: flex;
   gap: var(--s2);

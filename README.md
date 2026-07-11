@@ -45,7 +45,13 @@ pnpm tauri dev      # run the UI against a dev build
 pnpm tauri build    # produce an installer
 ```
 
+## Credits
+
+IP-to-country data is DB-IP's [IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite),
+licensed under CC-BY-4.0.
+
 ## Status
 
-Early. The shell, design system, and the core/ipc crates are in place; the
-engine, live data, and rule enforcement are landing next.
+Working: the instrument shell, live per-app/per-process Activity with connection
+drill-down and host names, the scrolling bandwidth graph, WFP allow/block rules,
+usage history, first-seen alerts with tray toasts, and the background service.

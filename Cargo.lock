@@ -1800,6 +1800,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
+name = "ipnetwork"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf466541e9d546596ee94f9f69590f89473455f88372423e0008fc1a7daf100e"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "iris-app"
 version = "0.1.0"
 dependencies = [
@@ -1808,6 +1817,7 @@ dependencies = [
  "dns-lookup",
  "iris-core",
  "iris-ipc",
+ "maxminddb",
  "png 0.17.16",
  "serde",
  "serde_json",
@@ -2151,6 +2161,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
+]
+
+[[package]]
+name = "maxminddb"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6087e5d8ea14861bb7c7f573afbc7be3798d3ef0fae87ec4fd9a4de9a127c3c"
+dependencies = [
+ "ipnetwork",
+ "log",
+ "memchr",
+ "serde",
 ]
 
 [[package]]

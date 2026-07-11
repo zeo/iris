@@ -11,6 +11,10 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
     () => props.conn.remote.addr,
     (ip) => invoke<string | null>("reverse_dns", { ip }),
   );
+  const [country] = createResource(
+    () => props.conn.remote.addr,
+    (ip) => invoke<string | null>("geo_country", { ip }),
+  );
 
   const [killed, setKilled] = createSignal(false);
   const [killErr, setKillErr] = createSignal("");
@@ -64,7 +68,12 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
             {rdns() ?? <span class="unresolved">Unresolved</span>}
           </Show>,
         )}
-        {row("Country", <span class="unresolved">Unresolved</span>)}
+        {row(
+          "Country",
+          <Show when={!country.loading} fallback={<span class="resolving">…</span>}>
+            {country() ?? <span class="unresolved">Unresolved</span>}
+          </Show>,
+        )}
         {row("State", props.conn.state)}
       </div>
 

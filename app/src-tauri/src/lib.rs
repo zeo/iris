@@ -6,6 +6,7 @@ mod geo;
 mod icon;
 mod ipc;
 mod net;
+mod report;
 mod startup;
 mod svcctl;
 
@@ -48,6 +49,7 @@ pub fn run() {
             svcctl::uninstall_service,
             startup::get_launch_at_login,
             startup::set_launch_at_login,
+            report::export_csv,
             icon::app_icon
         ])
         .setup(move |app| {

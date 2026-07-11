@@ -1,10 +1,17 @@
-import { createMemo, createResource, For, Show } from "solid-js";
+import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import { engine } from "../lib/engine";
 import { persisted } from "../lib/persist";
 import { bytes } from "../lib/format";
+
+// quote a CSV field when it holds a comma, quote, or newline
+function csvCell(v: string | number): string {
+  const s = String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
 
 const SPANS = ["day", "week", "month"] as const;
 type Span = (typeof SPANS)[number];
@@ -70,6 +77,27 @@ export function Usage() {
   const totalUp = () => list().reduce((n, a) => n + a.sent, 0);
   const peak = createMemo(() => list().reduce((m, a) => Math.max(m, a.sent + a.recv), 1));
 
+  const [exportErr, setExportErr] = createSignal("");
+  const exportCsv = async () => {
+    setExportErr("");
+    const header = ["app", "path", "sent_bytes", "recv_bytes", "total_bytes"];
+    const lines = [header.join(",")];
+    for (const a of list()) {
+      lines.push(
+        [fileName(a.app), a.app, a.sent, a.recv, a.sent + a.recv].map(csvCell).join(","),
+      );
+    }
+    try {
+      const path = await invoke<string>("export_csv", {
+        name: `iris-usage-${span()}.csv`,
+        contents: lines.join("\n"),
+      });
+      await revealItemInDir(path);
+    } catch (e) {
+      setExportErr(String(e));
+    }
+  };
+
   return (
     <section>
       <div class="head">
@@ -85,8 +113,14 @@ export function Usage() {
               )}
             </For>
           </div>
+          <button class="btn" onClick={exportCsv} disabled={list().length === 0} title="Export this period to CSV in Downloads">
+            <Icon name="download" /> Export
+          </button>
         </div>
       </div>
+      <Show when={exportErr()}>
+        <div class="tool-err">{exportErr()}</div>
+      </Show>
 
       <div class="tiles">
         <div class="tile"><div class="k">downloaded</div><div class="v">{bytes(totalDown())}</div></div>

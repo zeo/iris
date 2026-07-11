@@ -18,6 +18,7 @@
     "core:window:allow-is-maximized",
     "opener:default",
     "opener:allow-open-url",
+    "opener:allow-reveal-item-in-dir",
     "notification:default",
     "updater:default",
     "process:default",

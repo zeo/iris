@@ -21,6 +21,12 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
   const remote = () => `${props.conn.remote.addr}:${props.conn.remote.port}`;
   const copy = () => navigator.clipboard?.writeText(remote()).catch(() => {});
   const whois = () => openUrl(`https://who.is/whois-ip/ip-address/${props.conn.remote.addr}`);
+  const virustotal = () =>
+    openUrl(
+      props.conn.host
+        ? `https://www.virustotal.com/gui/domain/${props.conn.host}`
+        : `https://www.virustotal.com/gui/ip-address/${props.conn.remote.addr}`,
+    );
   const kill = async () => {
     setKillErr("");
     try {
@@ -82,6 +88,7 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
         <div class="tool-row">
           <button class="btn" onClick={copy}>Copy address</button>
           <button class="btn" onClick={whois}>Whois</button>
+          <button class="btn" onClick={virustotal}>VirusTotal</button>
           <button class="btn" data-variant="danger" onClick={kill} disabled={killed()}>
             <Icon name="power" /> {killed() ? "Killed" : "Kill connection"}
           </button>

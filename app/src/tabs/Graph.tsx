@@ -62,7 +62,7 @@ export function Graph() {
         <b>{range()}</b>
         <span class="sp" />
         <span class="label">peak</span>
-        <b>{peak() > 0 ? rate(peak()) : "—"}</b>
+        <b>{peak() > 0 ? rate(peak()) : "–"}</b>
       </div>
 
       <div class="top-apps">

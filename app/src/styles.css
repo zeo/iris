@@ -1,4 +1,4 @@
-/* iris — a precision instrument machined from one billet of steel. milled
+/* iris, a precision instrument machined from one billet of steel. milled
    faceplate, engraved labels, recessed data wells, physical bevel keys,
    illuminated status lamps. PURE monochrome metal: true neutral greys, black to
    white, zero hue in the chrome (a single restrained red is kept only for danger
@@ -21,7 +21,7 @@
   --muted: #969696;
   --faint: #616161;
 
-  /* steel — brushed chrome, neutral silver. carries active state / focus. */
+  /* steel: brushed chrome, neutral silver. carries active state / focus. */
   --steel: #cfcfcf;
   --steel-dim: #9e9e9e;
   --steel-deep: #6f6f6f;
@@ -35,7 +35,7 @@
   --out: #79c48f; /* outgoing connections */
   --in: #6fa8c9; /* incoming connections */
 
-  /* machined metal gradients — neutral greys */
+  /* machined metal gradients, neutral greys */
   --chrome: linear-gradient(180deg, #3f3f3f 0%, #262626 46%, #1d1d1d 54%, #12121200 100%);
   --key: linear-gradient(180deg, #2d2d2d, #1d1d1d);
   --key-hover: linear-gradient(180deg, #363636, #232323);
@@ -47,7 +47,7 @@
   /* brushed grain */
   --grain: repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 3px);
 
-  /* geometry — macOS-soft radii */
+  /* geometry: macOS-soft radii */
   --tb: 34px;
   --bar: 42px;
   --sb: 24px;
@@ -63,7 +63,7 @@
   --s6: 24px;
   --s7: 32px;
 
-  /* type — a designed humanist UI (SF on mac, bundled Hanken elsewhere), an
+  /* type: a designed humanist UI (SF on mac, bundled Hanken elsewhere), an
      engraved technical mono, a serif italic wordmark */
   --ui: -apple-system, "SF Pro Text", "SF Pro Display", "Hanken Grotesk", "Segoe UI", system-ui, sans-serif;
   --mono: "Geist Mono", ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
@@ -88,7 +88,7 @@
   --press: inset 0 2px 4px rgba(0, 0, 0, 0.6);
   --engrave: 0 1px 0 rgba(0, 0, 0, 0.5);
 
-  /* motion — springs that overshoot a touch, and a smooth glide */
+  /* motion: springs that overshoot a touch, and a smooth glide */
   --t-fast: 0.11s;
   --t: 0.18s;
   --t-slow: 0.3s;
@@ -99,7 +99,7 @@
   color-scheme: dark;
 }
 
-/* light theme — brushed nickel over a pewter deck. neutral greyscale, no hue. */
+/* light theme: brushed nickel over a pewter deck. neutral greyscale, no hue. */
 [data-theme="light"] {
   color-scheme: light;
   --bg: #c9c9c9;
@@ -745,7 +745,7 @@ html {
   transition: width var(--t-slow) var(--glide);
 }
 
-/* the scope — bandwidth graph well */
+/* the scope: bandwidth graph well */
 .scope {
   position: relative;
   border: 1px solid var(--line);
@@ -1069,7 +1069,7 @@ html {
   cursor: pointer;
 }
 
-/* connection detail drawer — sized to its content, docked top-right */
+/* connection detail drawer, sized to its content, docked top-right */
 .details {
   position: fixed;
   top: calc(var(--tb) + var(--bar) + var(--s4));
@@ -1516,7 +1516,7 @@ html {
   color: var(--muted);
 }
 
-/* empty states — honest, and quietly alive */
+/* empty states: honest, and quietly alive */
 .empty {
   display: flex;
   flex-direction: column;

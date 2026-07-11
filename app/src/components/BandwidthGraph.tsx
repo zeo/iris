@@ -115,7 +115,7 @@ export function BandwidthGraph(props: {
       const x = (i: number) => (i / (n - 1)) * w;
       const y = (v: number) => h - (v / peak) * (h - 4) - 1;
 
-      // received — steel area
+      // received, steel area
       ctx.beginPath();
       ctx.moveTo(0, h);
       samples.forEach((s, i) => ctx.lineTo(x(i), y(s.recv)));
@@ -132,7 +132,7 @@ export function BandwidthGraph(props: {
       samples.forEach((s, i) => (i ? ctx.lineTo(x(i), y(s.recv)) : ctx.moveTo(x(i), y(s.recv))));
       ctx.stroke();
 
-      // sent — brighter thin line
+      // sent, brighter thin line
       ctx.strokeStyle = css(canvas, "--live") || "#f2ecdc";
       ctx.globalAlpha = 0.85;
       ctx.lineWidth = 1;

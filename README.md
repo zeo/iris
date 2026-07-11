@@ -12,14 +12,14 @@ keep running with the window closed.
 
 ## What it does
 
-- **Protect** — per-app allow / block rules enforced at the Windows Filtering
+- **Protect**: per-app allow and block rules enforced at the Windows Filtering
   Platform, so a blocked app stays blocked whether or not the UI is open.
-- **Activity** — a live table of every app's up / down rate, open connections,
+- **Activity**: a live table of every app's up and down rate, open connections,
   and the remote endpoints it is talking to.
-- **Graph** — a scrolling picture of bandwidth over time, total and per app.
-- **Usage** — rolling history of how much each app has sent and received,
+- **Graph**: a scrolling picture of bandwidth over time, total and per app.
+- **Usage**: rolling history of how much each app has sent and received,
   downsampled as it ages so the store stays small.
-- **Alerts** — the first time a new program reaches the network, Iris flags it
+- **Alerts**: the first time a new program reaches the network, Iris flags it
   and raises a tray notification.
 
 ## Layout

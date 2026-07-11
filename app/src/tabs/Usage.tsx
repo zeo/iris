@@ -88,7 +88,7 @@ export function Usage() {
         <div class="tile"><div class="k">uploaded</div><div class="v">{bytes(totalUp())}</div></div>
         <div class="tile">
           <div class="k">top app</div>
-          <div class="v" style={{ "font-size": "var(--fz-h)" }}>{list()[0] ? fileName(list()[0].app) : "—"}</div>
+          <div class="v" style={{ "font-size": "var(--fz-h)" }}>{list()[0] ? fileName(list()[0].app) : "–"}</div>
         </div>
       </div>
 

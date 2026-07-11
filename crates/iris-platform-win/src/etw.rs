@@ -51,7 +51,7 @@ impl Monitor {
     pub fn start(agg: Arc<Mutex<Aggregator>>, dns_map: DnsMap) -> anyhow::Result<Monitor> {
         let cache = Arc::new(Mutex::new(PidCache::new()));
 
-        // byte counts — required
+        // byte counts, required
         let net_agg = agg;
         let net_cache = cache.clone();
         let net_cb = move |record: &EventRecord, locator: &SchemaLocator| {
@@ -72,7 +72,7 @@ impl Monitor {
             .map_err(|e| anyhow::anyhow!("failed to start ETW network trace (admin required): {e:?}"))?;
         tracing::info!("ETW network trace running");
 
-        // DNS names — best effort; the connection view still works on raw ip
+        // DNS names, best effort; the connection view still works on raw ip
         let dns_cb = move |record: &EventRecord, locator: &SchemaLocator| {
             on_dns_event(record, locator, &dns_map);
         };

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Iris — firewall and network monitor"
+description = "Iris, a firewall and network monitor"
 
 [lib]
 name = "iris_app_lib"

@@ -2,14 +2,16 @@
 //! the background with no console window and comes up on boot. invoked by the
 //! installer (and available as `iris-engine --install` / `--uninstall`).
 
-use std::ffi::OsStr;
+use std::ffi::{c_void, OsStr};
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
-use windows::core::PCWSTR;
+use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::System::Services::{
-    ChangeServiceConfigW, CloseServiceHandle, ControlService, CreateServiceW, DeleteService,
-    OpenSCManagerW, OpenServiceW, StartServiceW, SC_MANAGER_ALL_ACCESS, SERVICE_ALL_ACCESS,
-    SERVICE_AUTO_START, SERVICE_CONTROL_STOP, SERVICE_ERROR_NORMAL, SERVICE_STATUS,
+    ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
+    CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, StartServiceW, SC_ACTION,
+    SC_ACTION_RESTART, SC_HANDLE, SC_MANAGER_ALL_ACCESS, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
+    SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, SERVICE_CONTROL_STOP,
+    SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW, SERVICE_FAILURE_ACTIONS_FLAG, SERVICE_STATUS,
     SERVICE_WIN32_OWN_PROCESS,
 };
 
@@ -62,12 +64,46 @@ pub fn install() -> anyhow::Result<()> {
                 PCWSTR::null(),
             )?,
         };
+        configure_recovery(svc);
         let _ = StartServiceW(svc, None);
         let _ = CloseServiceHandle(svc);
         let _ = CloseServiceHandle(scm);
     }
     tracing::info!("service '{SERVICE_NAME}' installed and started");
     Ok(())
+}
+
+/// tell the SCM to restart the engine on failure (5s, 10s, then 30s backoff,
+/// counter reset after a day of health) and to treat our non-zero error exit as
+/// a failure, not only a hard process crash. best effort: a monitor that will
+/// not auto-restart is worse than one whose recovery config did not take, so a
+/// failure here never blocks the install.
+unsafe fn configure_recovery(svc: SC_HANDLE) {
+    let mut actions = [
+        SC_ACTION { Type: SC_ACTION_RESTART, Delay: 5_000 },
+        SC_ACTION { Type: SC_ACTION_RESTART, Delay: 10_000 },
+        SC_ACTION { Type: SC_ACTION_RESTART, Delay: 30_000 },
+    ];
+    let failure_actions = SERVICE_FAILURE_ACTIONSW {
+        dwResetPeriod: 86_400,
+        lpRebootMsg: PWSTR::null(),
+        lpCommand: PWSTR::null(),
+        cActions: actions.len() as u32,
+        lpsaActions: actions.as_mut_ptr(),
+    };
+    let _ = ChangeServiceConfig2W(
+        svc,
+        SERVICE_CONFIG_FAILURE_ACTIONS,
+        Some(&failure_actions as *const _ as *const c_void),
+    );
+    let flag = SERVICE_FAILURE_ACTIONS_FLAG {
+        fFailureActionsOnNonCrashFailures: BOOL(1),
+    };
+    let _ = ChangeServiceConfig2W(
+        svc,
+        SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
+        Some(&flag as *const _ as *const c_void),
+    );
 }
 
 pub fn uninstall() -> anyhow::Result<()> {

@@ -27,12 +27,16 @@ fn service_main(_args: Vec<OsString>) {
     }
 }
 
-fn status(state: ServiceState, accepted: ServiceControlAccept) -> ServiceStatus {
+fn status(
+    state: ServiceState,
+    accepted: ServiceControlAccept,
+    exit_code: ServiceExitCode,
+) -> ServiceStatus {
     ServiceStatus {
         service_type: SERVICE_TYPE,
         current_state: state,
         controls_accepted: accepted,
-        exit_code: ServiceExitCode::Win32(0),
+        exit_code,
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,
@@ -57,27 +61,50 @@ fn run_service() -> anyhow::Result<()> {
     status_handle.set_service_status(status(
         ServiceState::Running,
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        ServiceExitCode::Win32(0),
     ))?;
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
+    let failed = rt.block_on(async {
         let engine = Engine::new();
         let store = std::sync::Arc::new(std::sync::Mutex::new(crate::open_store()));
         crate::monitor::spawn(engine.clone(), store.clone());
         let rules = std::sync::Arc::new(std::sync::Mutex::new(crate::rules::RuleStore::new()));
         tokio::select! {
             r = server::serve(engine, rules, store) => {
-                if let Err(e) = r {
-                    tracing::error!("serve loop failed: {e}");
+                match r {
+                    Err(e) => {
+                        tracing::error!("serve loop failed: {e}");
+                        true
+                    }
+                    // serve only returns Ok on a graceful shutdown path; a bare
+                    // return here means the listener ended unexpectedly
+                    Ok(()) => {
+                        tracing::error!("serve loop ended unexpectedly");
+                        true
+                    }
                 }
             }
             _ = wait_for_stop(stop_rx) => {
                 tracing::info!("stop requested");
+                false
             }
         }
     });
 
-    status_handle.set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty()))?;
+    // report a service-specific error on failure so the SCM recovery policy
+    // (restart with backoff, configured at install) actually engages; a clean
+    // stop reports success so a user-requested stop stays stopped
+    let exit_code = if failed {
+        ServiceExitCode::ServiceSpecific(1)
+    } else {
+        ServiceExitCode::Win32(0)
+    };
+    status_handle.set_service_status(status(
+        ServiceState::Stopped,
+        ServiceControlAccept::empty(),
+        exit_code,
+    ))?;
     Ok(())
 }
 

@@ -1,16 +1,28 @@
 // byte + rate formatting shared across the activity table, graph, and statusbar.
-// binary units (powers of 1024) shown with a trailing /s for rates.
+// totals use binary byte units (powers of 1024); throughput follows the user's
+// units preference (bytes/s, or bits/s the way link speeds are usually quoted).
 
-const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
+import { rateUnits } from "./settings";
+
+const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
+const BIT_UNITS = ["bit", "Kbit", "Mbit", "Gbit", "Tbit"];
+
+function scale(n: number, base: number, units: string[]): string {
+  if (n < 1) return `0 ${units[0]}`;
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(base)));
+  const v = n / Math.pow(base, i);
+  const dp = v >= 100 || i === 0 ? 0 : 1;
+  return `${v.toFixed(dp)} ${units[i]}`;
+}
 
 export function bytes(n: number): string {
-  if (n < 1) return "0 B";
-  const i = Math.min(UNITS.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
-  const v = n / Math.pow(1024, i);
-  const dp = v >= 100 || i === 0 ? 0 : 1;
-  return `${v.toFixed(dp)} ${UNITS[i]}`;
+  return scale(n, 1024, BYTE_UNITS);
 }
 
 export function rate(bytesPerSec: number): string {
+  if (rateUnits() === "bits") {
+    // bits are quoted decimally (1 Mbit/s = 10^6 bit/s)
+    return `${scale(bytesPerSec * 8, 1000, BIT_UNITS)}/s`;
+  }
   return `${bytes(bytesPerSec)}/s`;
 }

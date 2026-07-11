@@ -6,6 +6,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { showNotifications } from "./settings";
 
 export type AlertKind =
   | { kind: "new_app"; app: string }
@@ -64,6 +65,7 @@ export async function ackAll(): Promise<void> {
 }
 
 async function toast(a: Alert): Promise<void> {
+  if (!showNotifications()) return;
   const name = fileName(appOf(a));
   const isNew = a.kind.kind === "new_app";
   const title = isNew ? "New app on the network" : "Connection blocked";

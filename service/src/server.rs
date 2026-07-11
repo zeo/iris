@@ -153,6 +153,12 @@ async fn handle(
                         };
                         reply(&mut send, req, result).await?;
                     }
+                    ClientMessage::GetEnrichment { req, targets } => {
+                        let _ = &targets;
+                        // the enrichment registry is wired in the next commit;
+                        // answer now so the UI never awaits a reply that never comes
+                        reply(&mut send, req, Reply::Enrichment(Vec::new())).await?;
+                    }
                     // commands whose engine support arrives in later slices: answer
                     // rather than leave the UI awaiting a reply that never comes
                     other => {
@@ -201,6 +207,7 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::ListAlerts { req, .. }
         | ClientMessage::AckAlert { req, .. }
         | ClientMessage::KillConnection { req, .. }
+        | ClientMessage::GetEnrichment { req, .. }
         | ClientMessage::Ping { req } => Some(*req),
         ClientMessage::Hello { .. } | ClientMessage::Subscribe | ClientMessage::Unsubscribe => None,
     }

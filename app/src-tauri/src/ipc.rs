@@ -4,7 +4,10 @@
 //! request/response commands (rules today) correlated by id, so the UI can drive
 //! the privileged engine. it reconnects on its own.
 
-use iris_core::{Alert, AppId, Direction, Granularity, Rule, RuleAction, StoredRule, UsageBucket, UsageQuery};
+use iris_core::{
+    Alert, Annotation, AppId, Direction, EnrichTarget, Granularity, Rule, RuleAction, StoredRule,
+    UsageBucket, UsageQuery,
+};
 use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
 use serde::{Deserialize, Serialize};
@@ -18,6 +21,13 @@ use tokio::sync::{mpsc, oneshot};
 pub struct Status {
     pub online: bool,
     pub version: Option<String>,
+}
+
+/// forwarded to the webview when the engine resolves annotations for a target
+#[derive(Serialize, Clone)]
+pub struct EnrichmentEvent {
+    pub target: EnrichTarget,
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Default)]
@@ -229,6 +239,9 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                 match msg {
                     ServerMessage::Tick(tick) => { let _ = app.emit("engine-tick", tick); }
                     ServerMessage::Alert(alert) => { let _ = app.emit("engine-alert", alert); }
+                    ServerMessage::Enrichment { target, annotations } => {
+                        let _ = app.emit("engine-enrichment", EnrichmentEvent { target, annotations });
+                    }
                     ServerMessage::Reply { req, result } => {
                         if let Some(resp) = pending.remove(&req) {
                             let _ = resp.send(result);

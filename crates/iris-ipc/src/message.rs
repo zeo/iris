@@ -1,9 +1,13 @@
-use iris_core::{Alert, LiveConnection, Rule, StatsTick, StoredRule, UsageBucket, UsageQuery};
+use iris_core::{
+    Alert, Annotation, EnrichTarget, LiveConnection, Rule, StatsTick, StoredRule, UsageBucket,
+    UsageQuery,
+};
 use serde::{Deserialize, Serialize};
 
 /// bump when the wire shape changes incompatibly. the UI refuses to drive a
 /// service whose protocol differs, so a partial update never mismatches schemas.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// v2 added the enrichment channel (annotations for endpoints/apps).
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// a UI -> service message. every request carries a correlation `req` id the
 /// service echoes in its [`Reply`]; control messages that need no reply use 0.
@@ -30,6 +34,9 @@ pub enum ClientMessage {
         remote_addr: String,
         remote_port: u16,
     },
+    /// fetch any cached annotations for these targets, and enqueue a background
+    /// resolve for the ones not cached yet (results arrive as pushes)
+    GetEnrichment { req: u64, targets: Vec<EnrichTarget> },
     /// keepalive; service replies with the same `req`
     Ping { req: u64 },
 }
@@ -47,6 +54,12 @@ pub enum ServerMessage {
     Tick(StatsTick),
     /// durable alert push (also delivered on next connect if unacked)
     Alert(Alert),
+    /// annotations resolved for a target, pushed as enrichers finish off the
+    /// hot path (never stapled onto `Tick`)
+    Enrichment {
+        target: EnrichTarget,
+        annotations: Vec<Annotation>,
+    },
     /// correlated response to a client request
     Reply { req: u64, result: Reply },
 }
@@ -61,5 +74,7 @@ pub enum Reply {
     RuleAdded(StoredRule),
     Alerts(Vec<Alert>),
     Usage(Vec<UsageBucket>),
+    /// cached annotations, one entry per requested target that had any
+    Enrichment(Vec<(EnrichTarget, Vec<Annotation>)>),
     Error(String),
 }

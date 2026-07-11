@@ -1200,6 +1200,11 @@ html {
   font-size: var(--fz-sm);
   color: var(--err);
 }
+.tool-note {
+  margin-top: var(--s2);
+  font-size: var(--fz-sm);
+  color: var(--muted);
+}
 
 .table-wrap {
   overflow: hidden;

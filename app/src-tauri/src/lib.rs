@@ -28,6 +28,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -48,6 +49,7 @@ pub fn run() {
             rulectl::rule_add,
             rulectl::rule_remove,
             rulectl::rule_set_enabled,
+            rulectl::rule_import,
             startup::get_launch_at_login,
             startup::set_launch_at_login,
             report::save_download,

@@ -41,6 +41,47 @@ pub async fn rule_set_enabled(app: tauri::AppHandle, id: i64, enabled: bool) -> 
     crate::svcctl::run_engine_elevated(app, format!("--rule-enable {id} {enabled}")).await
 }
 
+/// pick a rules backup file and restore it in one elevated run (a single UAC
+/// prompt for the whole file). returns the rule count, or None if the picker
+/// was cancelled.
+#[cfg(windows)]
+#[tauri::command]
+pub async fn rule_import(app: tauri::AppHandle) -> Result<Option<usize>, String> {
+    use tauri::Manager;
+    use tauri_plugin_dialog::DialogExt;
+
+    let handle = app.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = handle.dialog().file().add_filter("rules backup", &["json"]);
+        // the export drops its file in Downloads, so start the picker there
+        if let Ok(dir) = handle.path().download_dir() {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.blocking_pick_file()
+    })
+    .await
+    .map_err(|e| format!("file picker failed: {e}"))?;
+
+    let Some(file) = picked else { return Ok(None) };
+    let path = file
+        .simplified()
+        .into_path()
+        .map_err(|e| format!("unusable file path: {e}"))?;
+
+    // parse before elevating so a malformed file fails with a precise error
+    // here instead of a UAC prompt followed by a bare exit code
+    let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read the file: {e}"))?;
+    if meta.len() > iris_core::BACKUP_MAX_BYTES {
+        return Err("that file is too large to be a rules backup".into());
+    }
+    let json = std::fs::read_to_string(&path).map_err(|e| format!("cannot read the file: {e}"))?;
+    let count = iris_core::parse_backup(&json)?.len();
+
+    let params = format!("--rule-import {}", quote_path(&path.to_string_lossy())?);
+    crate::svcctl::run_engine_elevated(app, params).await?;
+    Ok(Some(count))
+}
+
 #[cfg(not(windows))]
 #[tauri::command]
 pub fn rule_add(
@@ -61,5 +102,11 @@ pub fn rule_remove(_app: tauri::AppHandle, _id: i64) -> Result<(), String> {
 #[cfg(not(windows))]
 #[tauri::command]
 pub fn rule_set_enabled(_app: tauri::AppHandle, _id: i64, _enabled: bool) -> Result<(), String> {
+    Err("rule control is Windows-only".into())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn rule_import(_app: tauri::AppHandle) -> Result<Option<usize>, String> {
     Err("rule control is Windows-only".into())
 }

@@ -19,9 +19,11 @@ export function Protect() {
   const [action, setAction] = createSignal<"block" | "allow">("block");
   const [direction, setDirection] = createSignal<"outbound" | "inbound">("outbound");
   const add = (path: string) => addRule(path, direction(), action());
-  const [exportErr, setExportErr] = createSignal("");
+  const [toolErr, setToolErr] = createSignal("");
+  const [toolNote, setToolNote] = createSignal("");
   const exportRules = async () => {
-    setExportErr("");
+    setToolErr("");
+    setToolNote("");
     const data = rules().map((r) => ({
       app: r.rule.app,
       direction: r.rule.direction,
@@ -35,7 +37,19 @@ export function Protect() {
       });
       await revealItemInDir(path);
     } catch (e) {
-      setExportErr(String(e));
+      setToolErr(String(e));
+    }
+  };
+  const importRules = async () => {
+    setToolErr("");
+    setToolNote("");
+    try {
+      const n = await invoke<number | null>("rule_import");
+      if (n === null) return;
+      await refreshRules();
+      setToolNote(`imported ${n} rule${n === 1 ? "" : "s"}`);
+    } catch (e) {
+      setToolErr(String(e));
     }
   };
   // (re)load rules whenever the engine is connected, so a view opened while the
@@ -82,10 +96,16 @@ export function Protect() {
           <button class="btn" onClick={exportRules} disabled={rules().length === 0} title="Back up rules to a JSON file in Downloads">
             <Icon name="download" /> Export
           </button>
+          <button class="btn" onClick={importRules} title="Restore rules from a JSON backup (one elevation prompt)">
+            <Icon name="upload" /> Import
+          </button>
         </div>
       </div>
-      <Show when={exportErr()}>
-        <div class="tool-err">{exportErr()}</div>
+      <Show when={toolErr()}>
+        <div class="tool-err">{toolErr()}</div>
+      </Show>
+      <Show when={toolNote()}>
+        <div class="tool-note">{toolNote()}</div>
       </Show>
 
       <div class="tiles">

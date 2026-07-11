@@ -91,6 +91,12 @@ const paths: Record<string, () => JSX.Element> = {
       <path d="M2.8 13.4h10.4" />
     </>
   ),
+  upload: () => (
+    <>
+      <path d="M8 10.2V2.2M4.6 5.6 8 2.2l3.4 3.4" />
+      <path d="M2.8 13.4h10.4" />
+    </>
+  ),
 };
 
 export function Icon(props: { name: keyof typeof paths | string; class?: string; size?: number }) {

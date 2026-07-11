@@ -4,7 +4,7 @@
 //! halves so the service can push ticks while a reader handles commands.
 
 use crate::codec::MAX_FRAME_LEN;
-use crate::PIPE_NAME;
+use crate::{ADMIN_PIPE_NAME, PIPE_NAME};
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::{GenericFilePath, ListenerOptions};
 use serde::de::DeserializeOwned;
@@ -14,38 +14,63 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub use interprocess::local_socket::tokio::{Listener, RecvHalf, SendHalf, Stream};
 
-/// bind the service listener to the iris pipe.
-///
-/// on Windows the pipe carries an explicit security descriptor: full control to
-/// SYSTEM and Administrators, read/write to interactively-logged-on users (which
-/// the desktop UI is), and a medium integrity label so the unprivileged UI can
-/// connect to a pipe owned by the LocalSystem service while low-integrity
-/// (sandboxed) processes cannot. granting the INTERACTIVE SID rather than all
-/// authenticated users keeps another user's sessions and non-interactive logons
-/// (network, batch, service) off the pipe on a multi-user machine.
+// the telemetry pipe: SYSTEM + Administrators full, read/write to interactively
+// logged-on users (the unprivileged UI), medium integrity label so sandboxed
+// low-integrity processes are excluded.
+#[cfg(windows)]
+const TELEMETRY_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)S:(ML;;NW;;;ME)";
+// the admin pipe: SYSTEM and Administrators only, no interactive-user grant. a
+// non-elevated process (even an admin user's, whose UAC-filtered token has the
+// Administrators SID as deny-only) cannot open it, so the OS enforces "elevation
+// required" for the privileged rule mutations carried here, with no impersonation
+// code on the service side.
+#[cfg(windows)]
+const ADMIN_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)";
+
+/// bind the service listener for the unprivileged telemetry pipe.
 pub fn listen() -> io::Result<Listener> {
-    let name = PIPE_NAME.to_fs_name::<GenericFilePath>()?;
-    let opts = ListenerOptions::new().name(name);
-
-    #[cfg(windows)]
-    let opts = {
-        use interprocess::os::windows::local_socket::ListenerOptionsExt;
-        use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-        use widestring::U16CString;
-
-        const SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)S:(ML;;NW;;;ME)";
-        let wide = U16CString::from_str(SDDL)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let sd = SecurityDescriptor::deserialize(wide.as_ucstr())?;
-        opts.security_descriptor(sd)
-    };
-
-    opts.create_tokio()
+    listen_with(PIPE_NAME, TELEMETRY_SDDL)
 }
 
-/// connect the UI client to the iris pipe.
+/// bind the service listener for the admin-only pipe that carries rule mutations.
+pub fn listen_admin() -> io::Result<Listener> {
+    listen_with(ADMIN_PIPE_NAME, ADMIN_SDDL)
+}
+
+#[cfg(windows)]
+fn listen_with(name: &str, sddl: &str) -> io::Result<Listener> {
+    use interprocess::os::windows::local_socket::ListenerOptionsExt;
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+    use widestring::U16CString;
+
+    let fs_name = name.to_fs_name::<GenericFilePath>()?;
+    let wide =
+        U16CString::from_str(sddl).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let sd = SecurityDescriptor::deserialize(wide.as_ucstr())?;
+    ListenerOptions::new()
+        .name(fs_name)
+        .security_descriptor(sd)
+        .create_tokio()
+}
+
+#[cfg(not(windows))]
+fn listen_with(name: &str, _sddl: &str) -> io::Result<Listener> {
+    let fs_name = name.to_fs_name::<GenericFilePath>()?;
+    ListenerOptions::new().name(fs_name).create_tokio()
+}
+
+/// connect the UI client to the telemetry pipe.
 pub async fn connect() -> io::Result<Stream> {
-    let name = PIPE_NAME.to_fs_name::<GenericFilePath>()?;
+    connect_to(PIPE_NAME).await
+}
+
+/// connect to the admin pipe (only an elevated caller can open it).
+pub async fn connect_admin() -> io::Result<Stream> {
+    connect_to(ADMIN_PIPE_NAME).await
+}
+
+async fn connect_to(pipe: &str) -> io::Result<Stream> {
+    let name = pipe.to_fs_name::<GenericFilePath>()?;
     Stream::connect(name).await
 }
 

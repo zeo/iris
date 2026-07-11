@@ -12,13 +12,15 @@ use std::ptr;
 use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterDeleteById0, FwpmFreeMemory0,
+    FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterCreateEnumHandle0,
+    FwpmFilterDeleteById0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0,
     FwpmGetAppIdFromFileName0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0,
-    FWPM_ACTION0, FWPM_DISPLAY_DATA0, FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_PROVIDER0,
-    FWPM_SUBLAYER0, FWPM_CONDITION_ALE_APP_ID, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-    FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB,
-    FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0, FWP_EMPTY, FWP_MATCH_EQUAL, FWP_VALUE0,
+    FWPM_ACTION0, FWPM_DISPLAY_DATA0, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
+    FWPM_FILTER_ENUM_TEMPLATE0, FWPM_PROVIDER0, FWPM_SUBLAYER0, FWPM_CONDITION_ALE_APP_ID,
+    FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWP_ACTION_BLOCK,
+    FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0, FWP_EMPTY,
+    FWP_FILTER_ENUM_OVERLAPPING, FWP_MATCH_EQUAL, FWP_VALUE0,
 };
 use windows::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
@@ -98,12 +100,67 @@ impl Wfp {
         Ok(())
     }
 
-    /// wipe every iris filter by dropping and recreating the sublayer, then
-    /// leave a clean sublayer in place. called on startup before rules re-apply.
+    /// wipe every iris filter, then leave a clean provider + sublayer in place.
+    /// called on startup before rules re-apply. the filters must be deleted
+    /// first: our objects are non-dynamic and persist in the base filtering
+    /// engine across a service-process restart, and deleting a sublayer that
+    /// still holds filters fails with FWP_E_IN_USE, so a bare delete leaves the
+    /// old run's filters enforcing and piles up duplicates on every restart.
     pub fn reset(&mut self) -> EngineResult<()> {
         unsafe {
+            self.clear_filters();
+            // now that the sublayer is empty this succeeds; a fresh install
+            // reports FWP_E_SUBLAYER_NOT_FOUND, which ensure_objects then fixes
             let _ = FwpmSubLayerDeleteByKey0(self.engine, &IRIS_SUBLAYER);
             self.ensure_objects()
+        }
+    }
+
+    /// enumerate and delete every filter iris owns. we only ever add at the four
+    /// ALE connect / recv-accept layers, so enumerating those by our provider key
+    /// covers all of them.
+    unsafe fn clear_filters(&self) {
+        const LAYERS: [GUID; 4] = [
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+            FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
+        ];
+        for layer in LAYERS {
+            let mut provider_key = IRIS_PROVIDER;
+            let mut template: FWPM_FILTER_ENUM_TEMPLATE0 = std::mem::zeroed();
+            template.providerKey = &mut provider_key;
+            template.layerKey = layer;
+            template.enumType = FWP_FILTER_ENUM_OVERLAPPING;
+            template.actionMask = 0xFFFF_FFFF;
+
+            let mut enum_handle = HANDLE::default();
+            if !ok(FwpmFilterCreateEnumHandle0(
+                self.engine,
+                Some(&template),
+                &mut enum_handle,
+            )) {
+                continue;
+            }
+            loop {
+                let mut entries: *mut *mut FWPM_FILTER0 = ptr::null_mut();
+                let mut returned: u32 = 0;
+                let rc = FwpmFilterEnum0(self.engine, enum_handle, 64, &mut entries, &mut returned);
+                if !ok(rc) || returned == 0 || entries.is_null() {
+                    break;
+                }
+                let slice = std::slice::from_raw_parts(entries, returned as usize);
+                for &f in slice {
+                    if !f.is_null() {
+                        let _ = FwpmFilterDeleteById0(self.engine, (*f).filterId);
+                    }
+                }
+                FwpmFreeMemory0(&mut (entries as *mut core::ffi::c_void));
+                if returned < 64 {
+                    break;
+                }
+            }
+            let _ = FwpmFilterDestroyEnumHandle0(self.engine, enum_handle);
         }
     }
 

@@ -18,7 +18,16 @@ pub async fn serve(
     let listener = transport::listen()?;
     tracing::info!(pipe = iris_ipc::PIPE_NAME, "engine listening");
     loop {
-        let conn = transport::accept(&listener).await?;
+        // a transient accept error (a client aborting the pipe handshake, a
+        // momentary resource shortage) must never take the listener down, or one
+        // bad connection attempt kills IPC for every UI. log and keep serving.
+        let conn = match transport::accept(&listener).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::warn!("accept failed: {e}");
+                continue;
+            }
+        };
         let engine = engine.clone();
         let rules = rules.clone();
         let store = store.clone();

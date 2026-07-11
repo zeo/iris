@@ -49,7 +49,7 @@ pub fn run() {
             svcctl::uninstall_service,
             startup::get_launch_at_login,
             startup::set_launch_at_login,
-            report::export_csv,
+            report::save_download,
             icon::app_icon
         ])
         .setup(move |app| {

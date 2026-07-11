@@ -88,7 +88,7 @@ export function Usage() {
       );
     }
     try {
-      const path = await invoke<string>("export_csv", {
+      const path = await invoke<string>("save_download", {
         name: `iris-usage-${span()}.csv`,
         contents: lines.join("\n"),
       });

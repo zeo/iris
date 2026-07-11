@@ -1,11 +1,11 @@
-//! writes a generated text report (a CSV export) into the user's Downloads
-//! folder and returns the path, so the UI can then reveal it in the file
-//! manager. the UI builds the contents; this only decides where it lands.
+//! writes a generated text file (a CSV usage export, a JSON rule backup) into the
+//! user's Downloads folder and returns the path, so the UI can then reveal it in
+//! the file manager. the UI builds the contents; this only decides where it lands.
 
 use tauri::Manager;
 
 #[tauri::command]
-pub fn export_csv(app: tauri::AppHandle, name: String, contents: String) -> Result<String, String> {
+pub fn save_download(app: tauri::AppHandle, name: String, contents: String) -> Result<String, String> {
     let dir = app
         .path()
         .download_dir()

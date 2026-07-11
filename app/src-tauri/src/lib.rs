@@ -6,6 +6,7 @@ mod geo;
 mod icon;
 mod ipc;
 mod net;
+mod startup;
 mod svcctl;
 
 use tauri::menu::{Menu, MenuItem};
@@ -45,12 +46,20 @@ pub fn run() {
             geo::geo_country,
             svcctl::install_service,
             svcctl::uninstall_service,
+            startup::get_launch_at_login,
+            startup::set_launch_at_login,
             icon::app_icon
         ])
         .setup(move |app| {
             app.manage(geo::load(app.handle()));
             ipc::spawn(app.handle().clone(), cmd_rx);
             build_tray(app.handle())?;
+            // a login launch passes --tray so it comes up quietly in the tray
+            if std::env::args().any(|a| a == "--tray") {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.hide();
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {

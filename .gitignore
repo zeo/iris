@@ -1,0 +1,12 @@
+/target
+**/target
+node_modules
+app/dist
+app/src-tauri/gen
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+.claude
+.vscode

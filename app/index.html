@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      // resolve the saved theme before first paint so a light-mode user gets no
+      // dark flash on cold start
+      (function () {
+        try {
+          var t = localStorage.getItem("iris-theme") || "system";
+          var resolved =
+            t === "system"
+              ? window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark"
+              : t;
+          document.documentElement.dataset.theme = resolved;
+        } catch (e) {}
+      })();
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Iris</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <style>
+      /* painted until solid mounts, then removed. literal hex so it shows before
+         the token stylesheet parses. */
+      html,
+      body {
+        background: #0b0c0e;
+      }
+      #boot {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        font-family: "Geist Mono", ui-monospace, Consolas, monospace;
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #7d8590;
+        background: #0b0c0e;
+      }
+      #boot .m {
+        width: 7px;
+        height: 7px;
+        border-radius: 99px;
+        margin-right: 10px;
+        background: linear-gradient(180deg, #dfe3e8, #8b929b);
+        box-shadow: 0 0 8px rgba(200, 210, 220, 0.4);
+        animation: boot 1.2s steps(2, end) infinite;
+      }
+      @keyframes boot {
+        to {
+          opacity: 0.3;
+        }
+      }
+      html[data-theme="light"],
+      html[data-theme="light"] body,
+      html[data-theme="light"] #boot {
+        background: #cdd0d5;
+        color: #4a4e55;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot .m {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="boot"><span class="m"></span>iris / initializing</div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

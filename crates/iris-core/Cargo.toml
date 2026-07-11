@@ -1,0 +1,12 @@
+[package]
+name = "iris-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "platform-neutral domain models and engine traits for iris"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }

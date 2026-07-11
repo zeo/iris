@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Iris",
+  "version": "0.1.0",
+  "identifier": "lt.rot.iris",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1423",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Iris",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 940,
+        "minHeight": 620,
+        "decorations": false,
+        "transparent": false,
+        "resizable": true,
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
+    },
+    "withGlobalTauri": false
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "copyright": "© rot — Iris",
+    "shortDescription": "Firewall and network monitor",
+    "longDescription": "Iris watches every app's network traffic and puts you in control of what is allowed to connect — a native firewall and live monitor for Windows."
+  }
+}

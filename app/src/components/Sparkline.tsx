@@ -1,4 +1,4 @@
-import { onCleanup, onMount } from "solid-js";
+import { createEffect, onCleanup, onMount } from "solid-js";
 import type { Sample } from "./BandwidthGraph";
 
 function css(el: HTMLElement, name: string): string {
@@ -9,14 +9,17 @@ function css(el: HTMLElement, name: string): string {
 // pulse so the panel reads as powered-on; plots the recent ring once live.
 export function Sparkline(props: { data?: () => Sample[] }) {
   let canvas!: HTMLCanvasElement;
-  let raf = 0;
 
   onMount(() => {
     const ctx = canvas.getContext("2d")!;
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let t0 = 0;
+    let raf = 0;
+    // true while a frame is queued; the idle branch keeps it queued to animate,
+    // the live branch clears it so we only repaint when a new sample arrives
+    let looping = false;
 
-    const draw = (ts: number) => {
+    const frame = (ts: number) => {
       if (!t0) t0 = ts;
       const t = (ts - t0) / 1000;
       const dpr = window.devicePixelRatio || 1;
@@ -51,8 +54,10 @@ export function Sparkline(props: { data?: () => Sample[] }) {
           ctx.arc(x, midY, 1.6, 0, Math.PI * 2);
           ctx.fill();
           ctx.globalAlpha = 1;
-          raf = requestAnimationFrame(draw);
+          raf = requestAnimationFrame(frame);
+          return;
         }
+        looping = false;
         return;
       }
 
@@ -67,11 +72,28 @@ export function Sparkline(props: { data?: () => Sample[] }) {
         i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
       });
       ctx.stroke();
-      raf = requestAnimationFrame(draw);
+      looping = false;
     };
-    raf = requestAnimationFrame(draw);
+
+    const request = () => {
+      if (!looping) {
+        looping = true;
+        raf = requestAnimationFrame(frame);
+      }
+    };
+
+    // repaint when the ring changes; the frame loop sustains itself only while
+    // idle, so a live always-on monitor is not burning a full-rate rAF loop
+    createEffect(() => {
+      props.data?.();
+      request();
+    });
+    window.addEventListener("resize", request);
+    onCleanup(() => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", request);
+    });
   });
 
-  onCleanup(() => cancelAnimationFrame(raf));
   return <canvas ref={canvas} style={{ width: "100%", height: "100%", display: "block" }} />;
 }

@@ -1,4 +1,4 @@
-import { onCleanup, onMount } from "solid-js";
+import { createEffect, onCleanup, onMount } from "solid-js";
 
 // a sample the graph plots: sent/received bytes-per-second at a moment. the ring
 // is filled by the live stream once the engine is running; until then the scope
@@ -19,14 +19,17 @@ export function BandwidthGraph(props: {
   height?: number;
 }) {
   let canvas!: HTMLCanvasElement;
-  let raf = 0;
 
   onMount(() => {
     const ctx = canvas.getContext("2d")!;
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let t0 = 0;
+    let raf = 0;
+    // queued-frame flag: the idle branch keeps re-queuing to animate the sweep,
+    // the live branch clears it so we repaint only when a new sample lands
+    let looping = false;
 
-    const draw = (ts: number) => {
+    const frame = (ts: number) => {
       if (!t0) t0 = ts;
       const t = (ts - t0) / 1000;
       const dpr = window.devicePixelRatio || 1;
@@ -105,7 +108,11 @@ export function BandwidthGraph(props: {
         ctx.fillText("NO SIGNAL", w / 2, h / 2);
         ctx.restore();
 
-        if (!reduce) raf = requestAnimationFrame(draw);
+        if (!reduce) {
+          raf = requestAnimationFrame(frame);
+          return;
+        }
+        looping = false;
         return;
       }
 
@@ -141,13 +148,28 @@ export function BandwidthGraph(props: {
       ctx.stroke();
       ctx.globalAlpha = 1;
 
-      raf = requestAnimationFrame(draw);
+      // live view repaints on new data, not on a free-running loop
+      looping = false;
     };
 
-    raf = requestAnimationFrame(draw);
-  });
+    const request = () => {
+      if (!looping) {
+        looping = true;
+        raf = requestAnimationFrame(frame);
+      }
+    };
 
-  onCleanup(() => cancelAnimationFrame(raf));
+    // repaint when the ring changes; the loop sustains itself only while idle
+    createEffect(() => {
+      props.data?.();
+      request();
+    });
+    window.addEventListener("resize", request);
+    onCleanup(() => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", request);
+    });
+  });
 
   return (
     <div class="scope" style={{ height: `${props.height ?? 300}px` }}>

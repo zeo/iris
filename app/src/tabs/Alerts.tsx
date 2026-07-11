@@ -1,4 +1,4 @@
-import { createMemo, For, onMount, Show } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import { ackAlert, ackAll, alerts, fileName, initAlerts, refreshAlerts, type Alert } from "../lib/alerts";
@@ -6,8 +6,8 @@ import { persisted } from "../lib/persist";
 
 const FILTERS = ["all", "new apps", "blocks"] as const;
 
-function ago(atMs: number): string {
-  const s = Math.max(0, Math.floor((Date.now() - atMs) / 1000));
+function ago(atMs: number, nowMs: number): string {
+  const s = Math.max(0, Math.floor((nowMs - atMs) / 1000));
   if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
@@ -18,9 +18,14 @@ function ago(atMs: number): string {
 // toasts. durable, so alerts raised while the window was closed appear on launch.
 export function Alerts() {
   const [filter, setFilter] = persisted<(typeof FILTERS)[number]>("alerts.filter", "all");
+  // a coarse clock so relative timestamps re-derive instead of freezing at the
+  // value they had when their row first rendered
+  const [now, setNow] = createSignal(Date.now());
   onMount(() => {
     initAlerts();
     refreshAlerts();
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    onCleanup(() => clearInterval(timer));
   });
 
   const list = createMemo(() => {
@@ -86,7 +91,7 @@ export function Alerts() {
                   </div>
                   <div class="alert-when">
                     <span class="alert-cat">{blocked ? "Blocked connection" : "First network activity"}</span>
-                    <span class="alert-time">{ago(a.at_ms)}</span>
+                    <span class="alert-time">{ago(a.at_ms, now())}</span>
                   </div>
                 </div>
               );

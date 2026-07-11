@@ -1,10 +1,26 @@
-import { createMemo, createSignal, For, Show } from "solid-js";
-import { BandwidthGraph } from "../components/BandwidthGraph";
+import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { invoke } from "@tauri-apps/api/core";
+import { BandwidthGraph, type Sample } from "../components/BandwidthGraph";
 import { AppIcon } from "../components/AppIcon";
 import { engine } from "../lib/engine";
 import { rate } from "../lib/format";
 
 const RANGES = ["5m", "1h", "24h", "7d"] as const;
+
+interface UsageBucket {
+  app: string;
+  bucket_start_ms: number;
+  bytes: { sent: number; recv: number };
+}
+
+// history windows past the live 5m ring come from the usage rollups: pick the
+// bucket granularity, then turn each bucket's byte total back into an average
+// rate (bytes/sec) so the same graph renders history and live data the same way
+const HISTORY: Record<string, { granularity: string; ms: number; widthSec: number }> = {
+  "1h": { granularity: "minute", ms: 3_600_000, widthSec: 60 },
+  "24h": { granularity: "hour", ms: 86_400_000, widthSec: 3_600 },
+  "7d": { granularity: "day", ms: 7 * 86_400_000, widthSec: 86_400 },
+};
 
 function fileName(path: string): string {
   const seg = path.split(/[\\/]/).pop();
@@ -15,7 +31,38 @@ function fileName(path: string): string {
 // right now listed underneath.
 export function Graph() {
   const [range, setRange] = createSignal<(typeof RANGES)[number]>("5m");
-  const peak = () => engine.ring().reduce((m, s) => Math.max(m, s.sent, s.recv), 0);
+
+  const [history] = createResource(
+    () => ({ range: range(), online: engine.online() }),
+    async ({ range: r }): Promise<Sample[]> => {
+      const cfg = HISTORY[r];
+      if (!cfg) return []; // 5m uses the live ring, not history
+      const now = Date.now();
+      let buckets: UsageBucket[] = [];
+      try {
+        buckets = await invoke<UsageBucket[]>("get_usage", {
+          fromMs: now - cfg.ms,
+          toMs: now,
+          granularity: cfg.granularity,
+        });
+      } catch {
+        return [];
+      }
+      const byBucket = new Map<number, { sent: number; recv: number }>();
+      for (const b of buckets) {
+        const e = byBucket.get(b.bucket_start_ms) ?? { sent: 0, recv: 0 };
+        e.sent += b.bytes.sent;
+        e.recv += b.bytes.recv;
+        byBucket.set(b.bucket_start_ms, e);
+      }
+      return [...byBucket.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([, v]) => ({ sent: v.sent / cfg.widthSec, recv: v.recv / cfg.widthSec }));
+    },
+  );
+
+  const series = (): Sample[] => (range() === "5m" ? engine.ring() : history() ?? []);
+  const peak = () => series().reduce((m, s) => Math.max(m, s.sent, s.recv), 0);
 
   const top = createMemo(() =>
     engine
@@ -55,7 +102,7 @@ export function Graph() {
         </div>
       </div>
 
-      <BandwidthGraph height={300} data={engine.ring} />
+      <BandwidthGraph height={300} data={series} />
 
       <div class="scope-foot">
         <span class="label">window</span>

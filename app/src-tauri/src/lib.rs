@@ -52,6 +52,14 @@ pub fn run() {
             build_tray(app.handle())?;
             Ok(())
         })
+        .on_window_event(|window, event| {
+            // close to tray: hide the window and keep the app (and its tray
+            // icon and pipe client) alive. real exit is the tray "Quit" item.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running Iris");
 }

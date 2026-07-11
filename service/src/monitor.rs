@@ -53,8 +53,11 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>) {
             let now = now_ms();
             let tick = tracker.tick(now);
 
-            // record usage + first-seen alerts under one store lock
-            if let Ok(store) = store.lock() {
+            // record usage + first-seen alerts under one store lock. recover a
+            // poisoned guard so one panicking tick never silently ends all
+            // history and alerting
+            {
+                let store = store.lock().unwrap_or_else(|e| e.into_inner());
                 let alerting = now > baseline_until;
                 for app in &tick.apps {
                     // rate over a ~1s window is close enough to bytes this second
@@ -86,9 +89,8 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>) {
             }
             // prune usage older than 45 days, hourly
             if ticks.is_multiple_of(3600) {
-                if let Ok(store) = store.lock() {
-                    store.prune_usage(now.saturating_sub(45 * 86_400_000));
-                }
+                let store = store.lock().unwrap_or_else(|e| e.into_inner());
+                store.prune_usage(now.saturating_sub(45 * 86_400_000));
             }
         }
     });

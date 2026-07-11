@@ -6,7 +6,7 @@
 
 use iris_core::{AppId, Aggregator, AppSample, ByteCounts, Conn, ProcSample, StatsTick};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// how long a process lingers as "offline" after its last connection or byte
 const GRACE_MS: u64 = 20_000;
@@ -15,6 +15,15 @@ const GRACE_MS: u64 = 20_000;
 const CONN_GRACE_MS: u64 = 4_000;
 
 type ConnKey = (String, u16, u16);
+
+/// lock the shared aggregator, recovering the guard if the ETW callback thread
+/// panicked while holding it. the accumulator is just byte counters, so a
+/// poisoned lock must never crash the flush loop and stop monitoring. a free
+/// function (not a `&self` method) so it borrows only the mutex, leaving the
+/// tracker's other fields free to mutate alongside the guard.
+fn lock_agg(agg: &Mutex<Aggregator>) -> MutexGuard<'_, Aggregator> {
+    agg.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 pub struct Tracker {
     agg: Arc<Mutex<Aggregator>>,
@@ -110,12 +119,12 @@ impl Tracker {
         let conns_by_pid = self.connections(now);
 
         {
-            let mut a = self.agg.lock().expect("aggregator poisoned");
+            let mut a = lock_agg(&self.agg);
             for (pid, (path, _)) in &conns_by_pid {
                 a.touch(*pid, path);
             }
         }
-        let pid_samples = self.agg.lock().expect("aggregator poisoned").flush(now);
+        let pid_samples = lock_agg(&self.agg).flush(now);
 
         let mut apps: HashMap<String, AppAcc> = HashMap::new();
         let mut expired: Vec<u32> = Vec::new();
@@ -163,7 +172,7 @@ impl Tracker {
         }
 
         if !expired.is_empty() {
-            let mut a = self.agg.lock().expect("aggregator poisoned");
+            let mut a = lock_agg(&self.agg);
             for pid in &expired {
                 a.forget(*pid);
                 self.offline_since.remove(pid);

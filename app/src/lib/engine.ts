@@ -19,6 +19,7 @@ export interface Conn {
 }
 export interface ProcSample {
   pid: number;
+  service: string | null;
   rate_sent: number;
   rate_recv: number;
   total: { sent: number; recv: number };

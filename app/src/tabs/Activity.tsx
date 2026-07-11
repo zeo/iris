@@ -173,7 +173,12 @@ export function Activity() {
                                     <Icon name="chevron" size={12} />
                                   </button>
                                   <Icon name="cpu" class="proc-ico" size={13} />
-                                  <span class="name" classList={{ offline: !proc().online }}>Process {proc().pid}</span>
+                                  <span class="name" classList={{ offline: !proc().online }}>
+                                    {proc().service ?? `Process ${proc().pid}`}
+                                  </span>
+                                  <Show when={proc().service}>
+                                    <span class="pid">#{proc().pid}</span>
+                                  </Show>
                                 </div>
                               </td>
                               <td class="num">{rate(proc().rate_recv)}</td>

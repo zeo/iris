@@ -20,6 +20,10 @@ pub struct Tracker {
     agg: Arc<Mutex<Aggregator>>,
     #[cfg(windows)]
     conns: iris_platform_win::ConnCounter,
+    #[cfg(windows)]
+    svc: iris_platform_win::ServiceMap,
+    /// tick counter, so the service map is re-enumerated on a slow cadence
+    ticks: u64,
     /// when each idle process went offline; absent while active. keyed by PID.
     offline_since: HashMap<u32, u64>,
     /// recently-seen connections per PID, held briefly past their last sighting
@@ -34,6 +38,8 @@ impl Tracker {
         Tracker {
             agg,
             conns: iris_platform_win::ConnCounter::new(dns),
+            svc: iris_platform_win::ServiceMap::new(),
+            ticks: 0,
             offline_since: HashMap::new(),
             conn_history: HashMap::new(),
             pid_path: HashMap::new(),
@@ -44,6 +50,7 @@ impl Tracker {
     pub fn new(agg: Arc<Mutex<Aggregator>>) -> Self {
         Tracker {
             agg,
+            ticks: 0,
             offline_since: HashMap::new(),
             conn_history: HashMap::new(),
             pid_path: HashMap::new(),
@@ -92,6 +99,14 @@ impl Tracker {
     }
 
     pub fn tick(&mut self, now: u64) -> StatsTick {
+        // service to pid bindings are stable, so re-enumerate them only every
+        // tenth tick (~10s) rather than on every sample
+        #[cfg(windows)]
+        if self.ticks % 10 == 0 {
+            self.svc.refresh();
+        }
+        self.ticks = self.ticks.wrapping_add(1);
+
         let conns_by_pid = self.connections(now);
 
         {
@@ -121,8 +136,14 @@ impl Tracker {
                 }
             }
 
+            #[cfg(windows)]
+            let service = self.svc.get(ps.pid).map(|names| names.join(", "));
+            #[cfg(not(windows))]
+            let service: Option<String> = None;
+
             let proc = ProcSample {
                 pid: ps.pid,
+                service,
                 rate_sent: ps.rate_sent,
                 rate_recv: ps.rate_recv,
                 total: ps.total,

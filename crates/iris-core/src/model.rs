@@ -93,6 +93,9 @@ pub struct Conn {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcSample {
     pub pid: u32,
+    /// the Windows service(s) hosted in this process, when it is a service host
+    /// like svchost.exe, so the UI names the service instead of a bare pid
+    pub service: Option<String>,
     pub rate_sent: u64,
     pub rate_recv: u64,
     pub total: ByteCounts,

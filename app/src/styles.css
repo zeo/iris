@@ -994,6 +994,11 @@ html {
   font-size: var(--fz-sm);
   color: var(--text);
 }
+.proc-cell .pid {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
 
 /* connection rows: two indents below the app */
 .tbl.activity .conn-row td {

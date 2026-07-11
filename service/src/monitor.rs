@@ -23,8 +23,13 @@ fn now_ms() -> u64 {
 pub fn spawn(engine: Engine) {
     let agg = Arc::new(Mutex::new(Aggregator::new(now_ms())));
 
+    // the DNS name map is shared: the ETW monitor fills it, the tracker's
+    // connection enumerator reads it to label endpoints
     #[cfg(windows)]
-    let byte_monitor = match iris_platform_win::Monitor::start(agg.clone()) {
+    let dns = iris_platform_win::new_map();
+
+    #[cfg(windows)]
+    let byte_monitor = match iris_platform_win::Monitor::start(agg.clone(), dns.clone()) {
         Ok(m) => Some(m),
         Err(e) => {
             tracing::error!("byte monitor unavailable (connections still shown): {e}");
@@ -32,6 +37,9 @@ pub fn spawn(engine: Engine) {
         }
     };
 
+    #[cfg(windows)]
+    let mut tracker = Tracker::new(agg, dns);
+    #[cfg(not(windows))]
     let mut tracker = Tracker::new(agg);
 
     tokio::spawn(async move {

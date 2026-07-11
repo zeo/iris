@@ -1,21 +1,33 @@
-use crate::model::{AppId, AppSample, ByteCounts, StatsTick};
+use crate::model::ByteCounts;
 use std::collections::HashMap;
 
-/// accumulates per-app byte deltas between sample ticks and turns them into a
-/// [`StatsTick`] on flush. the platform monitor calls [`Aggregator::record`] for
-/// every attributed network event; the service's tracker calls
-/// [`Aggregator::flush`] on a fixed cadence.
+/// one process's byte deltas for a sample window, produced by [`Aggregator::flush`].
+/// the service's tracker groups these by app path and attaches connections.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PidSample {
+    pub pid: u32,
+    pub path: String,
+    pub name: Option<String>,
+    pub rate_sent: u64,
+    pub rate_recv: u64,
+    pub total: ByteCounts,
+}
+
+/// accumulates per-process byte deltas between sample ticks. the platform
+/// monitor calls [`Aggregator::record`] for every attributed network event
+/// (keyed by owning PID); the service's tracker calls [`Aggregator::flush`] on a
+/// fixed cadence and rolls the per-process rows up into per-app tree nodes.
 ///
 /// rates are computed over the real elapsed wall-clock window, not the nominal
-/// cadence, so a late flush reports the correct bytes/sec instead of a spike.
-/// the aggregator does not decide app lifetime: it keeps every app until the
-/// tracker [`Aggregator::forget`]s it, and reports all of them each flush.
+/// cadence. the aggregator does not decide process lifetime: it keeps every
+/// process until the tracker [`Aggregator::forget`]s it.
 pub struct Aggregator {
-    apps: HashMap<AppId, AppAccum>,
+    procs: HashMap<u32, PidAccum>,
     window_start_ms: u64,
 }
 
-struct AppAccum {
+struct PidAccum {
+    path: String,
     name: Option<String>,
     total: ByteCounts,
     window: ByteCounts,
@@ -24,22 +36,23 @@ struct AppAccum {
 impl Aggregator {
     pub fn new(now_ms: u64) -> Self {
         Aggregator {
-            apps: HashMap::new(),
+            procs: HashMap::new(),
             window_start_ms: now_ms,
         }
     }
 
-    fn entry(&mut self, app: &AppId) -> &mut AppAccum {
-        self.apps.entry(app.clone()).or_insert_with(|| AppAccum {
+    fn entry(&mut self, pid: u32, path: &str) -> &mut PidAccum {
+        self.procs.entry(pid).or_insert_with(|| PidAccum {
+            path: path.to_string(),
             name: None,
             total: ByteCounts::default(),
             window: ByteCounts::default(),
         })
     }
 
-    /// add a network event's byte deltas for one app
-    pub fn record(&mut self, app: &AppId, name: Option<&str>, sent: u64, recv: u64) {
-        let entry = self.entry(app);
+    /// add a network event's byte deltas for one process
+    pub fn record(&mut self, pid: u32, path: &str, name: Option<&str>, sent: u64, recv: u64) {
+        let entry = self.entry(pid, path);
         if entry.name.is_none() {
             if let Some(n) = name {
                 entry.name = Some(n.to_string());
@@ -50,54 +63,38 @@ impl Aggregator {
         entry.window.add(delta);
     }
 
-    /// ensure an app is tracked even with no bytes yet (e.g. it only holds open
+    /// ensure a process is tracked even with no bytes yet (it only holds open
     /// connections), so it appears in the next flush
-    pub fn touch(&mut self, app: &AppId) {
-        self.entry(app);
+    pub fn touch(&mut self, pid: u32, path: &str) {
+        self.entry(pid, path);
     }
 
-    /// stop tracking an app; the tracker calls this once an app's grace elapses
-    pub fn forget(&mut self, app: &AppId) {
-        self.apps.remove(app);
+    /// stop tracking a process once its grace elapses
+    pub fn forget(&mut self, pid: u32) {
+        self.procs.remove(&pid);
     }
 
-    /// produce a sample for every tracked app over the window since the last
-    /// flush, then reset the window. lifecycle fields (`online`, `conns`) are
-    /// left at defaults for the tracker to fill.
-    pub fn flush(&mut self, now_ms: u64) -> StatsTick {
+    /// produce a per-process sample for every tracked process over the window
+    /// since the last flush, then reset the window
+    pub fn flush(&mut self, now_ms: u64) -> Vec<PidSample> {
         let elapsed_ms = now_ms.saturating_sub(self.window_start_ms).max(1);
         let per_sec =
             |bytes: u64| -> u64 { ((bytes as u128 * 1000) / elapsed_ms as u128) as u64 };
 
-        let mut samples: Vec<AppSample> = Vec::with_capacity(self.apps.len());
-        let mut total_rate_sent = 0u64;
-        let mut total_rate_recv = 0u64;
-
-        for (app, accum) in self.apps.iter_mut() {
-            let rate_sent = per_sec(accum.window.sent);
-            let rate_recv = per_sec(accum.window.recv);
-            total_rate_sent = total_rate_sent.saturating_add(rate_sent);
-            total_rate_recv = total_rate_recv.saturating_add(rate_recv);
-            samples.push(AppSample {
-                app: app.clone(),
+        let mut out = Vec::with_capacity(self.procs.len());
+        for (pid, accum) in self.procs.iter_mut() {
+            out.push(PidSample {
+                pid: *pid,
+                path: accum.path.clone(),
                 name: accum.name.clone(),
-                rate_sent,
-                rate_recv,
+                rate_sent: per_sec(accum.window.sent),
+                rate_recv: per_sec(accum.window.recv),
                 total: accum.total,
-                connections: 0,
-                online: false,
-                conns: Vec::new(),
             });
             accum.window = ByteCounts::default();
         }
-
         self.window_start_ms = now_ms;
-        StatsTick {
-            at_ms: now_ms,
-            total_rate_sent,
-            total_rate_recv,
-            apps: samples,
-        }
+        out
     }
 }
 
@@ -105,64 +102,50 @@ impl Aggregator {
 mod tests {
     use super::*;
 
-    fn app(p: &str) -> AppId {
-        AppId::from_path(p)
-    }
-
     #[test]
     fn rate_is_bytes_over_elapsed_seconds() {
         let mut agg = Aggregator::new(0);
-        agg.record(&app("c:/x.exe"), Some("X"), 1000, 2000);
-        let tick = agg.flush(1000);
-        assert_eq!(tick.apps.len(), 1);
-        let s = &tick.apps[0];
-        assert_eq!(s.rate_sent, 1000);
-        assert_eq!(s.rate_recv, 2000);
-        assert_eq!(s.total.sent, 1000);
-        assert_eq!(s.total.recv, 2000);
-        assert_eq!(tick.total_rate_sent, 1000);
-        assert_eq!(tick.total_rate_recv, 2000);
+        agg.record(100, "c:/x.exe", Some("X"), 1000, 2000);
+        let out = agg.flush(1000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].rate_sent, 1000);
+        assert_eq!(out[0].rate_recv, 2000);
+        assert_eq!(out[0].total.sent, 1000);
     }
 
     #[test]
     fn half_second_window_doubles_the_rate() {
         let mut agg = Aggregator::new(0);
-        agg.record(&app("c:/x.exe"), None, 500, 0);
-        let tick = agg.flush(500);
-        assert_eq!(tick.apps[0].rate_sent, 1000);
+        agg.record(1, "c:/x.exe", None, 500, 0);
+        assert_eq!(agg.flush(500)[0].rate_sent, 1000);
     }
 
     #[test]
-    fn totals_accumulate_but_rate_resets_and_app_persists() {
+    fn totals_accumulate_but_rate_resets_and_proc_persists() {
         let mut agg = Aggregator::new(0);
-        agg.record(&app("c:/x.exe"), None, 100, 0);
+        agg.record(1, "c:/x.exe", None, 100, 0);
         let _ = agg.flush(1000);
-        // idle window: app is still reported, now at rate 0, total retained
-        let tick = agg.flush(2000);
-        assert_eq!(tick.apps.len(), 1);
-        assert_eq!(tick.apps[0].rate_sent, 0);
-        assert_eq!(tick.apps[0].total.sent, 100);
-        agg.record(&app("c:/x.exe"), None, 50, 0);
-        let tick = agg.flush(3000);
-        assert_eq!(tick.apps[0].total.sent, 150);
-        assert_eq!(tick.apps[0].rate_sent, 50);
+        let out = agg.flush(2000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].rate_sent, 0);
+        assert_eq!(out[0].total.sent, 100);
     }
 
     #[test]
-    fn touch_tracks_a_connection_only_app() {
+    fn separate_pids_stay_separate() {
         let mut agg = Aggregator::new(0);
-        agg.touch(&app("c:/conn.exe"));
-        let tick = agg.flush(1000);
-        assert_eq!(tick.apps.len(), 1);
-        assert_eq!(tick.apps[0].total.total(), 0);
+        agg.record(1, "c:/x.exe", None, 100, 0);
+        agg.record(2, "c:/x.exe", None, 200, 0);
+        let out = agg.flush(1000);
+        assert_eq!(out.len(), 2);
     }
 
     #[test]
-    fn forget_drops_an_app() {
+    fn touch_then_forget() {
         let mut agg = Aggregator::new(0);
-        agg.record(&app("c:/x.exe"), None, 100, 0);
-        agg.forget(&app("c:/x.exe"));
-        let tick = agg.flush(1000);
-        assert!(tick.apps.is_empty());
+        agg.touch(5, "c:/conn.exe");
+        assert_eq!(agg.flush(1000).len(), 1);
+        agg.forget(5);
+        assert!(agg.flush(2000).is_empty());
     }
 }

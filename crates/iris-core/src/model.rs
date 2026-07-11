@@ -77,35 +77,48 @@ impl ByteCounts {
     }
 }
 
-/// one open connection an app holds, for the activity row's drill-down
+/// one open connection a process holds, for the activity drill-down
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conn {
     pub remote: Endpoint,
+    /// the hostname the process resolved this endpoint from (captured from DNS),
+    /// shown ahead of the raw address when known
+    pub host: Option<String>,
     pub local_port: u16,
     pub direction: Direction,
     pub state: ConnState,
 }
 
-/// instantaneous per-app throughput plus cumulative totals for one sample tick.
-/// this is the unit the monitor pushes to the UI ~1/sec for the live graph and
-/// the activity table.
+/// one running process under an app: its own throughput, totals, and connections
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcSample {
+    pub pid: u32,
+    pub rate_sent: u64,
+    pub rate_recv: u64,
+    pub total: ByteCounts,
+    pub online: bool,
+    pub conns: Vec<Conn>,
+}
+
+/// one app row for a sample tick: the aggregate across its processes, plus the
+/// per-process breakdown for the tree. pushed to the UI ~1/sec.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSample {
     pub app: AppId,
-    /// friendly display name if resolved (product name), else None
+    /// friendly display name if resolved, else None
     pub name: Option<String>,
-    /// bytes/sec over the sample window
+    /// bytes/sec over the sample window, summed across processes
     pub rate_sent: u64,
     pub rate_recv: u64,
     /// cumulative counters for the session
     pub total: ByteCounts,
-    /// open connection count at sample time
+    /// open connection count across all processes
     pub connections: u32,
-    /// whether the app has any active connection or traffic right now; false
-    /// while it lingers in the post-disconnect grace window
+    /// whether any process is active now; false while the app lingers in the
+    /// post-disconnect grace window
     pub online: bool,
-    /// current connections, capped for the wire; empty unless the app is active
-    pub conns: Vec<Conn>,
+    /// the app's processes, each with its own rate, totals, and connections
+    pub processes: Vec<ProcSample>,
 }
 
 /// one monitor sample tick: a wall-clock stamp plus every active app's sample

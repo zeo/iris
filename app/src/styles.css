@@ -31,7 +31,9 @@
   --live-glow: rgba(255, 255, 255, 0.5);
   --ok: #cfcfcf;
   --warn: #d8d8d8;
-  --err: #cf6a56; /* the only hue in the system, danger + offline only */
+  --err: #cf6a56; /* danger + offline */
+  --out: #79c48f; /* outgoing connections */
+  --in: #6fa8c9; /* incoming connections */
 
   /* machined metal gradients — neutral greys */
   --chrome: linear-gradient(180deg, #3f3f3f 0%, #262626 46%, #1d1d1d 54%, #12121200 100%);
@@ -136,6 +138,8 @@
   --hi-2: rgba(255, 255, 255, 0.9);
   --lo: rgba(0, 0, 0, 0.18);
   --engrave: 0 1px 0 rgba(255, 255, 255, 0.6);
+  --out: #2f8f57;
+  --in: #2f6f8f;
 }
 
 * {
@@ -872,9 +876,38 @@ html {
 .tbl.activity .name.offline {
   color: var(--err);
 }
-.tbl.activity .app-row.off .num {
+.tbl.activity .app-row.off .num,
+.tbl.activity .proc-row.off .num {
   color: var(--muted);
 }
+
+/* process rows: one indent below the app */
+.tbl.activity .proc-row {
+  cursor: pointer;
+}
+.tbl.activity .proc-row td {
+  background: var(--bg1);
+}
+.tbl.activity .proc-row:hover td {
+  background: var(--surf);
+}
+.proc-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 26px;
+}
+.proc-cell .proc-ico {
+  color: var(--steel-dim);
+  flex: none;
+}
+.proc-cell .name {
+  font-family: var(--mono);
+  font-size: var(--fz-sm);
+  color: var(--text);
+}
+
+/* connection rows: two indents below the app */
 .tbl.activity .conn-row td {
   background: var(--recess);
   padding-top: 5px;
@@ -885,19 +918,29 @@ html {
   border-bottom: 1px solid var(--line);
 }
 .tbl.activity .conn-row:hover td {
-  background: var(--bg1);
+  background: var(--surf);
 }
 .conn-cell {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-left: 30px;
+  padding-left: 54px;
 }
 .conn-cell .dir {
-  color: var(--steel-dim);
+  font-family: var(--mono);
+  flex: none;
+}
+.conn-cell .dir.out {
+  color: var(--out);
+}
+.conn-cell .dir.in {
+  color: var(--in);
 }
 .conn-cell .addr {
   color: var(--text);
+}
+.conn-cell .addr.host {
+  color: var(--text-2);
 }
 .tbl.activity .proto,
 .tbl.activity .state {

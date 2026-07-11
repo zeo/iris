@@ -39,6 +39,7 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
       <div class="props">
         <div class="plabel">Connection properties</div>
         {row("Protocol", props.conn.remote.protocol.toUpperCase())}
+        {row("Host", props.conn.host ?? <span class="unresolved">Unknown</span>)}
         {row("Local port", `:${props.conn.local_port}`)}
         {row("Remote address", props.conn.remote.addr)}
         {row("Remote port", props.conn.remote.port)}

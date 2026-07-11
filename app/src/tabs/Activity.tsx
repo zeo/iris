@@ -12,24 +12,33 @@ function fileName(path: string): string {
 function label(s: AppSample): string {
   return s.name ?? fileName(s.app);
 }
+function connLabel(c: Conn): string {
+  return `${c.host || c.remote.addr}:${c.remote.port}`;
+}
 
 type Sort = "rate" | "down" | "up" | "conns" | "name";
 type Filter = "all" | "online" | "offline";
 
-// live per-app / per-connection table (NetLimiter "Activity"), monitor-only. rows
-// expand to reveal the app's connections; an app that stops connecting lingers
-// (name dimmed red) before the engine drops it.
+// live per-app tree (NetLimiter "Activity"), monitor-only. app -> process ->
+// connection. an app that stops connecting lingers (dimmed red) before drop.
 export function Activity() {
   const [q, setQ] = createSignal("");
   const [sort, setSort] = createSignal<Sort>("rate");
   const [filter, setFilter] = createSignal<Filter>("all");
-  const [open, setOpen] = createSignal<Set<string>>(new Set());
+  const [openApps, setOpenApps] = createSignal<Set<string>>(new Set());
+  const [openProcs, setOpenProcs] = createSignal<Set<number>>(new Set());
   const [sel, setSel] = createSignal<{ app: string; conn: Conn } | null>(null);
 
-  const toggle = (app: string) =>
-    setOpen((s) => {
+  const toggleApp = (app: string) =>
+    setOpenApps((s) => {
       const n = new Set(s);
       n.has(app) ? n.delete(app) : n.add(app);
+      return n;
+    });
+  const toggleProc = (pid: number) =>
+    setOpenProcs((s) => {
+      const n = new Set(s);
+      n.has(pid) ? n.delete(pid) : n.add(pid);
       return n;
     });
 
@@ -43,9 +52,9 @@ export function Activity() {
       list = list.filter(
         (s) => label(s).toLowerCase().includes(needle) || s.app.toLowerCase().includes(needle),
       );
-    const s = sort();
+    const so = sort();
     return [...list].sort((a, b) => {
-      switch (s) {
+      switch (so) {
         case "down": return b.rate_recv - a.rate_recv;
         case "up": return b.rate_sent - a.rate_sent;
         case "conns": return b.connections - a.connections;
@@ -79,9 +88,7 @@ export function Activity() {
           <div class="seg" role="group" aria-label="status">
             <For each={["all", "online", "offline"] as Filter[]}>
               {(f) => (
-                <button classList={{ on: filter() === f }} onClick={() => setFilter(f)}>
-                  {f}
-                </button>
+                <button classList={{ on: filter() === f }} onClick={() => setFilter(f)}>{f}</button>
               )}
             </For>
           </div>
@@ -89,22 +96,10 @@ export function Activity() {
       </div>
 
       <div class="tiles">
-        <div class="tile">
-          <div class="k">online apps</div>
-          <div class="v">{onlineCount()}</div>
-        </div>
-        <div class="tile">
-          <div class="k">connections</div>
-          <div class="v">{connTotal()}</div>
-        </div>
-        <div class="tile">
-          <div class="k">download</div>
-          <div class="v">{rate(engine.down())}</div>
-        </div>
-        <div class="tile">
-          <div class="k">upload</div>
-          <div class="v">{rate(engine.up())}</div>
-        </div>
+        <div class="tile"><div class="k">online apps</div><div class="v">{onlineCount()}</div></div>
+        <div class="tile"><div class="k">connections</div><div class="v">{connTotal()}</div></div>
+        <div class="tile"><div class="k">download</div><div class="v">{rate(engine.down())}</div></div>
+        <div class="tile"><div class="k">upload</div><div class="v">{rate(engine.up())}</div></div>
       </div>
 
       <Show
@@ -114,8 +109,8 @@ export function Activity() {
             <Icon name="activity" class="glyph" size={44} />
             <h3>{engine.online() ? "No traffic yet" : "Waiting for the engine"}</h3>
             <p>
-              Up and down rates, connection counts, and the remote endpoints each app is talking to
-              will stream in here in real time.
+              Every app, its processes, and the endpoints they are talking to stream in here in real
+              time.
             </p>
           </div>
         }
@@ -133,37 +128,53 @@ export function Activity() {
             </thead>
             <tbody>
               <For each={rows()}>
-                {(s) => (
+                {(app) => (
                   <>
-                    <tr class="app-row" classList={{ off: !s.online }} onClick={() => toggle(s.app)}>
+                    <tr class="app-row" classList={{ off: !app.online }} onClick={() => toggleApp(app.app)}>
                       <td>
                         <div class="app-cell">
-                          <button
-                            class="chev"
-                            classList={{ open: open().has(s.app) }}
-                            aria-label="expand"
-                            disabled={s.conns.length === 0}
-                          >
+                          <button class="chev" classList={{ open: openApps().has(app.app) }} aria-label="expand">
                             <Icon name="chevron" size={12} />
                           </button>
-                          <AppIcon path={s.app} />
-                          <span class="name" classList={{ offline: !s.online }}>{label(s)}</span>
+                          <AppIcon path={app.app} />
+                          <span class="name" classList={{ offline: !app.online }}>{label(app)}</span>
                         </div>
                       </td>
-                      <td class="num">{rate(s.rate_recv)}</td>
-                      <td class="num">{rate(s.rate_sent)}</td>
-                      <td class="num">{s.connections}</td>
-                      <td class="num">{bytes(s.total.sent + s.total.recv)}</td>
+                      <td class="num">{rate(app.rate_recv)}</td>
+                      <td class="num">{rate(app.rate_sent)}</td>
+                      <td class="num">{app.connections}</td>
+                      <td class="num">{bytes(app.total.sent + app.total.recv)}</td>
                     </tr>
-                    <Show when={open().has(s.app)}>
-                      <For each={s.conns}>
-                        {(c) => <ConnRow c={c} onSelect={() => setSel({ app: s.app, conn: c })} />}
+                    <Show when={openApps().has(app.app)}>
+                      <For each={app.processes}>
+                        {(proc) => (
+                          <>
+                            <tr class="proc-row" classList={{ off: !proc.online }} onClick={() => toggleProc(proc.pid)}>
+                              <td>
+                                <div class="proc-cell">
+                                  <button class="chev" classList={{ open: openProcs().has(proc.pid) }} disabled={proc.conns.length === 0} aria-label="expand">
+                                    <Icon name="chevron" size={12} />
+                                  </button>
+                                  <Icon name="cpu" class="proc-ico" size={13} />
+                                  <span class="name" classList={{ offline: !proc.online }}>Process {proc.pid}</span>
+                                </div>
+                              </td>
+                              <td class="num">{rate(proc.rate_recv)}</td>
+                              <td class="num">{rate(proc.rate_sent)}</td>
+                              <td class="num">{proc.conns.length}</td>
+                              <td class="num">{bytes(proc.total.sent + proc.total.recv)}</td>
+                            </tr>
+                            <Show when={openProcs().has(proc.pid)}>
+                              <For each={proc.conns}>
+                                {(c) => <ConnRow c={c} onSelect={() => setSel({ app: app.app, conn: c })} />}
+                              </For>
+                              <Show when={proc.conns.length === 0}>
+                                <tr class="conn-row"><td colSpan={5} class="conn-empty">no active connections</td></tr>
+                              </Show>
+                            </Show>
+                          </>
+                        )}
                       </For>
-                      <Show when={s.conns.length === 0}>
-                        <tr class="conn-row">
-                          <td colSpan={5} class="conn-empty">no active connections</td>
-                        </tr>
-                      </Show>
                     </Show>
                   </>
                 )}
@@ -182,12 +193,13 @@ export function Activity() {
 
 function ConnRow(props: { c: Conn; onSelect: () => void }) {
   const c = props.c;
+  const out = () => c.direction === "outbound";
   return (
     <tr class="conn-row" onClick={props.onSelect}>
       <td>
         <div class="conn-cell">
-          <span class="dir">{c.direction === "outbound" ? "↗" : "↘"}</span>
-          <span class="addr">{c.remote.addr}:{c.remote.port}</span>
+          <span class="dir" classList={{ out: out(), in: !out() }}>{out() ? "↗" : "↘"}</span>
+          <span class="addr" classList={{ host: !!c.host }}>{connLabel(c)}</span>
         </div>
       </td>
       <td class="proto">{c.remote.protocol.toUpperCase()}</td>

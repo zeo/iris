@@ -3,8 +3,9 @@
 //! when the ETW byte monitor could not start. reports active TCP connections
 //! (anything past LISTEN) plus UDP endpoints with their remote address.
 
+use crate::dns::{self, DnsMap};
 use crate::proc::PidCache;
-use iris_core::{AppId, Conn, ConnState, Direction, Endpoint, Protocol};
+use iris_core::{Conn, ConnState, Direction, Endpoint, Protocol};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use windows::Win32::NetworkManagement::IpHelper::{
@@ -13,8 +14,8 @@ use windows::Win32::NetworkManagement::IpHelper::{
 };
 use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
-/// how many connections to keep per app on the wire; the count stays exact
-const MAX_CONNS_PER_APP: usize = 64;
+/// how many connections to keep per process on the wire; the count stays exact
+const MAX_CONNS_PER_PROC: usize = 64;
 
 struct RawConn {
     pid: u32,
@@ -23,16 +24,28 @@ struct RawConn {
     state: ConnState,
 }
 
-/// enumerates connections and resolves owning PIDs to app paths, reusing a cache
-/// so it does not open a handle per socket every second.
+// the endpoint with the lower port is almost always the server; if that is us,
+// the connection came inbound, otherwise we dialed out
+fn direction(local_port: u16, remote_port: u16) -> Direction {
+    if local_port < remote_port {
+        Direction::Inbound
+    } else {
+        Direction::Outbound
+    }
+}
+
+/// connection enumeration keyed by process, with host names filled from captured
+/// DNS. reuses a PID cache so it does not open a handle per socket every second.
 pub struct ConnCounter {
     cache: PidCache,
+    dns: DnsMap,
 }
 
 impl ConnCounter {
-    pub fn new() -> Self {
+    pub fn new(dns: DnsMap) -> Self {
         ConnCounter {
             cache: PidCache::new(),
+            dns,
         }
     }
 
@@ -41,32 +54,28 @@ impl ConnCounter {
         self.cache.clear();
     }
 
-    /// current connections grouped by owning app
-    pub fn by_app(&mut self) -> HashMap<AppId, Vec<Conn>> {
+    /// current connections grouped by owning PID, each with the process path
+    pub fn by_pid(&mut self) -> HashMap<u32, (String, Vec<Conn>)> {
         let raw = snapshot();
-        let mut out: HashMap<AppId, Vec<Conn>> = HashMap::new();
+        let mut out: HashMap<u32, (String, Vec<Conn>)> = HashMap::new();
         for r in raw {
             let Some(path) = self.cache.resolve(r.pid) else {
                 continue;
             };
-            let app = AppId::from_path(&path);
-            let list = out.entry(app).or_default();
-            if list.len() < MAX_CONNS_PER_APP {
-                list.push(Conn {
+            let entry = out.entry(r.pid).or_insert_with(|| (path, Vec::new()));
+            if entry.1.len() < MAX_CONNS_PER_PROC {
+                let host = dns::lookup(&self.dns, &r.remote.addr);
+                let dir = direction(r.local_port, r.remote.port);
+                entry.1.push(Conn {
                     remote: r.remote,
+                    host,
                     local_port: r.local_port,
-                    direction: Direction::Outbound,
+                    direction: dir,
                     state: r.state,
                 });
             }
         }
         out
-    }
-}
-
-impl Default for ConnCounter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

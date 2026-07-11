@@ -12,9 +12,18 @@ export interface Endpoint {
 }
 export interface Conn {
   remote: Endpoint;
+  host: string | null;
   local_port: number;
   direction: "inbound" | "outbound";
   state: "listen" | "active" | "closing";
+}
+export interface ProcSample {
+  pid: number;
+  rate_sent: number;
+  rate_recv: number;
+  total: { sent: number; recv: number };
+  online: boolean;
+  conns: Conn[];
 }
 export interface AppSample {
   app: string;
@@ -24,7 +33,7 @@ export interface AppSample {
   total: { sent: number; recv: number };
   connections: number;
   online: boolean;
-  conns: Conn[];
+  processes: ProcSample[];
 }
 export interface StatsTick {
   at_ms: number;

@@ -15,13 +15,13 @@ pub mod model;
 pub mod rule;
 pub mod usage;
 
-pub use aggregate::Aggregator;
+pub use aggregate::{Aggregator, PidSample};
 pub use alert::{Alert, AlertKind};
 pub use engine::{FirewallController, MonitorSink, NetworkMonitor};
 pub use error::{EngineError, EngineResult};
 pub use model::{
-    AppId, AppSample, ByteCounts, Conn, ConnState, Direction, Endpoint, LiveConnection, ProcessKey,
-    Protocol, StatsTick,
+    AppId, AppSample, ByteCounts, Conn, ConnState, Direction, Endpoint, LiveConnection, ProcSample,
+    ProcessKey, Protocol, StatsTick,
 };
 pub use rule::{Rule, RuleAction, StoredRule};
 pub use usage::{Granularity, UsageBucket, UsageQuery};

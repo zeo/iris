@@ -1,9 +1,9 @@
 # iris
 
 A firewall and network monitor for Windows. Iris watches every application's
-network traffic and puts you in control of what is allowed to connect, the way
-GlassWire's Protect and NetLimiter's Activity do, without the price tag or the
-bloat.
+network traffic and puts you in control of what is allowed to connect: per-app
+allow and block rules, a live view of what every process is talking to, and a
+running history of how much each one uses.
 
 Built native: a small privileged engine (Windows service) does the real work
 with the OS filtering platform and kernel network events, and an unprivileged

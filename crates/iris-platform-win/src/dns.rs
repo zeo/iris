@@ -1,6 +1,6 @@
 //! a small IP -> hostname map fed by the DNS-Client ETW provider, so a
 //! connection can show the name the process actually looked up (e.g.
-//! api.anthropic.com) rather than the bare address.
+//! updates.example.net) rather than the bare address.
 
 use std::collections::HashMap;
 use std::net::IpAddr;

@@ -22,8 +22,8 @@ function connLabel(c: Conn): string {
 type Sort = "rate" | "down" | "up" | "conns" | "name";
 type Filter = "all" | "online" | "offline";
 
-// live per-app tree (NetLimiter "Activity"), monitor-only. app -> process ->
-// connection. an app that stops connecting lingers (dimmed red) before drop.
+// live per-app tree, monitor-only. app -> process -> connection. an app that
+// stops connecting lingers (dimmed red) before drop.
 export function Activity() {
   const [q, setQ] = createSignal("");
   // default to a stable order (by name) so rows do not jump every tick; the

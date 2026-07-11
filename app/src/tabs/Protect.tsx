@@ -9,8 +9,8 @@ function fileName(path: string): string {
   return seg && seg.length ? seg : path;
 }
 
-// per-app allow/block rules (GlassWire "Protect"), enforced at the Windows
-// Filtering Platform. blocking also works from the Activity tab.
+// per-app allow/block rules enforced at the Windows Filtering Platform.
+// blocking also works from the Activity tab.
 export function Protect() {
   const [q, setQ] = createSignal("");
   const [adding, setAdding] = createSignal(false);

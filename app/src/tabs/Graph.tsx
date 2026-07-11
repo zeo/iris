@@ -11,8 +11,8 @@ function fileName(path: string): string {
   return seg && seg.length ? seg : path;
 }
 
-// the scope: a live, scrolling picture of bandwidth (GlassWire's signature),
-// with the apps driving it right now listed underneath.
+// the scope: a live, scrolling picture of bandwidth, with the apps driving it
+// right now listed underneath.
 export function Graph() {
   const [range, setRange] = createSignal<(typeof RANGES)[number]>("5m");
   const peak = () => engine.ring().reduce((m, s) => Math.max(m, s.sent, s.recv), 0);

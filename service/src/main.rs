@@ -11,8 +11,20 @@ mod tracker;
 mod svc;
 
 use engine::Engine;
+use iris_store::Store;
 use rules::RuleStore;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+fn open_store() -> Store {
+    let base = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+    let dir = PathBuf::from(base).join("Iris");
+    let _ = std::fs::create_dir_all(&dir);
+    Store::open(&dir.join("iris.db")).unwrap_or_else(|e| {
+        tracing::error!("history store unavailable, using in-memory: {e}");
+        Store::open_in_memory().expect("in-memory store")
+    })
+}
 
 fn main() -> anyhow::Result<()> {
     let console = std::env::args().any(|a| a == "--console");
@@ -46,8 +58,9 @@ fn run_console() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let engine = Engine::new();
-        monitor::spawn(engine.clone());
+        let store = Arc::new(Mutex::new(open_store()));
+        monitor::spawn(engine.clone(), store.clone());
         let rules = Arc::new(Mutex::new(RuleStore::new()));
-        server::serve(engine, rules).await
+        server::serve(engine, rules, store).await
     })
 }

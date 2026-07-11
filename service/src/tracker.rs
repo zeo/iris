@@ -10,6 +10,11 @@ use std::sync::{Arc, Mutex};
 
 /// how long a process lingers as "offline" after its last connection or byte
 const GRACE_MS: u64 = 20_000;
+/// how long a connection stays in the list after it drops from a snapshot, so
+/// short-lived connections do not make the view churn every second
+const CONN_GRACE_MS: u64 = 4_000;
+
+type ConnKey = (String, u16, u16);
 
 pub struct Tracker {
     agg: Arc<Mutex<Aggregator>>,
@@ -17,6 +22,10 @@ pub struct Tracker {
     conns: iris_platform_win::ConnCounter,
     /// when each idle process went offline; absent while active. keyed by PID.
     offline_since: HashMap<u32, u64>,
+    /// recently-seen connections per PID, held briefly past their last sighting
+    conn_history: HashMap<u32, HashMap<ConnKey, (Conn, u64)>>,
+    /// last known image path per PID, so graced connections keep their app
+    pid_path: HashMap<u32, String>,
 }
 
 impl Tracker {
@@ -26,6 +35,8 @@ impl Tracker {
             agg,
             conns: iris_platform_win::ConnCounter::new(dns),
             offline_since: HashMap::new(),
+            conn_history: HashMap::new(),
+            pid_path: HashMap::new(),
         }
     }
 
@@ -34,10 +45,12 @@ impl Tracker {
         Tracker {
             agg,
             offline_since: HashMap::new(),
+            conn_history: HashMap::new(),
+            pid_path: HashMap::new(),
         }
     }
 
-    fn connections(&mut self) -> HashMap<u32, (String, Vec<Conn>)> {
+    fn snapshot(&mut self) -> HashMap<u32, (String, Vec<Conn>)> {
         #[cfg(windows)]
         {
             self.conns.by_pid()
@@ -48,8 +61,38 @@ impl Tracker {
         }
     }
 
+    /// current connections per PID, each held for a short grace past its last
+    /// sighting so the UI list stays stable instead of flickering every tick
+    fn connections(&mut self, now: u64) -> HashMap<u32, (String, Vec<Conn>)> {
+        let fresh = self.snapshot();
+        for (pid, (path, conns)) in &fresh {
+            self.pid_path.insert(*pid, path.clone());
+            let hist = self.conn_history.entry(*pid).or_default();
+            for c in conns {
+                let key = (c.remote.addr.to_string(), c.remote.port, c.local_port);
+                hist.insert(key, (c.clone(), now));
+            }
+        }
+        // age out stale connections and empty pids
+        for hist in self.conn_history.values_mut() {
+            hist.retain(|_, (_, seen)| now.saturating_sub(*seen) <= CONN_GRACE_MS);
+        }
+        self.conn_history.retain(|_, h| !h.is_empty());
+        self.pid_path.retain(|pid, _| self.conn_history.contains_key(pid));
+
+        self.conn_history
+            .iter()
+            .filter_map(|(pid, hist)| {
+                let path = self.pid_path.get(pid)?.clone();
+                let mut conns: Vec<Conn> = hist.values().map(|(c, _)| c.clone()).collect();
+                conns.sort_by(|a, b| a.remote.port.cmp(&b.remote.port));
+                Some((*pid, (path, conns)))
+            })
+            .collect()
+    }
+
     pub fn tick(&mut self, now: u64) -> StatsTick {
-        let conns_by_pid = self.connections();
+        let conns_by_pid = self.connections(now);
 
         {
             let mut a = self.agg.lock().expect("aggregator poisoned");

@@ -4,7 +4,7 @@
 //! request/response commands (rules today) correlated by id, so the UI can drive
 //! the privileged engine. it reconnects on its own.
 
-use iris_core::{AppId, Direction, Rule, RuleAction, StoredRule};
+use iris_core::{Alert, AppId, Direction, Granularity, Rule, RuleAction, StoredRule, UsageBucket, UsageQuery};
 use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
 use serde::{Deserialize, Serialize};
@@ -24,14 +24,18 @@ pub struct Status {
 pub struct StatusState(pub Mutex<Status>);
 
 /// what the UI asks the engine to do; the session task assigns the wire id
-pub enum RuleCmd {
-    List,
-    Add(Rule),
-    Remove(i64),
-    SetEnabled(i64, bool),
+pub enum EngineCmd {
+    ListRules,
+    AddRule(Rule),
+    RemoveRule(i64),
+    SetRuleEnabled(i64, bool),
+    GetUsage(UsageQuery),
+    ListAlerts(bool),
+    AckAlert(i64),
+    KillConnection(u16, String, u16),
 }
 pub struct Command {
-    cmd: RuleCmd,
+    cmd: EngineCmd,
     resp: oneshot::Sender<Reply>,
 }
 
@@ -43,7 +47,7 @@ pub fn engine_status(state: tauri::State<'_, StatusState>) -> Status {
     state.inner().0.lock().map(|s| s.clone()).unwrap_or_default()
 }
 
-async fn dispatch(app: &AppHandle, cmd: RuleCmd) -> Result<Reply, String> {
+async fn dispatch(app: &AppHandle, cmd: EngineCmd) -> Result<Reply, String> {
     let tx = {
         let state = app.try_state::<Commander>().ok_or("ipc not ready")?;
         state.0.clone()
@@ -57,7 +61,7 @@ async fn dispatch(app: &AppHandle, cmd: RuleCmd) -> Result<Reply, String> {
 
 #[tauri::command]
 pub async fn list_rules(app: AppHandle) -> Result<Vec<StoredRule>, String> {
-    match dispatch(&app, RuleCmd::List).await? {
+    match dispatch(&app, EngineCmd::ListRules).await? {
         Reply::Rules(r) => Ok(r),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
@@ -77,7 +81,7 @@ pub async fn add_rule(
         action: parse_action(&action),
         label: None,
     };
-    match dispatch(&app, RuleCmd::Add(rule)).await? {
+    match dispatch(&app, EngineCmd::AddRule(rule)).await? {
         Reply::RuleAdded(r) => Ok(r),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
@@ -86,7 +90,7 @@ pub async fn add_rule(
 
 #[tauri::command]
 pub async fn remove_rule(app: AppHandle, id: i64) -> Result<(), String> {
-    match dispatch(&app, RuleCmd::Remove(id)).await? {
+    match dispatch(&app, EngineCmd::RemoveRule(id)).await? {
         Reply::Ok => Ok(()),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
@@ -95,8 +99,64 @@ pub async fn remove_rule(app: AppHandle, id: i64) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn set_rule_enabled(app: AppHandle, id: i64, enabled: bool) -> Result<(), String> {
-    match dispatch(&app, RuleCmd::SetEnabled(id, enabled)).await? {
+    match dispatch(&app, EngineCmd::SetRuleEnabled(id, enabled)).await? {
         Reply::Ok => Ok(()),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn list_alerts(app: AppHandle, unacked_only: bool) -> Result<Vec<Alert>, String> {
+    match dispatch(&app, EngineCmd::ListAlerts(unacked_only)).await? {
+        Reply::Alerts(a) => Ok(a),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn ack_alert(app: AppHandle, id: i64) -> Result<(), String> {
+    match dispatch(&app, EngineCmd::AckAlert(id)).await? {
+        Reply::Ok => Ok(()),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn kill_connection(
+    app: AppHandle,
+    local_port: u16,
+    remote_addr: String,
+    remote_port: u16,
+) -> Result<(), String> {
+    match dispatch(&app, EngineCmd::KillConnection(local_port, remote_addr, remote_port)).await? {
+        Reply::Ok => Ok(()),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn get_usage(
+    app: AppHandle,
+    from_ms: f64,
+    to_ms: f64,
+    granularity: String,
+) -> Result<Vec<UsageBucket>, String> {
+    let query = UsageQuery {
+        app: None,
+        from_ms: from_ms as u64,
+        to_ms: to_ms as u64,
+        granularity: match granularity.as_str() {
+            "hour" => Granularity::Hour,
+            "day" => Granularity::Day,
+            _ => Granularity::Minute,
+        },
+    };
+    match dispatch(&app, EngineCmd::GetUsage(query)).await? {
+        Reply::Usage(u) => Ok(u),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
     }
@@ -168,10 +228,15 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                 let req = next_id;
                 next_id += 1;
                 let msg = match command.cmd {
-                    RuleCmd::List => ClientMessage::ListRules { req },
-                    RuleCmd::Add(rule) => ClientMessage::AddRule { req, rule },
-                    RuleCmd::Remove(id) => ClientMessage::RemoveRule { req, id },
-                    RuleCmd::SetEnabled(id, enabled) => ClientMessage::SetRuleEnabled { req, id, enabled },
+                    EngineCmd::ListRules => ClientMessage::ListRules { req },
+                    EngineCmd::AddRule(rule) => ClientMessage::AddRule { req, rule },
+                    EngineCmd::RemoveRule(id) => ClientMessage::RemoveRule { req, id },
+                    EngineCmd::SetRuleEnabled(id, enabled) => ClientMessage::SetRuleEnabled { req, id, enabled },
+                    EngineCmd::GetUsage(query) => ClientMessage::GetUsage { req, query },
+                    EngineCmd::ListAlerts(unacked_only) => ClientMessage::ListAlerts { req, unacked_only },
+                    EngineCmd::AckAlert(id) => ClientMessage::AckAlert { req, id },
+                    EngineCmd::KillConnection(local_port, remote_addr, remote_port) =>
+                        ClientMessage::KillConnection { req, local_port, remote_addr, remote_port },
                 };
                 pending.insert(req, command.resp);
                 if let Err(e) = transport::write_frame(&mut send, &msg).await {

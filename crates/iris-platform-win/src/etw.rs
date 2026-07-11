@@ -7,6 +7,11 @@ use ferrisetw::trace::UserTrace;
 use ferrisetw::EventRecord;
 use iris_core::Aggregator;
 use std::sync::{Arc, Mutex};
+use windows::core::PCWSTR;
+use windows::Win32::System::Diagnostics::Etw::{
+    ControlTraceW, CONTROLTRACE_HANDLE, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_PROPERTIES,
+    WNODE_FLAG_TRACED_GUID,
+};
 
 // Microsoft-Windows-Kernel-Network: per-app byte counts. manifest provider, so
 // it enables in a normal user-mode trace given admin rights.
@@ -33,9 +38,12 @@ fn direction(event_id: u16) -> Option<Dir> {
 }
 
 /// a running ETW monitor: attributes network bytes to processes and records the
-/// DNS names they resolve. dropping (or `stop`) ends the trace.
+/// DNS names they resolve. the two providers run in separate sessions so a DNS
+/// session that fails to start never takes byte capture down with it. dropping
+/// (or `stop`) ends both.
 pub struct Monitor {
-    trace: Option<UserTrace>,
+    net_trace: Option<UserTrace>,
+    dns_trace: Option<UserTrace>,
     cache: Arc<Mutex<PidCache>>,
 }
 
@@ -43,35 +51,44 @@ impl Monitor {
     pub fn start(agg: Arc<Mutex<Aggregator>>, dns_map: DnsMap) -> anyhow::Result<Monitor> {
         let cache = Arc::new(Mutex::new(PidCache::new()));
 
+        // byte counts — required
         let net_agg = agg;
         let net_cache = cache.clone();
         let net_cb = move |record: &EventRecord, locator: &SchemaLocator| {
             on_net_event(record, locator, &net_agg, &net_cache);
         };
-        let dns_cb = {
-            let map = dns_map.clone();
-            move |record: &EventRecord, locator: &SchemaLocator| {
-                on_dns_event(record, locator, &map);
-            }
-        };
-
         let net_provider = Provider::by_guid(KERNEL_NETWORK_GUID)
             .add_callback(net_cb)
             .build();
+        // stop any leaked session from a previous ungraceful exit, else the
+        // create fails with AlreadyExist and byte capture silently dies
+        stop_stale_session("iris-net");
+        stop_stale_session("iris-dns");
+
+        let net_trace = UserTrace::new()
+            .named("iris-net".to_string())
+            .enable(net_provider)
+            .start_and_process()
+            .map_err(|e| anyhow::anyhow!("failed to start ETW network trace (admin required): {e:?}"))?;
+        tracing::info!("ETW network trace running");
+
+        // DNS names — best effort; the connection view still works on raw ip
+        let dns_cb = move |record: &EventRecord, locator: &SchemaLocator| {
+            on_dns_event(record, locator, &dns_map);
+        };
         let dns_provider = Provider::by_guid(DNS_CLIENT_GUID)
             .add_callback(dns_cb)
             .build();
-
-        let trace = UserTrace::new()
-            .named("iris-net".to_string())
-            .enable(net_provider)
+        let dns_trace = UserTrace::new()
+            .named("iris-dns".to_string())
             .enable(dns_provider)
             .start_and_process()
-            .map_err(|e| anyhow::anyhow!("failed to start ETW trace (admin required): {e:?}"))?;
+            .map_err(|e| tracing::warn!("DNS name capture unavailable: {e:?}"))
+            .ok();
 
-        tracing::info!("ETW monitor running (network + dns)");
         Ok(Monitor {
-            trace: Some(trace),
+            net_trace: Some(net_trace),
+            dns_trace,
             cache,
         })
     }
@@ -84,9 +101,35 @@ impl Monitor {
     }
 
     pub fn stop(mut self) {
-        if let Some(t) = self.trace.take() {
+        if let Some(t) = self.net_trace.take() {
             let _ = t.stop();
         }
+        if let Some(t) = self.dns_trace.take() {
+            let _ = t.stop();
+        }
+    }
+}
+
+// stop a real-time ETW session by name if it leaked from an ungraceful exit,
+// ignoring the "not found" case, so the fresh trace can be created
+fn stop_stale_session(name: &str) {
+    unsafe {
+        let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        const NAME_ROOM: usize = 1024;
+        let size = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() + 2 * NAME_ROOM;
+        let mut buf = vec![0u8; size];
+        let props = buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
+        (*props).Wnode.BufferSize = size as u32;
+        (*props).Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+        (*props).LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+        (*props).LogFileNameOffset =
+            (std::mem::size_of::<EVENT_TRACE_PROPERTIES>() + NAME_ROOM) as u32;
+        let _ = ControlTraceW(
+            CONTROLTRACE_HANDLE::default(),
+            PCWSTR(name_w.as_ptr()),
+            props,
+            EVENT_TRACE_CONTROL_STOP,
+        );
     }
 }
 

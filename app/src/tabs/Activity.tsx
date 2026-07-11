@@ -1,9 +1,11 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
+import { Key } from "@solid-primitives/keyed";
 import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import { ConnDetails } from "../components/ConnDetails";
 import { engine, type AppSample, type Conn } from "../lib/engine";
 import { blockApp, isBlocked, unblockApp } from "../lib/rules";
+import { persisted } from "../lib/persist";
 import { bytes, rate } from "../lib/format";
 
 function fileName(path: string): string {
@@ -24,8 +26,10 @@ type Filter = "all" | "online" | "offline";
 // connection. an app that stops connecting lingers (dimmed red) before drop.
 export function Activity() {
   const [q, setQ] = createSignal("");
-  const [sort, setSort] = createSignal<Sort>("rate");
-  const [filter, setFilter] = createSignal<Filter>("all");
+  // default to a stable order (by name) so rows do not jump every tick; the
+  // user can sort by rate when they want the busiest at the top
+  const [sort, setSort] = persisted<Sort>("activity.sort", "name");
+  const [filter, setFilter] = persisted<Filter>("activity.filter", "all");
   const [openApps, setOpenApps] = createSignal<Set<string>>(new Set());
   const [openProcs, setOpenProcs] = createSignal<Set<number>>(new Set());
   const [sel, setSel] = createSignal<{ app: string; conn: Conn } | null>(null);
@@ -128,70 +132,70 @@ export function Activity() {
               </tr>
             </thead>
             <tbody>
-              <For each={rows()}>
+              <Key each={rows()} by={(a) => a.app}>
                 {(app) => (
                   <>
-                    <tr class="app-row" classList={{ off: !app.online }} onClick={() => toggleApp(app.app)}>
+                    <tr class="app-row" classList={{ off: !app().online }} onClick={() => toggleApp(app().app)}>
                       <td>
                         <div class="app-cell">
-                          <button class="chev" classList={{ open: openApps().has(app.app) }} aria-label="expand">
+                          <button class="chev" classList={{ open: openApps().has(app().app) }} aria-label="expand">
                             <Icon name="chevron" size={12} />
                           </button>
-                          <AppIcon path={app.app} />
-                          <span class="name" classList={{ offline: !app.online, blocked: isBlocked(app.app) }}>{label(app)}</span>
+                          <AppIcon path={app().app} />
+                          <span class="name" classList={{ offline: !app().online, blocked: isBlocked(app().app) }}>{label(app())}</span>
                           <span class="grow" />
                           <button
                             class="block-btn"
-                            classList={{ on: isBlocked(app.app) }}
-                            title={isBlocked(app.app) ? "unblock" : "block"}
+                            classList={{ on: isBlocked(app().app) }}
+                            title={isBlocked(app().app) ? "unblock" : "block"}
                             onClick={(e) => {
                               e.stopPropagation();
-                              isBlocked(app.app) ? unblockApp(app.app) : blockApp(app.app);
+                              isBlocked(app().app) ? unblockApp(app().app) : blockApp(app().app);
                             }}
                           >
                             <Icon name="block" size={13} />
                           </button>
                         </div>
                       </td>
-                      <td class="num">{rate(app.rate_recv)}</td>
-                      <td class="num">{rate(app.rate_sent)}</td>
-                      <td class="num">{app.connections}</td>
-                      <td class="num">{bytes(app.total.sent + app.total.recv)}</td>
+                      <td class="num">{rate(app().rate_recv)}</td>
+                      <td class="num">{rate(app().rate_sent)}</td>
+                      <td class="num">{app().connections}</td>
+                      <td class="num">{bytes(app().total.sent + app().total.recv)}</td>
                     </tr>
-                    <Show when={openApps().has(app.app)}>
-                      <For each={app.processes}>
+                    <Show when={openApps().has(app().app)}>
+                      <Key each={app().processes} by={(p) => p.pid}>
                         {(proc) => (
                           <>
-                            <tr class="proc-row" classList={{ off: !proc.online }} onClick={() => toggleProc(proc.pid)}>
+                            <tr class="proc-row" classList={{ off: !proc().online }} onClick={() => toggleProc(proc().pid)}>
                               <td>
                                 <div class="proc-cell">
-                                  <button class="chev" classList={{ open: openProcs().has(proc.pid) }} disabled={proc.conns.length === 0} aria-label="expand">
+                                  <button class="chev" classList={{ open: openProcs().has(proc().pid) }} disabled={proc().conns.length === 0} aria-label="expand">
                                     <Icon name="chevron" size={12} />
                                   </button>
                                   <Icon name="cpu" class="proc-ico" size={13} />
-                                  <span class="name" classList={{ offline: !proc.online }}>Process {proc.pid}</span>
+                                  <span class="name" classList={{ offline: !proc().online }}>Process {proc().pid}</span>
                                 </div>
                               </td>
-                              <td class="num">{rate(proc.rate_recv)}</td>
-                              <td class="num">{rate(proc.rate_sent)}</td>
-                              <td class="num">{proc.conns.length}</td>
-                              <td class="num">{bytes(proc.total.sent + proc.total.recv)}</td>
+                              <td class="num">{rate(proc().rate_recv)}</td>
+                              <td class="num">{rate(proc().rate_sent)}</td>
+                              <td class="num">{proc().conns.length}</td>
+                              <td class="num">{bytes(proc().total.sent + proc().total.recv)}</td>
                             </tr>
-                            <Show when={openProcs().has(proc.pid)}>
-                              <For each={proc.conns}>
-                                {(c) => <ConnRow c={c} onSelect={() => setSel({ app: app.app, conn: c })} />}
-                              </For>
-                              <Show when={proc.conns.length === 0}>
+                            <Show when={openProcs().has(proc().pid)}>
+                              <Key each={proc().conns} by={(c) => `${c.remote.addr}:${c.remote.port}:${c.local_port}`}>
+                                {(c) => <ConnRow c={c()} onSelect={() => setSel({ app: app().app, conn: c() })} />}
+                              </Key>
+                              <Show when={proc().conns.length === 0}>
                                 <tr class="conn-row"><td colSpan={5} class="conn-empty">no active connections</td></tr>
                               </Show>
                             </Show>
                           </>
                         )}
-                      </For>
+                      </Key>
                     </Show>
                   </>
                 )}
-              </For>
+              </Key>
             </tbody>
           </table>
         </div>
@@ -208,10 +212,10 @@ function ConnRow(props: { c: Conn; onSelect: () => void }) {
   const c = props.c;
   const out = () => c.direction === "outbound";
   return (
-    <tr class="conn-row" onClick={props.onSelect}>
+    <tr class="conn-row" classList={{ out: out(), in: !out() }} onClick={props.onSelect}>
       <td>
         <div class="conn-cell">
-          <span class="dir" classList={{ out: out(), in: !out() }}>{out() ? "↗" : "↘"}</span>
+          <span class="dir"><Icon name={out() ? "out" : "in"} size={13} /></span>
           <span class="addr" classList={{ host: !!c.host }}>{connLabel(c)}</span>
         </div>
       </td>

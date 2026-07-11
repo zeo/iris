@@ -2,6 +2,7 @@ use crate::engine::Engine;
 use crate::rules::RuleStore;
 use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
+use iris_store::Store;
 use std::io;
 use std::sync::{Arc, Mutex};
 use tokio::select;
@@ -9,15 +10,20 @@ use tokio::sync::broadcast::error::RecvError;
 
 /// accept clients on the iris pipe until the runtime is cancelled. each
 /// connection is served on its own task.
-pub async fn serve(engine: Engine, rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
+pub async fn serve(
+    engine: Engine,
+    rules: Arc<Mutex<RuleStore>>,
+    store: Arc<Mutex<Store>>,
+) -> anyhow::Result<()> {
     let listener = transport::listen()?;
     tracing::info!(pipe = iris_ipc::PIPE_NAME, "engine listening");
     loop {
         let conn = transport::accept(&listener).await?;
         let engine = engine.clone();
         let rules = rules.clone();
+        let store = store.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(conn, engine, rules).await {
+            if let Err(e) = handle(conn, engine, rules, store).await {
                 tracing::debug!("client disconnected: {e}");
             }
         });
@@ -30,6 +36,7 @@ async fn handle(
     stream: transport::Stream,
     engine: Engine,
     rules: Arc<Mutex<RuleStore>>,
+    store: Arc<Mutex<Store>>,
 ) -> io::Result<()> {
     let (mut recv, mut send) = transport::split(stream);
 
@@ -90,6 +97,32 @@ async fn handle(
                         }
                         reply(&mut send, req, Reply::Ok).await?;
                     }
+                    ClientMessage::GetUsage { req, query } => {
+                        let rows = store.lock().map(|s| s.query_usage(&query)).unwrap_or_default();
+                        reply(&mut send, req, Reply::Usage(rows)).await?;
+                    }
+                    ClientMessage::ListAlerts { req, unacked_only } => {
+                        let list = store
+                            .lock()
+                            .map(|s| s.list_alerts(unacked_only))
+                            .unwrap_or_default();
+                        reply(&mut send, req, Reply::Alerts(list)).await?;
+                    }
+                    ClientMessage::AckAlert { req, id } => {
+                        if let Ok(s) = store.lock() {
+                            s.ack_alert(id);
+                        }
+                        reply(&mut send, req, Reply::Ok).await?;
+                    }
+                    ClientMessage::KillConnection { req, local_port, remote_addr, remote_port } => {
+                        let killed = kill_conn(local_port, &remote_addr, remote_port);
+                        let result = if killed {
+                            Reply::Ok
+                        } else {
+                            Reply::Error("connection not found or not killable".into())
+                        };
+                        reply(&mut send, req, result).await?;
+                    }
                     // commands whose engine support arrives in later slices: answer
                     // rather than leave the UI awaiting a reply that never comes
                     other => {
@@ -137,7 +170,23 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::GetUsage { req, .. }
         | ClientMessage::ListAlerts { req, .. }
         | ClientMessage::AckAlert { req, .. }
+        | ClientMessage::KillConnection { req, .. }
         | ClientMessage::Ping { req } => Some(*req),
         ClientMessage::Hello { .. } | ClientMessage::Subscribe | ClientMessage::Unsubscribe => None,
+    }
+}
+
+fn kill_conn(local_port: u16, remote_addr: &str, remote_port: u16) -> bool {
+    #[cfg(windows)]
+    {
+        match remote_addr.parse() {
+            Ok(ip) => iris_platform_win::kill_connection(local_port, ip, remote_port),
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (local_port, remote_addr, remote_port);
+        false
     }
 }

@@ -1,4 +1,4 @@
-import { createResource, Show } from "solid-js";
+import { createResource, createSignal, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Icon } from "./Icon";
@@ -12,9 +12,24 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
     (ip) => invoke<string | null>("reverse_dns", { ip }),
   );
 
+  const [killed, setKilled] = createSignal(false);
+  const [killErr, setKillErr] = createSignal("");
   const remote = () => `${props.conn.remote.addr}:${props.conn.remote.port}`;
   const copy = () => navigator.clipboard?.writeText(remote()).catch(() => {});
   const whois = () => openUrl(`https://who.is/whois-ip/ip-address/${props.conn.remote.addr}`);
+  const kill = async () => {
+    setKillErr("");
+    try {
+      await invoke("kill_connection", {
+        localPort: props.conn.local_port,
+        remoteAddr: props.conn.remote.addr,
+        remotePort: props.conn.remote.port,
+      });
+      setKilled(true);
+    } catch (e) {
+      setKillErr(String(e));
+    }
+  };
 
   const row = (k: string, v: unknown) => (
     <div class="prow">
@@ -58,7 +73,13 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
         <div class="tool-row">
           <button class="btn" onClick={copy}>Copy address</button>
           <button class="btn" onClick={whois}>Whois</button>
+          <button class="btn" data-variant="danger" onClick={kill} disabled={killed()}>
+            <Icon name="power" /> {killed() ? "Killed" : "Kill connection"}
+          </button>
         </div>
+        <Show when={killErr()}>
+          <div class="tool-err">{killErr()}</div>
+        </Show>
       </div>
     </aside>
   );

@@ -23,6 +23,13 @@ pub enum ClientMessage {
     GetUsage { req: u64, query: UsageQuery },
     ListAlerts { req: u64, unacked_only: bool },
     AckAlert { req: u64, id: i64 },
+    /// terminate a single TCP connection (privileged)
+    KillConnection {
+        req: u64,
+        local_port: u16,
+        remote_addr: String,
+        remote_port: u16,
+    },
     /// keepalive; service replies with the same `req`
     Ping { req: u64 },
 }

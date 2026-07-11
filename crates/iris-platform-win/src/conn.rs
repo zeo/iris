@@ -9,10 +9,46 @@ use iris_core::{Conn, ConnState, Direction, Endpoint, Protocol};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use windows::Win32::NetworkManagement::IpHelper::{
-    GetExtendedTcpTable, MIB_TCP6TABLE_OWNER_PID, MIB_TCPTABLE_OWNER_PID, MIB_TCP_STATE_CLOSED,
-    MIB_TCP_STATE_ESTAB, MIB_TCP_STATE_LISTEN, TCP_TABLE_OWNER_PID_ALL,
+    GetExtendedTcpTable, SetTcpEntry, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_LH, MIB_TCPTABLE_OWNER_PID,
+    MIB_TCP_STATE_CLOSED, MIB_TCP_STATE_ESTAB, MIB_TCP_STATE_LISTEN, TCP_TABLE_OWNER_PID_ALL,
 };
 use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+
+// MIB_TCP_STATE_DELETE_TCB: writing this state via SetTcpEntry tears the
+// connection down
+const DELETE_TCB: u32 = 12;
+
+/// terminate an established TCP connection matching the tuple. IPv4 only, since
+/// SetTcpEntry has no v6 form. returns true if a matching connection was killed.
+pub fn kill_connection(local_port: u16, remote: IpAddr, remote_port: u16) -> bool {
+    let IpAddr::V4(rip) = remote else {
+        return false;
+    };
+    let want_remote = u32::from_ne_bytes(rip.octets());
+    unsafe {
+        let buf = fetch_tcp(AF_INET.0 as u32);
+        if buf.is_empty() {
+            return false;
+        }
+        let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+        let rows = std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize);
+        for r in rows {
+            if port(r.dwLocalPort) == local_port
+                && r.dwRemoteAddr == want_remote
+                && port(r.dwRemotePort) == remote_port
+            {
+                let mut row: MIB_TCPROW_LH = std::mem::zeroed();
+                row.Anonymous.dwState = DELETE_TCB;
+                row.dwLocalAddr = r.dwLocalAddr;
+                row.dwLocalPort = r.dwLocalPort;
+                row.dwRemoteAddr = r.dwRemoteAddr;
+                row.dwRemotePort = r.dwRemotePort;
+                return SetTcpEntry(&row) == 0;
+            }
+        }
+    }
+    false
+}
 
 /// how many connections to keep per process on the wire; the count stays exact
 const MAX_CONNS_PER_PROC: usize = 64;

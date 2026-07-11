@@ -1,12 +1,14 @@
 //! ties the platform data sources to the engine: the ETW byte monitor fills a
 //! shared aggregator, the [`Tracker`] merges that with live connections and the
 //! online/offline lifecycle, and a one-second timer publishes the resulting
-//! sample tick to every subscribed UI.
+//! sample tick to every subscribed UI. it also records usage to the store and
+//! raises a first-seen alert the first time an app reaches the network.
 
 use crate::engine::Engine;
 use crate::tracker::Tracker;
-use iris_core::Aggregator;
+use iris_core::{Aggregator, AlertKind};
 use iris_ipc::ServerMessage;
+use iris_store::Store;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,14 +19,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// start monitoring and the flush loop. on Windows this opens the ETW trace
-/// (which needs admin) for byte counts; connection enumeration works without it,
-/// so the activity view still populates if ETW cannot start.
-pub fn spawn(engine: Engine) {
+/// start monitoring and the flush loop.
+pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>) {
     let agg = Arc::new(Mutex::new(Aggregator::new(now_ms())));
 
-    // the DNS name map is shared: the ETW monitor fills it, the tracker's
-    // connection enumerator reads it to label endpoints
     #[cfg(windows)]
     let dns = iris_platform_win::new_map();
 
@@ -44,12 +42,38 @@ pub fn spawn(engine: Engine) {
 
     tokio::spawn(async move {
         #[cfg(windows)]
-        let byte_monitor = byte_monitor; // keep the ETW trace alive for the loop
+        let byte_monitor = byte_monitor;
         let mut ticks: u64 = 0;
+        // register everything already connected silently for the first few
+        // seconds so a fresh install does not toast every running app at once
+        let baseline_until = now_ms() + 6_000;
 
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let tick = tracker.tick(now_ms());
+            let now = now_ms();
+            let tick = tracker.tick(now);
+
+            // record usage + first-seen alerts under one store lock
+            if let Ok(store) = store.lock() {
+                let alerting = now > baseline_until;
+                for app in &tick.apps {
+                    // rate over a ~1s window is close enough to bytes this second
+                    store.add_usage(app.app.as_str(), now, app.rate_sent, app.rate_recv);
+                    if app.online
+                        && store.ensure_app(app.app.as_str(), app.name.as_deref(), now)
+                        && alerting
+                    {
+                        let alert = store.insert_alert(
+                            &AlertKind::NewApp {
+                                app: app.app.clone(),
+                            },
+                            now,
+                        );
+                        engine.publish(ServerMessage::Alert(alert));
+                    }
+                }
+            }
+
             engine.publish(ServerMessage::Tick(tick));
 
             ticks += 1;
@@ -58,6 +82,12 @@ pub fn spawn(engine: Engine) {
                 #[cfg(windows)]
                 if let Some(m) = byte_monitor.as_ref() {
                     m.clear_cache();
+                }
+            }
+            // prune usage older than 45 days, hourly
+            if ticks % 3600 == 0 {
+                if let Ok(store) = store.lock() {
+                    store.prune_usage(now.saturating_sub(45 * 86_400_000));
                 }
             }
         }

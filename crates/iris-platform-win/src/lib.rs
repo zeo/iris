@@ -15,7 +15,7 @@ mod proc;
 mod wfp;
 
 #[cfg(windows)]
-pub use conn::ConnCounter;
+pub use conn::{kill_connection, ConnCounter};
 #[cfg(windows)]
 pub use dns::{new_map, DnsMap};
 #[cfg(windows)]

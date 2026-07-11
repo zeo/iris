@@ -4,6 +4,7 @@ members = [
     "crates/iris-core",
     "crates/iris-ipc",
     "crates/iris-platform-win",
+    "crates/iris-store",
     "service",
     "app/src-tauri",
 ]
@@ -19,6 +20,7 @@ authors = ["rot <96458554+lintowe@users.noreply.github.com>"]
 iris-core = { path = "crates/iris-core" }
 iris-ipc = { path = "crates/iris-ipc" }
 iris-platform-win = { path = "crates/iris-platform-win" }
+iris-store = { path = "crates/iris-store" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

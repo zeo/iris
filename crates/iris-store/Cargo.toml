@@ -1,0 +1,14 @@
+[package]
+name = "iris-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SQLite-backed history, usage rollups, and alerts for iris"
+
+[dependencies]
+iris-core = { workspace = true }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }

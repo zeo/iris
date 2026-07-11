@@ -3,6 +3,7 @@ import { Titlebar } from "./components/Titlebar";
 import { Icon } from "./components/Icon";
 import { createTheme } from "./lib/theme";
 import { engine, initEngine } from "./lib/engine";
+import { initAlerts, unackedCount } from "./lib/alerts";
 import { Protect } from "./tabs/Protect";
 import { Activity } from "./tabs/Activity";
 import { Graph } from "./tabs/Graph";
@@ -24,7 +25,10 @@ export function App() {
   const [tab, setTab] = createSignal<TabId>("activity");
   const current = () => TABS.find((t) => t.id === tab()) ?? TABS[1];
 
-  onMount(initEngine);
+  onMount(() => {
+    initEngine();
+    initAlerts();
+  });
 
   return (
     <div class="app">
@@ -47,6 +51,9 @@ export function App() {
             >
               <Icon name={t.icon} class="ti" />
               {t.label}
+              <Show when={t.id === "alerts" && unackedCount() > 0}>
+                <span class="badge">{unackedCount()}</span>
+              </Show>
             </button>
           )}
         </For>

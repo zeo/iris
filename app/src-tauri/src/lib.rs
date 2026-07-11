@@ -1,10 +1,14 @@
 //! the Iris desktop shell. this crate is the thin Tauri host: it opens the
-//! window, exposes the small command surface the UI needs, and bridges the UI to
-//! the privileged engine service over the named-pipe IPC.
+//! window, exposes the command surface the UI needs, runs a tray icon, and
+//! bridges the UI to the privileged engine service over the named-pipe IPC.
 
 mod icon;
 mod ipc;
 mod net;
+
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::Manager;
 
 /// build and run the Tauri application
 pub fn run() {
@@ -19,6 +23,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(ipc::StatusState::default())
         .manage(ipc::Commander(cmd_tx))
         .invoke_handler(tauri::generate_handler![
@@ -27,13 +32,51 @@ pub fn run() {
             ipc::add_rule,
             ipc::remove_rule,
             ipc::set_rule_enabled,
+            ipc::list_alerts,
+            ipc::ack_alert,
+            ipc::get_usage,
+            ipc::kill_connection,
             net::reverse_dns,
             icon::app_icon
         ])
         .setup(move |app| {
             ipc::spawn(app.handle().clone(), cmd_rx);
+            build_tray(app.handle())?;
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running Iris");
+}
+
+/// a tray icon that restores the window on click and offers show / quit
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show Iris", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+
+    TrayIconBuilder::with_id("iris-tray")
+        .icon(app.default_window_icon().unwrap().clone())
+        .tooltip("Iris")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => reveal(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
+                reveal(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+fn reveal(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
 }

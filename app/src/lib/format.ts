@@ -1,7 +1,7 @@
 // byte + rate formatting shared across the activity table, graph, and statusbar.
-// binary units (KiB/MiB) shown with a trailing /s for rates.
+// binary units (powers of 1024) shown with a trailing /s for rates.
 
-const UNITS = ["B", "KB", "MB", "GB", "TB"];
+const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
 
 export function bytes(n: number): string {
   if (n < 1) return "0 B";

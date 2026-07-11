@@ -5,6 +5,7 @@ import { Icon } from "./components/Icon";
 import { createTheme } from "./lib/theme";
 import { engine, initEngine } from "./lib/engine";
 import { initAlerts, unackedCount } from "./lib/alerts";
+import { initQuota } from "./lib/quota";
 import { autoUpdate } from "./lib/updater";
 import { Protect } from "./tabs/Protect";
 import { Activity } from "./tabs/Activity";
@@ -32,6 +33,7 @@ export function App() {
   onMount(() => {
     initEngine();
     initAlerts();
+    initQuota();
     autoUpdate();
   });
 

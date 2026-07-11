@@ -4,7 +4,11 @@ import { Icon } from "../components/Icon";
 import { engine } from "../lib/engine";
 import { checkNow } from "../lib/updater";
 import {
+  billingResetDay,
+  dataCapGb,
   rateUnits,
+  setBillingResetDay,
+  setDataCapGb,
   setRateUnits,
   setShowNotifications,
   showNotifications,
@@ -101,6 +105,44 @@ export function Settings() {
           >
             <span class="knob" />
           </button>
+        </div>
+      </div>
+
+      <div class="set-group">
+        <div class="set-section">Data plan</div>
+        <div class="set-row">
+          <div class="set-meta">
+            <span class="set-name">Monthly cap</span>
+            <span class="set-desc">Set a cap to track usage against and get warned near the limit. 0 turns it off.</span>
+          </div>
+          <label class="num-field">
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={dataCapGb()}
+              onInput={(e) => setDataCapGb(Math.max(0, Number(e.currentTarget.value) || 0))}
+            />
+            <span class="unit">GB</span>
+          </label>
+        </div>
+        <div class="set-row">
+          <div class="set-meta">
+            <span class="set-name">Resets on day</span>
+            <span class="set-desc">Day of the month the billing period restarts (1 to 28).</span>
+          </div>
+          <label class="num-field">
+            <input
+              type="number"
+              min="1"
+              max="28"
+              step="1"
+              value={billingResetDay()}
+              onInput={(e) =>
+                setBillingResetDay(Math.min(28, Math.max(1, Math.round(Number(e.currentTarget.value) || 1))))
+              }
+            />
+          </label>
         </div>
       </div>
 

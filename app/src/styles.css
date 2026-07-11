@@ -1530,6 +1530,72 @@ html {
   color: var(--muted);
   font-size: var(--fz-cap);
 }
+.num-field {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--recess);
+  border: 1px solid var(--line2);
+  border-radius: var(--r-sm);
+  padding: 4px 8px;
+  box-shadow: var(--press);
+}
+.num-field input {
+  width: 56px;
+  background: none;
+  border: 0;
+  color: var(--text);
+  font-family: var(--mono);
+  text-align: right;
+  outline: none;
+}
+.num-field .unit {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fz-cap);
+}
+
+/* usage: the monthly data-plan meter */
+.quota {
+  background: var(--recess);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: var(--s2) var(--s3);
+  margin-bottom: var(--s3);
+  box-shadow: var(--press);
+}
+.quota-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.quota-nums {
+  font-family: var(--mono);
+  color: var(--text-2);
+}
+.quota-nums .of {
+  color: var(--muted);
+}
+.quota .quota-bar {
+  margin: 7px 0 5px;
+}
+.quota.warn .quota-bar span {
+  background: var(--steel);
+}
+.quota.over .quota-bar span {
+  background: var(--err);
+}
+.quota-foot {
+  font-size: var(--fz-cap);
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.quota.over .quota-nums,
+.quota.over .quota-foot {
+  color: var(--err);
+}
 
 /* alert rows, styled as log entries */
 .row.alert {

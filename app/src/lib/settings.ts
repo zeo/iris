@@ -15,4 +15,18 @@ const [showNotifications, setShowNotifications] = persisted<boolean>(
   true,
 );
 
-export { rateUnits, setRateUnits, showNotifications, setShowNotifications };
+// optional monthly data plan: a cap in GB (0 = no plan) and the day of the month
+// the billing period resets. drives the quota meter and quota notifications.
+const [dataCapGb, setDataCapGb] = persisted<number>("settings.dataCapGb", 0);
+const [billingResetDay, setBillingResetDay] = persisted<number>("settings.billingResetDay", 1);
+
+export {
+  rateUnits,
+  setRateUnits,
+  showNotifications,
+  setShowNotifications,
+  dataCapGb,
+  setDataCapGb,
+  billingResetDay,
+  setBillingResetDay,
+};

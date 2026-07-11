@@ -92,7 +92,7 @@ impl Tracker {
             .filter_map(|(pid, hist)| {
                 let path = self.pid_path.get(pid)?.clone();
                 let mut conns: Vec<Conn> = hist.values().map(|(c, _)| c.clone()).collect();
-                conns.sort_by(|a, b| a.remote.port.cmp(&b.remote.port));
+                conns.sort_by_key(|c| c.remote.port);
                 Some((*pid, (path, conns)))
             })
             .collect()
@@ -102,7 +102,7 @@ impl Tracker {
         // service to pid bindings are stable, so re-enumerate them only every
         // tenth tick (~10s) rather than on every sample
         #[cfg(windows)]
-        if self.ticks % 10 == 0 {
+        if self.ticks.is_multiple_of(10) {
             self.svc.refresh();
         }
         self.ticks = self.ticks.wrapping_add(1);
@@ -150,7 +150,7 @@ impl Tracker {
                 online: active,
                 conns,
             };
-            let acc = apps.entry(ps.path).or_insert_with(AppAcc::default);
+            let acc = apps.entry(ps.path).or_default();
             if acc.name.is_none() {
                 acc.name = ps.name;
             }
@@ -174,7 +174,7 @@ impl Tracker {
             .into_iter()
             .map(|(path, acc)| {
                 let mut procs = acc.procs;
-                procs.sort_by(|a, b| (b.rate_sent + b.rate_recv).cmp(&(a.rate_sent + a.rate_recv)));
+                procs.sort_by_key(|p| std::cmp::Reverse(p.rate_sent + p.rate_recv));
                 AppSample {
                     app: AppId::from_path(&path),
                     name: acc.name,

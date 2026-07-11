@@ -77,7 +77,7 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>) {
             engine.publish(ServerMessage::Tick(tick));
 
             ticks += 1;
-            if ticks % 30 == 0 {
+            if ticks.is_multiple_of(30) {
                 tracker.clear_cache();
                 #[cfg(windows)]
                 if let Some(m) = byte_monitor.as_ref() {
@@ -85,7 +85,7 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>) {
                 }
             }
             // prune usage older than 45 days, hourly
-            if ticks % 3600 == 0 {
+            if ticks.is_multiple_of(3600) {
                 if let Ok(store) = store.lock() {
                     store.prune_usage(now.saturating_sub(45 * 86_400_000));
                 }

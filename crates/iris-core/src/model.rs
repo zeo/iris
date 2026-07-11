@@ -42,15 +42,6 @@ impl AppId {
     }
 }
 
-/// a running process the monitor attributes traffic to. keyed on (pid,
-/// start_time) so pid reuse across process lifetimes never merges two apps.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ProcessKey {
-    pub pid: u32,
-    /// process creation time as a raw FILETIME-style tick, opaque to core
-    pub start_tick: u64,
-}
-
 /// a distinct remote endpoint a flow talks to
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Endpoint {

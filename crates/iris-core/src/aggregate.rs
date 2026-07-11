@@ -1,4 +1,5 @@
 use crate::model::ByteCounts;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 /// one process's byte deltas for a sample window, produced by [`Aggregator::flush`].
@@ -42,12 +43,24 @@ impl Aggregator {
     }
 
     fn entry(&mut self, pid: u32, path: &str) -> &mut PidAccum {
-        self.procs.entry(pid).or_insert_with(|| PidAccum {
+        let fresh = || PidAccum {
             path: path.to_string(),
             name: None,
             total: ByteCounts::default(),
             window: ByteCounts::default(),
-        })
+        };
+        match self.procs.entry(pid) {
+            // same pid, same image: the live process, keep accumulating
+            Entry::Occupied(e) if e.get().path == path => e.into_mut(),
+            // same pid, different image: the OS reused the pid for a new process,
+            // so drop the old accumulator instead of merging two apps' traffic
+            // (and their identities) under one row
+            Entry::Occupied(mut e) => {
+                e.insert(fresh());
+                e.into_mut()
+            }
+            Entry::Vacant(e) => e.insert(fresh()),
+        }
     }
 
     /// add a network event's byte deltas for one process
@@ -128,6 +141,20 @@ mod tests {
         let out = agg.flush(2000);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].rate_sent, 0);
+        assert_eq!(out[0].total.sent, 100);
+    }
+
+    #[test]
+    fn pid_reuse_by_a_different_image_starts_fresh() {
+        let mut agg = Aggregator::new(0);
+        agg.record(1, "c:/old.exe", Some("Old"), 500, 0);
+        // the old process exited and the pid was reused by a different image
+        agg.record(1, "c:/new.exe", Some("New"), 100, 0);
+        let out = agg.flush(1000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, "c:/new.exe");
+        assert_eq!(out[0].name.as_deref(), Some("New"));
+        // the old process's 500 bytes are not carried into the new one
         assert_eq!(out[0].total.sent, 100);
     }
 

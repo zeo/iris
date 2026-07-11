@@ -21,7 +21,7 @@ pub use engine::{FirewallController, MonitorSink, NetworkMonitor};
 pub use error::{EngineError, EngineResult};
 pub use model::{
     AppId, AppSample, ByteCounts, Conn, ConnState, Direction, Endpoint, LiveConnection, ProcSample,
-    ProcessKey, Protocol, StatsTick,
+    Protocol, StatsTick,
 };
 pub use rule::{Rule, RuleAction, StoredRule};
 pub use usage::{Granularity, UsageBucket, UsageQuery};

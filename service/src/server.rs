@@ -116,14 +116,26 @@ async fn handle(
                         reply(&mut send, req, result).await?;
                     }
                     ClientMessage::GetUsage { req, query } => {
-                        let rows = store.lock().map(|s| s.query_usage(&query)).unwrap_or_default();
+                        // a wide history query can touch many rows; run it on the
+                        // blocking pool so it never stalls the reactor or the tick
+                        let store = store.clone();
+                        let rows = tokio::task::spawn_blocking(move || {
+                            store.lock().unwrap_or_else(|e| e.into_inner()).query_usage(&query)
+                        })
+                        .await
+                        .unwrap_or_default();
                         reply(&mut send, req, Reply::Usage(rows)).await?;
                     }
                     ClientMessage::ListAlerts { req, unacked_only } => {
-                        let list = store
-                            .lock()
-                            .map(|s| s.list_alerts(unacked_only))
-                            .unwrap_or_default();
+                        let store = store.clone();
+                        let list = tokio::task::spawn_blocking(move || {
+                            store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .list_alerts(unacked_only)
+                        })
+                        .await
+                        .unwrap_or_default();
                         reply(&mut send, req, Reply::Alerts(list)).await?;
                     }
                     ClientMessage::AckAlert { req, id } => {

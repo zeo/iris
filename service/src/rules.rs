@@ -5,12 +5,52 @@
 
 use iris_core::{Rule, StoredRule};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize)]
 struct Persisted {
+    /// stable rule id, persisted so a UI-cached id still targets the right rule
+    /// after the service restarts. legacy files without it default to 0 and get
+    /// a fresh id assigned on load.
+    #[serde(default)]
+    id: i64,
     rule: Rule,
     enabled: bool,
+}
+
+/// outcome of reading the rules file, keeping "no file yet" distinct from "file
+/// present but unreadable" so a corrupt file never masquerades as an empty rule
+/// set and silently drops all firewall enforcement.
+enum Loaded {
+    Empty,
+    Rules(Vec<Persisted>),
+    Corrupt,
+}
+
+fn load_persisted(path: &Path) -> Loaded {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Loaded::Empty,
+        Err(e) => {
+            tracing::error!("cannot read rules file {}: {e}", path.display());
+            Loaded::Corrupt
+        }
+        Ok(s) if s.trim().is_empty() => Loaded::Empty,
+        Ok(s) => match serde_json::from_str::<Vec<Persisted>>(&s) {
+            Ok(v) => Loaded::Rules(v),
+            Err(e) => {
+                tracing::error!("rules file {} is corrupt: {e}", path.display());
+                Loaded::Corrupt
+            }
+        },
+    }
+}
+
+fn back_up_corrupt(path: &Path) {
+    let bak = path.with_extension("json.corrupt");
+    match std::fs::rename(path, &bak) {
+        Ok(()) => tracing::warn!("moved corrupt rules file to {}", bak.display()),
+        Err(e) => tracing::error!("could not set aside corrupt rules file: {e}"),
+    }
 }
 
 pub struct RuleStore {
@@ -24,29 +64,57 @@ pub struct RuleStore {
 impl RuleStore {
     pub fn new() -> Self {
         let path = store_path();
+        let loaded = load_persisted(&path);
 
         #[cfg(windows)]
         let mut wfp = match iris_platform_win::Wfp::open() {
-            Ok(mut w) => {
-                let _ = w.reset();
-                Some(w)
-            }
+            Ok(w) => Some(w),
             Err(e) => {
                 tracing::error!("WFP unavailable (rules will not be enforced): {e}");
                 None
             }
         };
 
-        let persisted: Vec<Persisted> = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        // a corrupt file is the one case we must not reset on: we cannot know the
+        // intended rules, so leaving the last-good filters enforcing and starting
+        // with an empty in-memory set is the fail-safe. otherwise wipe stale
+        // filters and re-apply from the file (the single source of truth).
+        let persisted: Vec<Persisted> = match loaded {
+            Loaded::Rules(v) => {
+                #[cfg(windows)]
+                if let Some(w) = wfp.as_mut() {
+                    let _ = w.reset();
+                }
+                v
+            }
+            Loaded::Empty => {
+                #[cfg(windows)]
+                if let Some(w) = wfp.as_mut() {
+                    let _ = w.reset();
+                }
+                Vec::new()
+            }
+            Loaded::Corrupt => {
+                back_up_corrupt(&path);
+                Vec::new()
+            }
+        };
 
-        let mut rules = Vec::new();
+        // honor ids already in the file so they stay stable across restarts, and
+        // assign fresh ones only to legacy (id 0) entries
         let mut next_id = 1i64;
+        for p in &persisted {
+            next_id = next_id.max(p.id + 1);
+        }
+        let mut rules = Vec::new();
         for p in persisted {
-            let id = next_id;
-            next_id += 1;
+            let id = if p.id > 0 {
+                p.id
+            } else {
+                let x = next_id;
+                next_id += 1;
+                x
+            };
             let filter_ids = if p.enabled {
                 #[cfg(windows)]
                 {
@@ -109,11 +177,16 @@ impl RuleStore {
         stored
     }
 
-    pub fn remove(&mut self, id: i64) {
+    /// remove a rule; returns whether a rule with that id existed, so the caller
+    /// can tell the UI the truth instead of a blanket success
+    pub fn remove(&mut self, id: i64) -> bool {
         if let Some(pos) = self.rules.iter().position(|r| r.id == id) {
             let removed = self.rules.remove(pos);
             self.unapply(&removed.filter_ids);
             self.save();
+            true
+        } else {
+            false
         }
     }
 
@@ -163,6 +236,7 @@ impl RuleStore {
             .rules
             .iter()
             .map(|r| Persisted {
+                id: r.id,
                 rule: r.rule.clone(),
                 enabled: r.enabled,
             })
@@ -170,8 +244,23 @@ impl RuleStore {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(json) = serde_json::to_string_pretty(&persisted) {
-            let _ = std::fs::write(&self.path, json);
+        let json = match serde_json::to_string_pretty(&persisted) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::error!("could not serialize rules: {e}");
+                return;
+            }
+        };
+        // write a temp file then rename over the target so a crash mid-write can
+        // never truncate the live rules file into something that parses as empty
+        let tmp = self.path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, json.as_bytes()) {
+            tracing::error!("could not write rules: {e}");
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &self.path) {
+            tracing::error!("could not commit rules file: {e}");
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 }

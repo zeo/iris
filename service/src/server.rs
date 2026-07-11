@@ -95,16 +95,25 @@ async fn handle(
                         reply(&mut send, req, result).await?;
                     }
                     ClientMessage::RemoveRule { req, id } => {
-                        if let Ok(mut r) = rules.lock() {
-                            r.remove(id);
-                        }
-                        reply(&mut send, req, Reply::Ok).await?;
+                        let removed = rules.lock().map(|mut r| r.remove(id)).unwrap_or(false);
+                        let result = if removed {
+                            Reply::Ok
+                        } else {
+                            Reply::Error("no rule with that id".into())
+                        };
+                        reply(&mut send, req, result).await?;
                     }
                     ClientMessage::SetRuleEnabled { req, id, enabled } => {
-                        if let Ok(mut r) = rules.lock() {
-                            r.set_enabled(id, enabled);
-                        }
-                        reply(&mut send, req, Reply::Ok).await?;
+                        let updated = rules
+                            .lock()
+                            .ok()
+                            .and_then(|mut r| r.set_enabled(id, enabled));
+                        let result = if updated.is_some() {
+                            Reply::Ok
+                        } else {
+                            Reply::Error("no rule with that id".into())
+                        };
+                        reply(&mut send, req, result).await?;
                     }
                     ClientMessage::GetUsage { req, query } => {
                         let rows = store.lock().map(|s| s.query_usage(&query)).unwrap_or_default();

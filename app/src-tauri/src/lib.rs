@@ -45,6 +45,8 @@ pub fn run() {
             ipc::list_plugins,
             ipc::grant_plugin,
             ipc::set_plugin_enabled,
+            ipc::list_proposals,
+            ipc::reject_proposal,
             net::reverse_dns,
             svcctl::install_service,
             svcctl::uninstall_service,

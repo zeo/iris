@@ -83,8 +83,8 @@ fn run_console() -> anyhow::Result<()> {
         monitor::spawn(engine.clone(), store.clone(), enrich.clone());
         let rules = Arc::new(Mutex::new(RuleStore::new()));
         tokio::select! {
-            r = server::serve(engine, rules.clone(), store, enrich) => r,
-            r = server::serve_admin(rules) => r,
+            r = server::serve(engine, rules.clone(), store.clone(), enrich) => r,
+            r = server::serve_admin(rules, store) => r,
             r = supervisor.serve() => r,
         }
     })

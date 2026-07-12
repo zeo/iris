@@ -1,14 +1,15 @@
 use iris_core::{
-    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, LiveConnection, Rule, StatsTick,
-    StoredRule, UsageBucket, UsageQuery,
+    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, LiveConnection, Rule, RuleProposal,
+    StatsTick, StoredRule, UsageBucket, UsageQuery,
 };
 use serde::{Deserialize, Serialize};
 
 /// bump when the wire shape changes incompatibly. the UI refuses to drive a
 /// service whose protocol differs, so a partial update never mismatches schemas.
 /// v2 added the enrichment channel (annotations for endpoints/apps); v3 added
-/// the per-adapter breakdown carried in every tick; v4 added plugin management.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// the per-adapter breakdown carried in every tick; v4 added plugin management;
+/// v5 added rule proposals.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// what the UI shows for one installed plugin: its declared identity and
 /// capabilities, plus whether the user has consented and enabled it
@@ -66,6 +67,11 @@ pub enum ClientMessage {
     GrantPlugin { req: u64, id: String, caps: Vec<String>, egress: Vec<String> },
     /// switch a granted plugin on or off
     SetPluginEnabled { req: u64, id: String, enabled: bool },
+    /// recent plugin rule proposals, pending first
+    ListProposals { req: u64 },
+    /// settle a pending proposal. accepting enforces a rule, so it is only
+    /// honored on the admin pipe; the telemetry pipe may only reject.
+    ResolveProposal { req: u64, id: i64, accept: bool },
 }
 
 /// a service -> UI message: either an unsolicited push (`Tick`, `Alert`,
@@ -87,6 +93,8 @@ pub enum ServerMessage {
         target: EnrichTarget,
         annotations: Vec<Annotation>,
     },
+    /// a plugin proposed a rule; pushed so the review UI updates live
+    Proposal(RuleProposal),
     /// correlated response to a client request
     Reply { req: u64, result: Reply },
 }
@@ -108,4 +116,6 @@ pub enum Reply {
     AdapterUsage(Vec<(AdapterKind, ByteCounts)>),
     /// installed plugins and their consent state
     Plugins(Vec<PluginInfo>),
+    /// recent rule proposals, newest first
+    Proposals(Vec<RuleProposal>),
 }

@@ -190,6 +190,32 @@ async fn handle(
                         };
                         reply(&mut send, req, result).await?;
                     }
+                    ClientMessage::ListProposals { req } => {
+                        let store = store.clone();
+                        let list = tokio::task::spawn_blocking(move || {
+                            store.lock().unwrap_or_else(|e| e.into_inner()).list_proposals()
+                        })
+                        .await
+                        .unwrap_or_default();
+                        reply(&mut send, req, Reply::Proposals(list)).await?;
+                    }
+                    // rejecting a proposal enforces nothing, so any client may;
+                    // accepting turns it into a firewall rule and belongs to the
+                    // admin pipe, the same boundary as AddRule
+                    ClientMessage::ResolveProposal { req, id, accept } => {
+                        let result = if accept {
+                            Reply::Error("accepting a proposal requires elevation".into())
+                        } else if store
+                            .lock()
+                            .map(|s| s.resolve_proposal(id, false).is_some())
+                            .unwrap_or(false)
+                        {
+                            Reply::Ok
+                        } else {
+                            Reply::Error("no pending proposal with that id".into())
+                        };
+                        reply(&mut send, req, result).await?;
+                    }
                     ClientMessage::GetAdapterUsage { req, from_ms, to_ms } => {
                         // same window bound as GetUsage, for the same reason
                         const MAX_WINDOW_MS: u64 = 400 * 86_400_000;
@@ -237,7 +263,10 @@ async fn handle(
 /// accept elevated clients on the admin pipe and run their rule mutations. only
 /// an elevated process can open this pipe (its DACL grants SYSTEM + admins only),
 /// so a message arriving here is authorized to change the firewall.
-pub async fn serve_admin(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
+pub async fn serve_admin(
+    rules: Arc<Mutex<RuleStore>>,
+    store: Arc<Mutex<Store>>,
+) -> anyhow::Result<()> {
     let listener = transport::listen_admin()?;
     tracing::info!(pipe = iris_ipc::ADMIN_PIPE_NAME, "admin channel listening");
     let slots = Arc::new(tokio::sync::Semaphore::new(8));
@@ -258,16 +287,21 @@ pub async fn serve_admin(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
             }
         };
         let rules = rules.clone();
+        let store = store.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(e) = handle_admin(conn, rules).await {
+            if let Err(e) = handle_admin(conn, rules, store).await {
                 tracing::debug!("admin client disconnected: {e}");
             }
         });
     }
 }
 
-async fn handle_admin(stream: transport::Stream, rules: Arc<Mutex<RuleStore>>) -> io::Result<()> {
+async fn handle_admin(
+    stream: transport::Stream,
+    rules: Arc<Mutex<RuleStore>>,
+    store: Arc<Mutex<Store>>,
+) -> io::Result<()> {
     let (mut recv, mut send) = transport::split(stream);
     if !negotiate(&mut recv, &mut send).await? {
         return Ok(());
@@ -297,6 +331,24 @@ async fn handle_admin(stream: transport::Stream, rules: Arc<Mutex<RuleStore>>) -
                     Reply::Ok
                 } else {
                     Reply::Error("no rule with that id".into())
+                };
+                reply(&mut send, req, result).await?;
+            }
+            // the elevated half of proposal review: settle it, and on accept
+            // enforce the proposed rule through the one path that touches WFP
+            ClientMessage::ResolveProposal { req, id, accept } => {
+                let settled = store
+                    .lock()
+                    .map(|s| s.resolve_proposal(id, accept))
+                    .unwrap_or(None);
+                let result = match settled {
+                    Some(p) if accept => rules
+                        .lock()
+                        .map(|mut r| r.add(p.rule))
+                        .map(Reply::RuleAdded)
+                        .unwrap_or_else(|_| Reply::Error("rule store unavailable".into())),
+                    Some(_) => Reply::Ok,
+                    None => Reply::Error("no pending proposal with that id".into()),
                 };
                 reply(&mut send, req, result).await?;
             }
@@ -365,6 +417,8 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::ListPlugins { req }
         | ClientMessage::GrantPlugin { req, .. }
         | ClientMessage::SetPluginEnabled { req, .. }
+        | ClientMessage::ListProposals { req }
+        | ClientMessage::ResolveProposal { req, .. }
         | ClientMessage::Ping { req } => Some(*req),
         ClientMessage::Hello { .. } | ClientMessage::Subscribe | ClientMessage::Unsubscribe => None,
     }

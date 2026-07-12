@@ -76,7 +76,7 @@ fn run_service() -> anyhow::Result<()> {
                 tracing::error!("plugin host ended: {r:?}");
                 true
             }
-            r = server::serve(engine, rules.clone(), store, enrich) => {
+            r = server::serve(engine, rules.clone(), store.clone(), enrich) => {
                 match r {
                     Err(e) => {
                         tracing::error!("serve loop failed: {e}");
@@ -90,7 +90,7 @@ fn run_service() -> anyhow::Result<()> {
                     }
                 }
             }
-            r = server::serve_admin(rules) => {
+            r = server::serve_admin(rules, store) => {
                 tracing::error!("admin serve loop ended: {r:?}");
                 true
             }

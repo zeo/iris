@@ -6,8 +6,8 @@
 //! admin pipe (see `rulectl`). it reconnects on its own.
 
 use iris_core::{
-    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, Granularity, StoredRule,
-    UsageBucket, UsageQuery,
+    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, Granularity, RuleProposal,
+    StoredRule, UsageBucket, UsageQuery,
 };
 use iris_ipc::message::{ClientMessage, PluginInfo, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
@@ -46,6 +46,10 @@ pub enum EngineCmd {
     ListPlugins,
     GrantPlugin(String, Vec<String>, Vec<String>),
     SetPluginEnabled(String, bool),
+    ListProposals,
+    // rejecting is unprivileged; accepting enforces a rule and goes over the
+    // admin pipe (see rulectl), never through here
+    RejectProposal(i64),
 }
 pub struct Command {
     cmd: EngineCmd,
@@ -207,6 +211,24 @@ pub async fn set_plugin_enabled(app: AppHandle, id: String, enabled: bool) -> Re
 }
 
 #[tauri::command]
+pub async fn list_proposals(app: AppHandle) -> Result<Vec<RuleProposal>, String> {
+    match dispatch(&app, EngineCmd::ListProposals).await? {
+        Reply::Proposals(p) => Ok(p),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn reject_proposal(app: AppHandle, id: i64) -> Result<(), String> {
+    match dispatch(&app, EngineCmd::RejectProposal(id)).await? {
+        Reply::Ok => Ok(()),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
 pub async fn get_enrichment(app: AppHandle, ips: Vec<String>) -> Result<Vec<EnrichmentEvent>, String> {
     let targets: Vec<EnrichTarget> = ips
         .iter()
@@ -265,6 +287,9 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     ServerMessage::Enrichment { target, annotations } => {
                         let _ = app.emit("engine-enrichment", EnrichmentEvent { target, annotations });
                     }
+                    ServerMessage::Proposal(proposal) => {
+                        let _ = app.emit("engine-proposal", proposal);
+                    }
                     ServerMessage::Reply { req, result } => {
                         if let Some(resp) = pending.remove(&req) {
                             let _ = resp.send(result);
@@ -292,6 +317,9 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                         ClientMessage::GrantPlugin { req, id, caps, egress },
                     EngineCmd::SetPluginEnabled(id, enabled) =>
                         ClientMessage::SetPluginEnabled { req, id, enabled },
+                    EngineCmd::ListProposals => ClientMessage::ListProposals { req },
+                    EngineCmd::RejectProposal(id) =>
+                        ClientMessage::ResolveProposal { req, id, accept: false },
                 };
                 pending.insert(req, command.resp);
                 if let Err(e) = transport::write_frame(&mut send, &msg).await {

@@ -13,6 +13,7 @@ pub mod engine;
 pub mod enrich;
 pub mod error;
 pub mod model;
+pub mod panel;
 pub mod rule;
 pub mod usage;
 
@@ -27,6 +28,7 @@ pub use model::{
     AdapterKind, AdapterSample, AppId, AppSample, ByteCounts, Conn, ConnState, Direction,
     Endpoint, LiveConnection, ProcSample, Protocol, StatsTick,
 };
+pub use panel::{Panel, Widget};
 pub use rule::{
     parse_backup, BackupRule, ProposalState, Rule, RuleAction, RuleProposal, StoredRule,
     BACKUP_MAX_BYTES,

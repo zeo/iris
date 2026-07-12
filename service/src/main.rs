@@ -82,11 +82,11 @@ fn run_console() -> anyhow::Result<()> {
     rt.block_on(async {
         let engine = Engine::new();
         let store = Arc::new(Mutex::new(open_store()));
-        let (enrich, supervisor) = plugins::build(store.clone(), engine.clone());
+        let (enrich, panels, supervisor) = plugins::build(store.clone(), engine.clone());
         monitor::spawn(engine.clone(), store.clone(), enrich.clone());
         let rules = Arc::new(Mutex::new(RuleStore::new()));
         tokio::select! {
-            r = server::serve(engine, rules.clone(), store.clone(), enrich) => r,
+            r = server::serve(engine, rules.clone(), store.clone(), enrich, panels) => r,
             r = server::serve_admin(rules, store) => r,
             r = supervisor.serve() => r,
         }

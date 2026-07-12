@@ -8,7 +8,7 @@
 use crate::engine::Engine;
 use crate::plugins::manifest::{self, Manifest};
 use crate::plugins::proxy::{PluginLink, ProxyRequest};
-use iris_core::{AlertKind, Annotation, TargetKind};
+use iris_core::{AlertKind, Annotation, Panel, TargetKind};
 use iris_ipc::plugin::{
     HostMessage, PluginEvent, PluginMessage, StreamKind, PLUGIN_PROTOCOL_VERSION,
 };
@@ -52,6 +52,11 @@ impl PluginRuntime {
             .filter(|c| self.manifest.declares(c))
             .cloned()
             .collect()
+    }
+
+    /// whether the user consented to this plugin showing a panel tab
+    pub fn panel_granted(&self) -> bool {
+        self.effective_caps().iter().any(|c| c == "ui:panel")
     }
 
     /// the egress the child is actually pinned to: the user's consent, never
@@ -187,6 +192,12 @@ pub fn plan(store: &Arc<Mutex<Store>>) -> Vec<Arc<PluginRuntime>> {
         }));
     }
     runtimes
+}
+
+/// an outstanding request to a plugin, keyed by wire id in the actor
+enum Pending {
+    Enrich(std::sync::mpsc::Sender<Vec<Annotation>>),
+    Panel(std::sync::mpsc::Sender<Option<Panel>>),
 }
 
 /// the running host: owns the runtimes and serves the plugin pipe
@@ -396,8 +407,9 @@ impl Supervisor {
         Ok(rt)
     }
 
-    /// the per-connection message loop: forward enrich requests to the plugin,
-    /// relay its replies, alerts, and enrichment, and push the subscribed streams
+    /// the per-connection message loop: forward enrich and panel requests to
+    /// the plugin, relay its replies, alerts, and enrichment, and push the
+    /// subscribed streams
     async fn actor(
         &self,
         rt: &Arc<PluginRuntime>,
@@ -410,7 +422,7 @@ impl Supervisor {
         let mut events = self.engine.subscribe();
         let mut streams: Vec<StreamKind> = Vec::new();
         let mut next_req: u64 = 1;
-        let mut pending: HashMap<u64, std::sync::mpsc::Sender<Vec<Annotation>>> = HashMap::new();
+        let mut pending: HashMap<u64, Pending> = HashMap::new();
 
         loop {
             select! {
@@ -418,8 +430,17 @@ impl Supervisor {
                     let Some(request) = request else { break };
                     let req = next_req;
                     next_req += 1;
-                    pending.insert(req, request.reply);
-                    transport::write_frame(&mut send, &HostMessage::EnrichRequest { req, target: request.target }).await?;
+                    let frame = match request {
+                        ProxyRequest::Enrich { target, reply } => {
+                            pending.insert(req, Pending::Enrich(reply));
+                            HostMessage::EnrichRequest { req, target }
+                        }
+                        ProxyRequest::Panel { reply } => {
+                            pending.insert(req, Pending::Panel(reply));
+                            HostMessage::PanelRequest { req }
+                        }
+                    };
+                    transport::write_frame(&mut send, &frame).await?;
                 }
                 frame = transport::read_frame::<_, PluginMessage>(&mut recv) => {
                     let Some(msg) = frame? else { break };
@@ -442,12 +463,17 @@ impl Supervisor {
         rt: &Arc<PluginRuntime>,
         msg: PluginMessage,
         streams: &mut Vec<StreamKind>,
-        pending: &mut HashMap<u64, std::sync::mpsc::Sender<Vec<Annotation>>>,
+        pending: &mut HashMap<u64, Pending>,
     ) -> anyhow::Result<()> {
         match msg {
             PluginMessage::EnrichReply { req, annotations } => {
-                if let Some(reply) = pending.remove(&req) {
+                if let Some(Pending::Enrich(reply)) = pending.remove(&req) {
                     let _ = reply.send(annotations);
+                }
+            }
+            PluginMessage::PanelReply { req, panel } => {
+                if let Some(Pending::Panel(reply)) = pending.remove(&req) {
+                    let _ = reply.send(panel);
                 }
             }
             PluginMessage::Enrichment { target, annotations } => {

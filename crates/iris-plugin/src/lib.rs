@@ -21,7 +21,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 // so a plugin author depends only on iris-plugin for the whole surface
-pub use iris_core::{AnnotationValue, AppId, Direction, Rule, RuleAction, Severity, TargetKind};
+pub use iris_core::{
+    AnnotationValue, AppId, Direction, Panel, Rule, RuleAction, Severity, TargetKind, Widget,
+};
 pub use iris_ipc::plugin::StreamKind as Stream;
 
 /// what an out-of-process plugin implements. every method has a default, so a
@@ -34,6 +36,12 @@ pub trait Plugin: Send + Sync + 'static {
     /// task, so a synchronous network call here is fine.
     fn enrich(&self, _target: &EnrichTarget) -> Vec<Annotation> {
         Vec::new()
+    }
+
+    /// the panel view-model for this plugin's tab, if it declares `ui:panel`.
+    /// called on demand when the user opens the tab; runs on a blocking task.
+    fn panel(&self) -> Option<Panel> {
+        None
     }
 
     /// a live tick, if the plugin subscribed to `StreamKind::Ticks`
@@ -156,6 +164,14 @@ async fn read_loop<P: Plugin>(
                 tokio::task::spawn_blocking(move || {
                     let annotations = plugin.enrich(&target);
                     let _ = tx.blocking_send(PluginMessage::EnrichReply { req, annotations });
+                });
+            }
+            HostMessage::PanelRequest { req } => {
+                let plugin = plugin.clone();
+                let tx = tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let panel = plugin.panel();
+                    let _ = tx.blocking_send(PluginMessage::PanelReply { req, panel });
                 });
             }
             HostMessage::Event(PluginEvent::Tick(tick)) => plugin.on_tick(ctx, &tick),

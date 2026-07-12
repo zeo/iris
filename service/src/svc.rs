@@ -68,7 +68,7 @@ fn run_service() -> anyhow::Result<()> {
     let failed = rt.block_on(async {
         let engine = Engine::new();
         let store = std::sync::Arc::new(std::sync::Mutex::new(crate::open_store()));
-        let (enrich, supervisor) = crate::plugins::build(store.clone(), engine.clone());
+        let (enrich, panels, supervisor) = crate::plugins::build(store.clone(), engine.clone());
         crate::monitor::spawn(engine.clone(), store.clone(), enrich.clone());
         let rules = std::sync::Arc::new(std::sync::Mutex::new(crate::rules::RuleStore::new()));
         tokio::select! {
@@ -76,7 +76,7 @@ fn run_service() -> anyhow::Result<()> {
                 tracing::error!("plugin host ended: {r:?}");
                 true
             }
-            r = server::serve(engine, rules.clone(), store.clone(), enrich) => {
+            r = server::serve(engine, rules.clone(), store.clone(), enrich, panels) => {
                 match r {
                     Err(e) => {
                         tracing::error!("serve loop failed: {e}");

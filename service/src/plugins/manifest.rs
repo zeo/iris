@@ -45,6 +45,7 @@ const KNOWN_CAPS: &[&str] = &[
     "enrich:app",
     "emit:alerts",
     "emit:rule-proposals",
+    "ui:panel",
 ];
 
 impl Manifest {

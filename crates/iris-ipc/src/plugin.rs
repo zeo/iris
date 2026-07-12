@@ -10,12 +10,12 @@
 //! connection. the service stamps the authenticated plugin id onto everything
 //! the plugin emits, so a plugin cannot speak in another's name.
 
-use iris_core::{Alert, Annotation, EnrichTarget, Rule, StatsTick};
+use iris_core::{Alert, Annotation, EnrichTarget, Panel, Rule, StatsTick};
 use serde::{Deserialize, Serialize};
 
 /// bump when the plugin wire shape changes incompatibly. independent of the UI
 /// pipe's `PROTOCOL_VERSION`; plugins declare compatibility in their manifest.
-/// v2 added rule proposals.
+/// v2 added rule proposals and panels.
 pub const PLUGIN_PROTOCOL_VERSION: u32 = 2;
 
 /// the env var carrying the spawn-time auth token to the child, cleared by the
@@ -60,6 +60,9 @@ pub enum PluginMessage {
     /// only records it for the user's review; nothing is enforced until an
     /// elevated caller accepts.
     ProposeRule { rule: Rule, reason: String },
+    /// response to [`HostMessage::PanelRequest`]; None when the plugin has no
+    /// panel to show right now
+    PanelReply { req: u64, panel: Option<Panel> },
     /// keepalive response
     Pong { req: u64 },
 }
@@ -78,6 +81,8 @@ pub enum HostMessage {
     Event(PluginEvent),
     /// resolve annotations for a target (subject to `enrich:*` caps)
     EnrichRequest { req: u64, target: EnrichTarget },
+    /// fetch the plugin's panel view-model (subject to `ui:panel`)
+    PanelRequest { req: u64 },
     /// keepalive; reply with [`PluginMessage::Pong`]
     Ping { req: u64 },
 }

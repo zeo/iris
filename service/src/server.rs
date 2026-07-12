@@ -1,5 +1,6 @@
 use crate::engine::Engine;
 use crate::plugins::registry::EnrichmentRegistry;
+use crate::plugins::PanelHub;
 use crate::rules::RuleStore;
 use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
@@ -16,6 +17,7 @@ pub async fn serve(
     rules: Arc<Mutex<RuleStore>>,
     store: Arc<Mutex<Store>>,
     enrich: Arc<EnrichmentRegistry>,
+    panels: Arc<PanelHub>,
 ) -> anyhow::Result<()> {
     let listener = transport::listen()?;
     tracing::info!(pipe = iris_ipc::PIPE_NAME, "engine listening");
@@ -50,9 +52,10 @@ pub async fn serve(
         let rules = rules.clone();
         let store = store.clone();
         let enrich = enrich.clone();
+        let panels = panels.clone();
         tokio::spawn(async move {
             let _permit = permit; // held for the session, released on disconnect
-            if let Err(e) = handle(conn, engine, rules, store, enrich).await {
+            if let Err(e) = handle(conn, engine, rules, store, enrich, panels).await {
                 tracing::debug!("client disconnected: {e}");
             }
         });
@@ -67,6 +70,7 @@ async fn handle(
     rules: Arc<Mutex<RuleStore>>,
     store: Arc<Mutex<Store>>,
     enrich: Arc<EnrichmentRegistry>,
+    panels: Arc<PanelHub>,
 ) -> io::Result<()> {
     let (mut recv, mut send) = transport::split(stream);
 
@@ -187,6 +191,18 @@ async fn handle(
                             Reply::Ok
                         } else {
                             Reply::Error("plugin has no consent grant yet".into())
+                        };
+                        reply(&mut send, req, result).await?;
+                    }
+                    ClientMessage::GetPluginPanel { req, id } => {
+                        // a plugin round-trip; keep it off the reactor
+                        let panels = panels.clone();
+                        let result = tokio::task::spawn_blocking(move || panels.panel(&id))
+                            .await
+                            .unwrap_or_else(|_| Err("panel fetch failed".into()));
+                        let result = match result {
+                            Ok(panel) => Reply::Panel(panel),
+                            Err(e) => Reply::Error(e),
                         };
                         reply(&mut send, req, result).await?;
                     }
@@ -419,6 +435,7 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::SetPluginEnabled { req, .. }
         | ClientMessage::ListProposals { req }
         | ClientMessage::ResolveProposal { req, .. }
+        | ClientMessage::GetPluginPanel { req, .. }
         | ClientMessage::Ping { req } => Some(*req),
         ClientMessage::Hello { .. } | ClientMessage::Subscribe | ClientMessage::Unsubscribe => None,
     }

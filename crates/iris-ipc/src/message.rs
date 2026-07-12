@@ -1,6 +1,6 @@
 use iris_core::{
-    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, LiveConnection, Rule, RuleProposal,
-    StatsTick, StoredRule, UsageBucket, UsageQuery,
+    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, LiveConnection, Panel, Rule,
+    RuleProposal, StatsTick, StoredRule, UsageBucket, UsageQuery,
 };
 use serde::{Deserialize, Serialize};
 
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// service whose protocol differs, so a partial update never mismatches schemas.
 /// v2 added the enrichment channel (annotations for endpoints/apps); v3 added
 /// the per-adapter breakdown carried in every tick; v4 added plugin management;
-/// v5 added rule proposals.
+/// v5 added rule proposals and plugin panels.
 pub const PROTOCOL_VERSION: u32 = 5;
 
 /// what the UI shows for one installed plugin: its declared identity and
@@ -72,6 +72,8 @@ pub enum ClientMessage {
     /// settle a pending proposal. accepting enforces a rule, so it is only
     /// honored on the admin pipe; the telemetry pipe may only reject.
     ResolveProposal { req: u64, id: i64, accept: bool },
+    /// fetch a plugin's panel view-model for its tab
+    GetPluginPanel { req: u64, id: String },
 }
 
 /// a service -> UI message: either an unsolicited push (`Tick`, `Alert`,
@@ -118,4 +120,6 @@ pub enum Reply {
     Plugins(Vec<PluginInfo>),
     /// recent rule proposals, newest first
     Proposals(Vec<RuleProposal>),
+    /// a plugin's panel view-model
+    Panel(Panel),
 }

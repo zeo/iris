@@ -5,20 +5,25 @@
 //! plugin is connected the call returns empty at once, so a stopped or crashed
 //! plugin never stalls enrichment.
 
-use iris_core::{Annotation, EnrichTarget, Enricher, TargetKind};
+use iris_core::{Annotation, EnrichTarget, Enricher, Panel, TargetKind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// how long the registry waits for a plugin to answer one enrich request
-const ENRICH_TIMEOUT: Duration = Duration::from_secs(5);
+/// how long a caller waits for a plugin to answer one request
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// one enrich request handed from the proxy to the active connection actor,
-/// carrying a std channel the actor answers on
-pub struct ProxyRequest {
-    pub target: EnrichTarget,
-    pub reply: std::sync::mpsc::Sender<Vec<Annotation>>,
+/// one request handed from a proxy to the active connection actor, carrying a
+/// std channel the actor answers on
+pub enum ProxyRequest {
+    Enrich {
+        target: EnrichTarget,
+        reply: std::sync::mpsc::Sender<Vec<Annotation>>,
+    },
+    Panel {
+        reply: std::sync::mpsc::Sender<Option<Panel>>,
+    },
 }
 
 /// shared between the proxy (in the registry) and the supervisor's per-plugin
@@ -60,6 +65,21 @@ impl PluginLink {
     fn sender(&self) -> Option<mpsc::Sender<ProxyRequest>> {
         self.sender.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
+
+    /// fetch the plugin's panel view-model. blocking (a pipe round-trip); run
+    /// on a blocking thread. None when the plugin is stopped, slow, or has no
+    /// panel to show.
+    pub fn panel(&self) -> Option<Panel> {
+        if !self.is_connected() {
+            return None;
+        }
+        let sender = self.sender()?;
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        if sender.blocking_send(ProxyRequest::Panel { reply: reply_tx }).is_err() {
+            return None;
+        }
+        reply_rx.recv_timeout(REQUEST_TIMEOUT).ok().flatten()
+    }
 }
 
 /// the registry-facing enricher that forwards to a plugin over [`PluginLink`]
@@ -90,7 +110,7 @@ impl Enricher for OutOfProcEnricher {
             return Vec::new();
         };
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        let request = ProxyRequest {
+        let request = ProxyRequest::Enrich {
             target: target.clone(),
             reply: reply_tx,
         };
@@ -100,6 +120,6 @@ impl Enricher for OutOfProcEnricher {
         if sender.blocking_send(request).is_err() {
             return Vec::new();
         }
-        reply_rx.recv_timeout(ENRICH_TIMEOUT).unwrap_or_default()
+        reply_rx.recv_timeout(REQUEST_TIMEOUT).unwrap_or_default()
     }
 }

@@ -21,16 +21,24 @@ rewrite what the system enforces.
   and the remote endpoints it is talking to. Open a connection for its host name,
   network scope, country, and a one-click kill.
 - **Graph**: a scrolling picture of bandwidth over time, total and per app, with
-  live and historical ranges.
-- **Usage**: rolling history of how much each app has sent and received,
-  downsampled as it ages so the store stays small, with CSV export.
+  live and historical ranges and a live split by adapter (Ethernet, Wi-Fi, VPN).
+- **Usage**: rolling history of how much each app has sent and received, plus
+  per-adapter totals, downsampled as it ages so the store stays small, with CSV
+  export and an optional data-plan cap warning.
 - **Alerts**: the first time a new program reaches the network, Iris flags it
-  and raises a tray notification.
+  and raises a tray notification. Watched addresses raise a flag the moment
+  anything contacts them.
 - **Settings**: throughput units, notifications, launch at login, and one-click
   install or removal of the background engine.
 
-Endpoint enrichment (network scope today, more via plugins) is resolved in the
-engine and shown on the connection detail drawer.
+Endpoint enrichment (network scope and the watchlist today, more via plugins)
+is resolved in the engine and shown on the connection detail drawer.
+
+Rules can be backed up to a JSON file and restored from one; a restore runs
+through the same elevation gate as any other rule change, one prompt for the
+whole file. To watch addresses, put one IP or CIDR per line (with `#` comments)
+in `%ProgramData%\Iris\watchlist.txt`; matching endpoints get a danger badge and
+an alert on first contact.
 
 ## Layout
 
@@ -66,7 +74,8 @@ licensed under CC-BY-4.0.
 
 Working: the instrument shell, live per-app/per-process Activity with connection
 drill-down, host names, and endpoint enrichment; the scrolling bandwidth graph
-over live and historical ranges; elevation-gated WFP allow/block rules with
-JSON backup; usage history with CSV export; first-seen alerts with
-tray toasts; a settings surface; and the self-installing background service with
-signed auto-updates.
+over live and historical ranges with a per-adapter split; elevation-gated WFP
+allow/block rules with JSON backup and restore; usage history with per-adapter
+totals and CSV export; first-seen and watchlist alerts with tray toasts; a
+settings surface; and the self-installing background service with signed
+auto-updates.

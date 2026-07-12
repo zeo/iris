@@ -6,7 +6,7 @@
 //! admin pipe (see `rulectl`). it reconnects on its own.
 
 use iris_core::{
-    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, Granularity, RuleProposal,
+    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, Granularity, Panel, RuleProposal,
     StoredRule, UsageBucket, UsageQuery,
 };
 use iris_ipc::message::{ClientMessage, PluginInfo, Reply, ServerMessage, PROTOCOL_VERSION};
@@ -50,6 +50,7 @@ pub enum EngineCmd {
     // rejecting is unprivileged; accepting enforces a rule and goes over the
     // admin pipe (see rulectl), never through here
     RejectProposal(i64),
+    GetPluginPanel(String),
 }
 pub struct Command {
     cmd: EngineCmd,
@@ -229,6 +230,15 @@ pub async fn reject_proposal(app: AppHandle, id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn get_plugin_panel(app: AppHandle, id: String) -> Result<Panel, String> {
+    match dispatch(&app, EngineCmd::GetPluginPanel(id)).await? {
+        Reply::Panel(p) => Ok(p),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
 pub async fn get_enrichment(app: AppHandle, ips: Vec<String>) -> Result<Vec<EnrichmentEvent>, String> {
     let targets: Vec<EnrichTarget> = ips
         .iter()
@@ -320,6 +330,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     EngineCmd::ListProposals => ClientMessage::ListProposals { req },
                     EngineCmd::RejectProposal(id) =>
                         ClientMessage::ResolveProposal { req, id, accept: false },
+                    EngineCmd::GetPluginPanel(id) => ClientMessage::GetPluginPanel { req, id },
                 };
                 pending.insert(req, command.resp);
                 if let Err(e) = transport::write_frame(&mut send, &msg).await {

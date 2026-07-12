@@ -42,7 +42,32 @@ const CAP_LABELS: Record<string, string> = {
   "enrich:endpoint": "annotate remote endpoints",
   "enrich:app": "annotate applications",
   "emit:alerts": "raise its own alerts",
+  "emit:rule-proposals": "suggest firewall rules for your review",
+  "ui:panel": "show its own panel tab",
 };
 export function capLabel(cap: string): string {
   return CAP_LABELS[cap] ?? cap;
+}
+
+// the declarative panel a plugin returns for its tab (externally-tagged enums
+// over the wire, mirroring iris-core's Panel/Widget)
+export type Severity = "info" | "warn" | "danger";
+export type Widget =
+  | { Stat: { label: string; value: string } }
+  | { Kv: [string, string][] }
+  | { Table: { columns: string[]; rows: string[][] } }
+  | { BadgeRow: [string, Severity][] }
+  | { Sparkline: { label: string; points: number[] } }
+  | { Note: string };
+export interface Panel {
+  title: string;
+  widgets: Widget[];
+}
+
+// enabled plugins the user let show a panel tab
+export const panelPlugins = () =>
+  plugins().filter((p) => p.enabled && p.capabilities.includes("ui:panel"));
+
+export async function fetchPanel(id: string): Promise<Panel> {
+  return invoke<Panel>("get_plugin_panel", { id });
 }

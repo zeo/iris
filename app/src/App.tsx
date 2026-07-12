@@ -14,10 +14,17 @@ import { Usage } from "./tabs/Usage";
 import { Alerts } from "./tabs/Alerts";
 import { Plugins } from "./tabs/Plugins";
 import { Settings } from "./tabs/Settings";
+import { PanelView } from "./components/PanelView";
+import { panelPlugins, refreshPlugins } from "./lib/plugins";
 
-type TabId = "protect" | "activity" | "graph" | "usage" | "alerts" | "plugins" | "settings";
+interface Tab {
+  id: string;
+  label: string;
+  icon: string;
+  view: () => JSX.Element;
+}
 
-const TABS: { id: TabId; label: string; icon: string; view: () => JSX.Element }[] = [
+const TABS: Tab[] = [
   { id: "protect", label: "Protect", icon: "shield", view: Protect },
   { id: "activity", label: "Activity", icon: "activity", view: Activity },
   { id: "graph", label: "Graph", icon: "graph", view: Graph },
@@ -29,14 +36,32 @@ const TABS: { id: TabId; label: string; icon: string; view: () => JSX.Element }[
 
 export function App() {
   const theme = createTheme();
-  const [tab, setTab] = createSignal<TabId>("activity");
-  const current = () => TABS.find((t) => t.id === tab()) ?? TABS[1];
+  const [tab, setTab] = createSignal("activity");
+
+  // enabled plugins with a panel grant appear as their own tabs, between the
+  // built-ins and Settings
+  const allTabs = (): Tab[] => {
+    const dynamic: Tab[] = panelPlugins().map((p) => ({
+      id: `panel:${p.id}`,
+      label: p.name,
+      icon: "plug",
+      view: () => <PanelView id={p.id} name={p.name} />,
+    }));
+    const base = TABS.slice(0, -1);
+    return [...base, ...dynamic, TABS[TABS.length - 1]];
+  };
+  const current = () => allTabs().find((t) => t.id === tab()) ?? TABS[1];
 
   onMount(() => {
     initEngine();
     initAlerts();
     initQuota();
     autoUpdate();
+  });
+
+  // the tab list depends on the plugin catalog, so load it with the engine
+  createEffect(() => {
+    if (engine.online()) refreshPlugins();
   });
 
   // offer to install the background service if the engine stays unreachable
@@ -71,7 +96,7 @@ export function App() {
       />
 
       <nav class="bar tabs" role="tablist" aria-label="sections">
-        <For each={TABS}>
+        <For each={allTabs()}>
           {(t) => (
             <button
               class="tab"

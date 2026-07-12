@@ -1517,6 +1517,49 @@ html {
   margin-bottom: var(--s4);
 }
 
+/* plugin panel widgets */
+.pw {
+  margin-bottom: var(--s3);
+}
+.panel.props.pw {
+  padding: var(--s2) var(--s3);
+}
+.scrollx {
+  overflow-x: auto;
+  padding: var(--s2) var(--s3);
+}
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+.badge-row .tag {
+  font-family: var(--mono);
+  font-size: var(--fz-cap);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 3px 9px;
+  border: 1px solid var(--line2);
+  border-radius: var(--r);
+  color: var(--steel);
+}
+.badge-row .tag.warn {
+  color: var(--text);
+}
+.badge-row .tag.danger {
+  color: var(--err);
+  border-color: rgba(207, 106, 86, 0.45);
+}
+.spark-widget .spark-well {
+  height: 56px;
+  margin-top: var(--s2);
+}
+.panel-note {
+  padding: var(--s2) var(--s3);
+  color: var(--steel);
+  font-size: var(--fz-ui);
+}
+
 /* plugin rule proposals awaiting review */
 .proposals {
   padding: var(--s3);

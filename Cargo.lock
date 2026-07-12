@@ -1932,6 +1932,7 @@ dependencies = [
  "iris-ipc",
  "iris-platform-win",
  "iris-store",
+ "maxminddb",
  "serde",
  "serde_json",
  "tokio",

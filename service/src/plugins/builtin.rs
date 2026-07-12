@@ -32,6 +32,83 @@ impl Enricher for NetworkScope {
     }
 }
 
+/// labels public endpoints with their country from the bundled DB-IP Country
+/// Lite database (CC-BY-4.0). offline: the database is memory-loaded once at
+/// service start, so no lookup ever touches the network.
+pub struct Geo {
+    reader: Option<maxminddb::Reader<Vec<u8>>>,
+}
+
+impl Geo {
+    pub fn new() -> Self {
+        let reader = Self::locate().and_then(|path| {
+            maxminddb::Reader::open_readfile(&path)
+                .inspect(|_| tracing::info!("country database loaded from {}", path.display()))
+                .inspect_err(|e| tracing::warn!("country database at {} unreadable: {e}", path.display()))
+                .ok()
+        });
+        if reader.is_none() {
+            tracing::warn!("country database not found; endpoints stay without a country");
+        }
+        Geo { reader }
+    }
+
+    /// an admin-managed override under ProgramData wins; otherwise the database
+    /// ships in the app's resources, next to the engine in dev (target\debug)
+    /// and one level up from engine\ in an installed tree
+    fn locate() -> Option<PathBuf> {
+        let mut candidates = Vec::new();
+        if let Ok(base) = std::env::var("ProgramData") {
+            candidates.push(PathBuf::from(base).join("Iris").join("geo").join("dbip-country.mmdb"));
+        }
+        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            candidates.push(dir.join("resources").join("geo").join("dbip-country.mmdb"));
+            candidates.push(dir.join("..").join("resources").join("geo").join("dbip-country.mmdb"));
+        }
+        candidates.into_iter().find(|p| p.is_file())
+    }
+}
+
+impl Default for Geo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Enricher for Geo {
+    fn id(&self) -> &str {
+        "iris.geo"
+    }
+
+    fn targets(&self) -> &[TargetKind] {
+        &[TargetKind::Endpoint]
+    }
+
+    fn enrich(&self, target: &EnrichTarget) -> Vec<Annotation> {
+        let EnrichTarget::Endpoint(ip) = target else {
+            return Vec::new();
+        };
+        let Some(reader) = &self.reader else {
+            return Vec::new();
+        };
+        // only public addresses have a country; skip the doomed lookups
+        if ip_scope(ip) != "Public internet" {
+            return Vec::new();
+        }
+        let Ok(record) = reader.lookup::<maxminddb::geoip2::Country>(*ip) else {
+            return Vec::new();
+        };
+        let Some(name) = record
+            .country
+            .and_then(|c| c.names)
+            .and_then(|n| n.get("en").map(|s| s.to_string()))
+        else {
+            return Vec::new();
+        };
+        vec![Annotation::text("geo.country", "Country", name, Severity::Info)]
+    }
+}
+
 /// how often the watchlist file's mtime is re-checked at most
 const WATCHLIST_RECHECK: Duration = Duration::from_secs(5);
 

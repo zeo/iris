@@ -24,6 +24,7 @@ use supervisor::Supervisor;
 pub fn build(store: Arc<Mutex<Store>>, engine: Engine) -> (Arc<EnrichmentRegistry>, Supervisor) {
     let mut registry = EnrichmentRegistry::new();
     registry.register(Box::new(builtin::NetworkScope));
+    registry.register(Box::new(builtin::Geo::new()));
     registry.register(Box::new(builtin::Watchlist::new()));
 
     let runtimes = supervisor::plan(&store);

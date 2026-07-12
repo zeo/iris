@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/iris-core",
     "crates/iris-ipc",
+    "crates/iris-platform-linux",
     "crates/iris-platform-win",
     "crates/iris-plugin",
     "crates/iris-store",
@@ -20,6 +21,7 @@ authors = ["rot <96458554+lintowe@users.noreply.github.com>"]
 [workspace.dependencies]
 iris-core = { path = "crates/iris-core" }
 iris-ipc = { path = "crates/iris-ipc" }
+iris-platform-linux = { path = "crates/iris-platform-linux" }
 iris-platform-win = { path = "crates/iris-platform-win" }
 iris-plugin = { path = "crates/iris-plugin" }
 iris-store = { path = "crates/iris-store" }
@@ -31,7 +33,7 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time", "sync", "signal"] }
 interprocess = { version = "2.2", features = ["tokio"] }
 windows-service = "0.8"
 maxminddb = "0.24"

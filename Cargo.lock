@@ -1901,6 +1901,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-platform-linux"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "iris-core",
+ "libc",
+ "nfq",
+ "tracing",
+]
+
+[[package]]
 name = "iris-platform-win"
 version = "0.1.0"
 dependencies = [
@@ -1929,8 +1940,10 @@ dependencies = [
  "anyhow",
  "iris-core",
  "iris-ipc",
+ "iris-platform-linux",
  "iris-platform-win",
  "iris-store",
+ "libc",
  "maxminddb",
  "serde",
  "serde_json",
@@ -2363,6 +2376,15 @@ name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+
+[[package]]
+name = "nfq"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9c8f4c88952507d9df9400a6a2e48640fb460e21dcb2b4716eb3ff156d6db9e"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "notify-rust"
@@ -4504,6 +4526,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

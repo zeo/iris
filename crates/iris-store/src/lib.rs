@@ -3,7 +3,7 @@
 //! alert log. one connection guarded by the service behind a mutex; the workload
 //! is a handful of writes per second and the occasional query.
 
-use iris_core::{Alert, AlertKind, AppId, Granularity, UsageBucket, UsageQuery};
+use iris_core::{AdapterKind, Alert, AlertKind, AppId, Granularity, UsageBucket, UsageQuery};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
@@ -29,8 +29,20 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 ";
 
+/// v2: traffic split by adapter kind, alongside (not inside) the per-app usage
+const SCHEMA_V2_ADAPTER_USAGE: &str = "
+CREATE TABLE IF NOT EXISTS adapter_usage (
+    kind TEXT NOT NULL,
+    bucket INTEGER NOT NULL,
+    sent INTEGER NOT NULL DEFAULT 0,
+    recv INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (kind, bucket)
+);
+CREATE INDEX IF NOT EXISTS adapter_usage_bucket ON adapter_usage(bucket);
+";
+
 /// bump when the schema changes; drives the migration ladder in [`Store::migrate`]
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct Store {
     conn: Connection,
@@ -87,7 +99,9 @@ impl Store {
         if version < 1 {
             self.conn.execute_batch(SCHEMA)?;
         }
-        // future steps append here: `if version < 2 { ...alter... }`
+        if version < 2 {
+            self.conn.execute_batch(SCHEMA_V2_ADAPTER_USAGE)?;
+        }
         if version < SCHEMA_VERSION {
             self.conn
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -122,6 +136,60 @@ impl Store {
             params![path, bucket, sent as i64, recv as i64],
         ) {
             tracing::warn!("could not record usage for {path}: {e}");
+        }
+    }
+
+    /// add bytes to an adapter kind's current-minute usage bucket
+    pub fn add_adapter_usage(&self, kind: AdapterKind, at_ms: u64, sent: u64, recv: u64) {
+        if sent == 0 && recv == 0 {
+            return;
+        }
+        let bucket = Granularity::Minute.bucket_start(at_ms) as i64;
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO adapter_usage(kind, bucket, sent, recv) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(kind, bucket) DO UPDATE SET sent = sent + ?3, recv = recv + ?4",
+            params![kind.as_str(), bucket, sent as i64, recv as i64],
+        ) {
+            tracing::warn!("could not record adapter usage: {e}");
+        }
+    }
+
+    /// total bytes per adapter kind over a window, biggest first
+    pub fn adapter_usage_totals(
+        &self,
+        from_ms: u64,
+        to_ms: u64,
+    ) -> Vec<(AdapterKind, iris_core::ByteCounts)> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT kind, SUM(sent), SUM(recv) FROM adapter_usage
+             WHERE bucket >= ?1 AND bucket < ?2 GROUP BY kind
+             ORDER BY SUM(sent) + SUM(recv) DESC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![from_ms as i64, to_ms as i64], |r| {
+            let kind: String = r.get(0)?;
+            let sent: i64 = r.get(1)?;
+            let recv: i64 = r.get(2)?;
+            Ok((kind, sent, recv))
+        });
+        match rows {
+            Ok(rows) => rows
+                .flatten()
+                .filter_map(|(kind, sent, recv)| {
+                    AdapterKind::parse(&kind).map(|k| {
+                        (
+                            k,
+                            iris_core::ByteCounts {
+                                sent: sent as u64,
+                                recv: recv as u64,
+                            },
+                        )
+                    })
+                })
+                .collect(),
+            Err(_) => Vec::new(),
         }
     }
 
@@ -283,6 +351,12 @@ impl Store {
         ) {
             tracing::warn!("could not prune usage: {e}");
         }
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM adapter_usage WHERE bucket < ?1",
+            params![older_than_ms as i64],
+        ) {
+            tracing::warn!("could not prune adapter usage: {e}");
+        }
     }
 
     pub fn first_seen(&self, path: &str) -> Option<u64> {
@@ -320,6 +394,22 @@ mod tests {
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].1.sent, 150);
         assert_eq!(totals[0].1.recv, 200);
+    }
+
+    #[test]
+    fn adapter_usage_accumulates_and_totals() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_adapter_usage(AdapterKind::Wifi, 1_000, 100, 200);
+        s.add_adapter_usage(AdapterKind::Wifi, 2_000, 50, 0); // same minute
+        s.add_adapter_usage(AdapterKind::Vpn, 1_000, 10, 10);
+        let totals = s.adapter_usage_totals(0, 120_000);
+        assert_eq!(totals.len(), 2);
+        assert_eq!(totals[0].0, AdapterKind::Wifi);
+        assert_eq!(totals[0].1.sent, 150);
+        assert_eq!(totals[0].1.recv, 200);
+        assert_eq!(totals[1].0, AdapterKind::Vpn);
+        // outside the window
+        assert!(s.adapter_usage_totals(120_000, 240_000).is_empty());
     }
 
     #[test]

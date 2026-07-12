@@ -153,6 +153,21 @@ async fn handle(
                         let anns = enrich.cached_for(&targets);
                         reply(&mut send, req, Reply::Enrichment(anns)).await?;
                     }
+                    ClientMessage::GetAdapterUsage { req, from_ms, to_ms } => {
+                        // same window bound as GetUsage, for the same reason
+                        const MAX_WINDOW_MS: u64 = 400 * 86_400_000;
+                        let from = from_ms.max(to_ms.saturating_sub(MAX_WINDOW_MS));
+                        let store = store.clone();
+                        let rows = tokio::task::spawn_blocking(move || {
+                            store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .adapter_usage_totals(from, to_ms)
+                        })
+                        .await
+                        .unwrap_or_default();
+                        reply(&mut send, req, Reply::AdapterUsage(rows)).await?;
+                    }
                     // commands whose engine support arrives in later slices: answer
                     // rather than leave the UI awaiting a reply that never comes
                     other => {
@@ -309,6 +324,7 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::AckAlert { req, .. }
         | ClientMessage::KillConnection { req, .. }
         | ClientMessage::GetEnrichment { req, .. }
+        | ClientMessage::GetAdapterUsage { req, .. }
         | ClientMessage::Ping { req } => Some(*req),
         ClientMessage::Hello { .. } | ClientMessage::Subscribe | ClientMessage::Unsubscribe => None,
     }

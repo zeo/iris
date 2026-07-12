@@ -6,7 +6,8 @@
 //! admin pipe (see `rulectl`). it reconnects on its own.
 
 use iris_core::{
-    Alert, Annotation, EnrichTarget, Granularity, StoredRule, UsageBucket, UsageQuery,
+    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, Granularity, StoredRule,
+    UsageBucket, UsageQuery,
 };
 use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
@@ -37,6 +38,7 @@ pub struct StatusState(pub Mutex<Status>);
 pub enum EngineCmd {
     ListRules,
     GetUsage(UsageQuery),
+    GetAdapterUsage(u64, u64),
     ListAlerts(bool),
     AckAlert(i64),
     KillConnection(u16, String, u16),
@@ -146,6 +148,29 @@ pub async fn get_usage(
     }
 }
 
+/// one row of the per-adapter breakdown handed to the webview
+#[derive(Serialize, Clone)]
+pub struct AdapterUsageRow {
+    pub kind: AdapterKind,
+    pub bytes: ByteCounts,
+}
+
+#[tauri::command]
+pub async fn get_adapter_usage(
+    app: AppHandle,
+    from_ms: f64,
+    to_ms: f64,
+) -> Result<Vec<AdapterUsageRow>, String> {
+    match dispatch(&app, EngineCmd::GetAdapterUsage(from_ms as u64, to_ms as u64)).await? {
+        Reply::AdapterUsage(rows) => Ok(rows
+            .into_iter()
+            .map(|(kind, bytes)| AdapterUsageRow { kind, bytes })
+            .collect()),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
 #[tauri::command]
 pub async fn get_enrichment(app: AppHandle, ips: Vec<String>) -> Result<Vec<EnrichmentEvent>, String> {
     let targets: Vec<EnrichTarget> = ips
@@ -220,6 +245,8 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                 let msg = match command.cmd {
                     EngineCmd::ListRules => ClientMessage::ListRules { req },
                     EngineCmd::GetUsage(query) => ClientMessage::GetUsage { req, query },
+                    EngineCmd::GetAdapterUsage(from_ms, to_ms) =>
+                        ClientMessage::GetAdapterUsage { req, from_ms, to_ms },
                     EngineCmd::ListAlerts(unacked_only) => ClientMessage::ListAlerts { req, unacked_only },
                     EngineCmd::AckAlert(id) => ClientMessage::AckAlert { req, id },
                     EngineCmd::KillConnection(local_port, remote_addr, remote_port) =>

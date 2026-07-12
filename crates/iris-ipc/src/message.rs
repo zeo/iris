@@ -1,6 +1,6 @@
 use iris_core::{
-    Alert, Annotation, EnrichTarget, LiveConnection, Rule, StatsTick, StoredRule, UsageBucket,
-    UsageQuery,
+    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, LiveConnection, Rule, StatsTick,
+    StoredRule, UsageBucket, UsageQuery,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,8 @@ pub enum ClientMessage {
     GetEnrichment { req: u64, targets: Vec<EnrichTarget> },
     /// keepalive; service replies with the same `req`
     Ping { req: u64 },
+    /// per-adapter-kind traffic totals over a window
+    GetAdapterUsage { req: u64, from_ms: u64, to_ms: u64 },
 }
 
 /// a service -> UI message: either an unsolicited push (`Tick`, `Alert`,
@@ -78,4 +80,6 @@ pub enum Reply {
     /// cached annotations, one entry per requested target that had any
     Enrichment(Vec<(EnrichTarget, Vec<Annotation>)>),
     Error(String),
+    /// per-adapter-kind totals, biggest first
+    AdapterUsage(Vec<(AdapterKind, ByteCounts)>),
 }

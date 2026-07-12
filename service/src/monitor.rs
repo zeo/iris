@@ -65,6 +65,9 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentReg
             {
                 let store = store.lock().unwrap_or_else(|e| e.into_inner());
                 let alerting = now > baseline_until;
+                for adapter in &tick.adapters {
+                    store.add_adapter_usage(adapter.kind, now, adapter.rate_sent, adapter.rate_recv);
+                }
                 for app in &tick.apps {
                     // rate over a ~1s window is close enough to bytes this second
                     store.add_usage(app.app.as_str(), now, app.rate_sent, app.rate_recv);

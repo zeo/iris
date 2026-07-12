@@ -20,6 +20,10 @@ use iris_ipc::transport;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+// so a plugin author depends only on iris-plugin for the whole surface
+pub use iris_core::{AnnotationValue, AppId, Severity, TargetKind};
+pub use iris_ipc::plugin::StreamKind as Stream;
+
 /// what an out-of-process plugin implements. every method has a default, so a
 /// plugin overrides only what it needs.
 pub trait Plugin: Send + Sync + 'static {

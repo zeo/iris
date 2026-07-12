@@ -163,8 +163,16 @@ pub fn spawn_restricted(
             .map(|p| p.as_os_str().encode_wide().chain(std::iter::once(0)).collect())
             .unwrap_or_else(|| vec![0]);
 
+        // a low-integrity token cannot open the process's window station and
+        // desktop (medium-IL objects), so CreateProcessAsUserW would fail with
+        // access denied. label both Low so the sandboxed child can attach.
+        let mut desktop = grant_low_il_desktop();
+
         let mut si: STARTUPINFOW = std::mem::zeroed();
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        if let Some(name) = desktop.as_mut() {
+            si.lpDesktop = PWSTR(name.as_mut_ptr());
+        }
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
 
         let result = CreateProcessAsUserW(
@@ -188,6 +196,69 @@ pub fn spawn_restricted(
             thread: pi.hThread,
         })
     }
+}
+
+/// label the current window station and desktop Low so a low-integrity child
+/// can attach to them, and return the `station\desktop` name to hand
+/// CreateProcessAsUserW. best-effort: on any failure we return None and let the
+/// spawn inherit the parent's desktop (which then fails loudly, as before).
+unsafe fn grant_low_il_desktop() -> Option<Vec<u16>> {
+    use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows::Win32::Security::{
+        SetUserObjectSecurity, LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    };
+    use windows::Win32::System::StationsAndDesktops::{GetProcessWindowStation, GetThreadDesktop};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+
+    let station = GetProcessWindowStation().ok()?;
+    let desktop = GetThreadDesktop(GetCurrentThreadId()).ok()?;
+    let station_h = HANDLE(station.0);
+    let desktop_h = HANDLE(desktop.0);
+
+    // build a security descriptor carrying only a Low mandatory label; setting
+    // it with LABEL_SECURITY_INFORMATION leaves the DACL untouched
+    let sddl = wide("S:(ML;;NW;;;LW)");
+    let mut psd = PSECURITY_DESCRIPTOR::default();
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        PCWSTR(sddl.as_ptr()),
+        1, // SDDL_REVISION_1
+        &mut psd,
+        None,
+    )
+    .ok()?;
+
+    let info = LABEL_SECURITY_INFORMATION;
+    let _ = SetUserObjectSecurity(station_h, &info, psd);
+    let _ = SetUserObjectSecurity(desktop_h, &info, psd);
+    let _ = windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(
+        psd.0,
+    )));
+
+    let station_name = user_object_name(station_h)?;
+    let desktop_name = user_object_name(desktop_h)?;
+    Some(wide(&format!("{station_name}\\{desktop_name}")))
+}
+
+/// read a window-station or desktop object's name
+unsafe fn user_object_name(obj: HANDLE) -> Option<String> {
+    use windows::Win32::System::StationsAndDesktops::{GetUserObjectInformationW, UOI_NAME};
+    let mut needed: u32 = 0;
+    // first call sizes the buffer; it "fails" with the length set
+    let _ = GetUserObjectInformationW(obj, UOI_NAME, None, 0, Some(&mut needed));
+    if needed == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; (needed as usize / 2) + 1];
+    GetUserObjectInformationW(
+        obj,
+        UOI_NAME,
+        Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
+        needed,
+        Some(&mut needed),
+    )
+    .ok()?;
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..end]))
 }
 
 /// stamp the token's mandatory integrity level down to Low

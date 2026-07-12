@@ -13,5 +13,6 @@ use std::sync::Arc;
 pub fn builtin_registry() -> Arc<EnrichmentRegistry> {
     let mut registry = EnrichmentRegistry::new();
     registry.register(Box::new(builtin::NetworkScope));
+    registry.register(Box::new(builtin::Watchlist::new()));
     Arc::new(registry)
 }

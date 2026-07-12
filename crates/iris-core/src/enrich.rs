@@ -80,6 +80,83 @@ pub trait Observer: Send + Sync {
     fn on_alert(&self, _alert: &crate::Alert) {}
 }
 
+/// a parsed set of addresses and CIDR prefixes: the shape of the watchlist
+/// file (one entry per line, `#` starts a comment)
+#[derive(Debug, Default)]
+pub struct IpSet {
+    v4: Vec<(u32, u8)>,
+    v6: Vec<(u128, u8)>,
+}
+
+impl IpSet {
+    /// parse entries, returning the set and any lines that did not parse
+    pub fn parse(text: &str) -> (IpSet, Vec<String>) {
+        let mut set = IpSet::default();
+        let mut rejected = Vec::new();
+        for line in text.lines() {
+            let entry = line.split('#').next().unwrap_or("").trim();
+            if entry.is_empty() {
+                continue;
+            }
+            if set.add(entry).is_none() {
+                rejected.push(entry.to_string());
+            }
+        }
+        (set, rejected)
+    }
+
+    fn add(&mut self, entry: &str) -> Option<()> {
+        let (addr, prefix) = match entry.split_once('/') {
+            Some((a, p)) => (a, Some(p.trim().parse::<u8>().ok()?)),
+            None => (entry, None),
+        };
+        match addr.trim().parse::<IpAddr>().ok()? {
+            IpAddr::V4(v4) => {
+                let p = prefix.unwrap_or(32);
+                if p > 32 {
+                    return None;
+                }
+                self.v4.push((u32::from(v4), p));
+            }
+            IpAddr::V6(v6) => {
+                let p = prefix.unwrap_or(128);
+                if p > 128 {
+                    return None;
+                }
+                self.v6.push((u128::from(v6), p));
+            }
+        }
+        Some(())
+    }
+
+    pub fn contains(&self, ip: &IpAddr) -> bool {
+        fn hit_v4(x: u32, net: u32, p: u8) -> bool {
+            p == 0 || (x >> (32 - p as u32)) == (net >> (32 - p as u32))
+        }
+        fn hit_v6(x: u128, net: u128, p: u8) -> bool {
+            p == 0 || (x >> (128 - p as u32)) == (net >> (128 - p as u32))
+        }
+        match ip {
+            IpAddr::V4(v4) => {
+                let x = u32::from(*v4);
+                self.v4.iter().any(|(net, p)| hit_v4(x, *net, *p))
+            }
+            IpAddr::V6(v6) => {
+                let x = u128::from(*v6);
+                self.v6.iter().any(|(net, p)| hit_v6(x, *net, *p))
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.v4.len() + self.v6.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.v4.is_empty() && self.v6.is_empty()
+    }
+}
+
 /// human-readable network scope of an address (loopback, the LAN, the public
 /// internet, ...). pure logic, kept here so it is unit-testable without a host.
 pub fn ip_scope(ip: &IpAddr) -> &'static str {
@@ -133,6 +210,22 @@ mod tests {
         assert_eq!(ip_scope(&"fe80::1".parse().unwrap()), "Link-local");
         assert_eq!(ip_scope(&"fc00::1".parse().unwrap()), "Private network");
         assert_eq!(ip_scope(&"2606:4700:4700::1111".parse().unwrap()), "Public internet");
+    }
+
+    #[test]
+    fn ip_set_matches_addresses_and_prefixes() {
+        let (set, rejected) = IpSet::parse(
+            "# c2 ranges\n203.0.113.7\n198.51.100.0/24  # documentation net\n2001:db8::/32\n\nnot-an-ip\n10.0.0.1/40\n",
+        );
+        assert_eq!(rejected, vec!["not-an-ip".to_string(), "10.0.0.1/40".to_string()]);
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&"203.0.113.7".parse().unwrap()));
+        assert!(!set.contains(&"203.0.113.8".parse().unwrap()));
+        assert!(set.contains(&"198.51.100.200".parse().unwrap()));
+        assert!(!set.contains(&"198.51.101.1".parse().unwrap()));
+        assert!(set.contains(&"2001:db8:dead::beef".parse().unwrap()));
+        assert!(!set.contains(&"2001:db9::1".parse().unwrap()));
+        assert!(IpSet::parse("").0.is_empty());
     }
 
     #[test]

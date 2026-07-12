@@ -12,10 +12,137 @@ pub fn app_icon(path: String) -> Option<String> {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
         Some(format!("data:image/png;base64,{b64}"))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::icon_data_uri(&path)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = path;
         None
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::path::{Path, PathBuf};
+
+    /// resolve an executable to an icon and return it as a data URI. an app's icon
+    /// lives in the icon theme, keyed by an icon name, not embedded in the binary,
+    /// so we find the icon name (from the binary name or a matching .desktop file)
+    /// and then the icon file, embedding a PNG or SVG. None when nothing matches;
+    /// the UI then shows its generic mark.
+    pub fn icon_data_uri(path: &str) -> Option<String> {
+        let stem = Path::new(path).file_name()?.to_str()?.to_string();
+        let name = icon_name_for(&stem).unwrap_or(stem);
+        let file = find_icon_file(&name)?;
+        let bytes = std::fs::read(&file).ok()?;
+        let mime = match file.extension().and_then(|e| e.to_str()) {
+            Some("svg") => "image/svg+xml",
+            _ => "image/png",
+        };
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Some(format!("data:{mime};base64,{b64}"))
+    }
+
+    /// the Icon= value of the first .desktop file whose executable matches, so an
+    /// app whose icon name differs from its binary name still resolves
+    fn icon_name_for(binary: &str) -> Option<String> {
+        for dir in desktop_dirs() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&p) else {
+                    continue;
+                };
+                if desktop_matches(&text, binary) {
+                    if let Some(icon) = field(&text, "Icon") {
+                        return Some(icon);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn desktop_matches(text: &str, binary: &str) -> bool {
+        for key in ["Exec", "TryExec"] {
+            if let Some(val) = field(text, key) {
+                let first = val.split_whitespace().next().unwrap_or("");
+                let base = Path::new(first)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(first);
+                if base == binary {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn field(text: &str, key: &str) -> Option<String> {
+        text.lines()
+            .find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix('=')))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    }
+
+    /// locate an icon file for a name: an absolute path as-is, else the largest
+    /// available PNG in the icon theme, else an SVG, else a pixmap
+    fn find_icon_file(name: &str) -> Option<PathBuf> {
+        if name.starts_with('/') {
+            let p = PathBuf::from(name);
+            return p.exists().then_some(p);
+        }
+        for base in icon_roots() {
+            for size in ["256x256", "128x128", "96x96", "64x64", "48x48", "scalable"] {
+                for ext in ["png", "svg"] {
+                    let p = base
+                        .join("hicolor")
+                        .join(size)
+                        .join("apps")
+                        .join(format!("{name}.{ext}"));
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+        for ext in ["png", "svg", "xpm"] {
+            let p = PathBuf::from(format!("/usr/share/pixmaps/{name}.{ext}"));
+            if ext != "xpm" && p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    fn icon_roots() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            roots.push(PathBuf::from(&home).join(".local/share/icons"));
+            roots.push(PathBuf::from(home).join(".icons"));
+        }
+        roots.push(PathBuf::from("/usr/local/share/icons"));
+        roots.push(PathBuf::from("/usr/share/icons"));
+        roots
+    }
+
+    fn desktop_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(PathBuf::from(home).join(".local/share/applications"));
+        }
+        dirs.push(PathBuf::from("/usr/local/share/applications"));
+        dirs.push(PathBuf::from("/usr/share/applications"));
+        dirs
     }
 }
 

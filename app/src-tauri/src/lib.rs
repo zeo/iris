@@ -2,6 +2,7 @@
 //! window, exposes the command surface the UI needs, runs a tray icon, and
 //! bridges the UI to the privileged engine service over the named-pipe IPC.
 
+mod elevate;
 mod icon;
 mod ipc;
 mod net;

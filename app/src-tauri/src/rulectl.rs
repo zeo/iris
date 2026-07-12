@@ -1,20 +1,10 @@
-//! elevated firewall-rule mutations. the UI runs unprivileged, so changing a
-//! rule launches the bundled engine elevated (a UAC prompt) to relay the change
-//! over the admin-only pipe. the service accepts mutations only on that pipe, so
-//! a rule change genuinely requires elevation and an unprivileged process cannot
-//! install a SYSTEM-enforced filter behind the user's back.
+//! elevated firewall-rule mutations. the UI runs unprivileged, so changing a rule
+//! launches the bundled engine elevated (a UAC prompt on Windows, a polkit prompt
+//! on Linux) to relay the change over the admin-only endpoint. the service accepts
+//! mutations only there, so a rule change genuinely requires elevation and an
+//! unprivileged process cannot install an OS-enforced filter behind the user's
+//! back. arguments are passed as argv, so a path never needs shell quoting.
 
-#[cfg(windows)]
-fn quote_path(path: &str) -> Result<String, String> {
-    // a real Windows path cannot contain a double quote; rejecting it keeps the
-    // value from breaking out of its quoting in the elevated command line
-    if path.contains('"') {
-        return Err("invalid application path".into());
-    }
-    Ok(format!("\"{path}\""))
-}
-
-#[cfg(windows)]
 #[tauri::command]
 pub async fn rule_add(
     app: tauri::AppHandle,
@@ -22,37 +12,38 @@ pub async fn rule_add(
     direction: String,
     action: String,
 ) -> Result<(), String> {
-    // map to a fixed vocabulary so only known tokens reach the command line
+    // map to a fixed vocabulary so only known tokens reach the elevated run
     let dir = if direction == "inbound" { "inbound" } else { "outbound" };
     let act = if action == "allow" { "allow" } else { "block" };
-    let params = format!("--rule-add {} {dir} {act}", quote_path(&path)?);
-    crate::svcctl::run_engine_elevated(app, params).await
+    let args = vec!["--rule-add".into(), path, dir.into(), act.into()];
+    crate::elevate::run_engine(app, args).await
 }
 
-#[cfg(windows)]
 #[tauri::command]
 pub async fn rule_remove(app: tauri::AppHandle, id: i64) -> Result<(), String> {
-    crate::svcctl::run_engine_elevated(app, format!("--rule-remove {id}")).await
+    crate::elevate::run_engine(app, vec!["--rule-remove".into(), id.to_string()]).await
 }
 
-#[cfg(windows)]
 #[tauri::command]
 pub async fn rule_set_enabled(app: tauri::AppHandle, id: i64, enabled: bool) -> Result<(), String> {
-    crate::svcctl::run_engine_elevated(app, format!("--rule-enable {id} {enabled}")).await
+    let args = vec![
+        "--rule-enable".into(),
+        id.to_string(),
+        enabled.to_string(),
+    ];
+    crate::elevate::run_engine(app, args).await
 }
 
 /// accept a plugin's rule proposal: the enforcement half runs elevated over the
-/// admin pipe, exactly like adding the rule by hand
-#[cfg(windows)]
+/// admin endpoint, exactly like adding the rule by hand
 #[tauri::command]
 pub async fn proposal_accept(app: tauri::AppHandle, id: i64) -> Result<(), String> {
-    crate::svcctl::run_engine_elevated(app, format!("--proposal-accept {id}")).await
+    crate::elevate::run_engine(app, vec!["--proposal-accept".into(), id.to_string()]).await
 }
 
-/// pick a rules backup file and restore it in one elevated run (a single UAC
-/// prompt for the whole file). returns the rule count, or None if the picker
-/// was cancelled.
-#[cfg(windows)]
+/// pick a rules backup file and restore it in one elevated run (a single prompt
+/// for the whole file). returns the rule count, or None if the picker was
+/// cancelled.
 #[tauri::command]
 pub async fn rule_import(app: tauri::AppHandle) -> Result<Option<usize>, String> {
     use tauri::Manager;
@@ -76,8 +67,8 @@ pub async fn rule_import(app: tauri::AppHandle) -> Result<Option<usize>, String>
         .into_path()
         .map_err(|e| format!("unusable file path: {e}"))?;
 
-    // parse before elevating so a malformed file fails with a precise error
-    // here instead of a UAC prompt followed by a bare exit code
+    // parse before elevating so a malformed file fails with a precise error here
+    // instead of a prompt followed by a bare exit code
     let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read the file: {e}"))?;
     if meta.len() > iris_core::BACKUP_MAX_BYTES {
         return Err("that file is too large to be a rules backup".into());
@@ -85,42 +76,7 @@ pub async fn rule_import(app: tauri::AppHandle) -> Result<Option<usize>, String>
     let json = std::fs::read_to_string(&path).map_err(|e| format!("cannot read the file: {e}"))?;
     let count = iris_core::parse_backup(&json)?.len();
 
-    let params = format!("--rule-import {}", quote_path(&path.to_string_lossy())?);
-    crate::svcctl::run_engine_elevated(app, params).await?;
+    let args = vec!["--rule-import".into(), path.to_string_lossy().into_owned()];
+    crate::elevate::run_engine(app, args).await?;
     Ok(Some(count))
-}
-
-#[cfg(not(windows))]
-#[tauri::command]
-pub fn rule_add(
-    _app: tauri::AppHandle,
-    _path: String,
-    _direction: String,
-    _action: String,
-) -> Result<(), String> {
-    Err("rule control is Windows-only".into())
-}
-
-#[cfg(not(windows))]
-#[tauri::command]
-pub fn rule_remove(_app: tauri::AppHandle, _id: i64) -> Result<(), String> {
-    Err("rule control is Windows-only".into())
-}
-
-#[cfg(not(windows))]
-#[tauri::command]
-pub fn rule_set_enabled(_app: tauri::AppHandle, _id: i64, _enabled: bool) -> Result<(), String> {
-    Err("rule control is Windows-only".into())
-}
-
-#[cfg(not(windows))]
-#[tauri::command]
-pub fn rule_import(_app: tauri::AppHandle) -> Result<Option<usize>, String> {
-    Err("rule control is Windows-only".into())
-}
-
-#[cfg(not(windows))]
-#[tauri::command]
-pub fn proposal_accept(_app: tauri::AppHandle, _id: i64) -> Result<(), String> {
-    Err("rule control is Windows-only".into())
 }

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["deb", "rpm", "appimage"],
+    "resources": {
+      "../../target/release/iris-engine": "engine/iris-engine"
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "nftables",
+          "libnetfilter-queue1",
+          "polkit-1-auth-agent | policykit-1"
+        ]
+      },
+      "rpm": {
+        "depends": ["nftables", "libnetfilter_queue", "polkit"]
+      }
+    }
+  }
+}

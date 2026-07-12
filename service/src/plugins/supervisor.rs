@@ -54,6 +54,17 @@ impl PluginRuntime {
             .collect()
     }
 
+    /// the egress the child is actually pinned to: the user's consent, never
+    /// wider than what the manifest declares
+    pub fn effective_egress(&self) -> Vec<String> {
+        self.grant
+            .egress
+            .iter()
+            .filter(|e| self.manifest.egress.iter().any(|d| d == *e))
+            .cloned()
+            .collect()
+    }
+
     #[cfg(windows)]
     fn spawn(&self) {
         let exe = self.manifest.entry_path(&self.dir);
@@ -205,10 +216,17 @@ impl Supervisor {
 
         let this = Arc::new(self);
 
+        // fail closed: a child that cannot be pinned to its granted egress
+        // never runs at all
         #[cfg(windows)]
-        for rt in &this.runtimes {
-            rt.spawn();
-            this.clone().watch(rt.clone());
+        match crate::plugins::egress::Pinner::open() {
+            Ok(pinner) => {
+                let pinner = Arc::new(pinner);
+                for rt in &this.runtimes {
+                    this.clone().launch(pinner.clone(), rt.clone());
+                }
+            }
+            Err(e) => tracing::error!("cannot pin plugin networking, plugins stay stopped: {e}"),
         }
 
         let listener = transport::listen_plugins()?;
@@ -229,6 +247,56 @@ impl Supervisor {
                 }
             });
         }
+    }
+
+    /// pin the plugin's binary to its granted egress, then start it and keep it
+    /// alive. named hosts re-resolve on a slow cadence so a rotated record does
+    /// not strand the child, while the pin never widens past the grant.
+    #[cfg(windows)]
+    fn launch(self: Arc<Self>, pinner: Arc<crate::plugins::egress::Pinner>, rt: Arc<PluginRuntime>) {
+        tokio::spawn(async move {
+            let pinned = {
+                let pinner = pinner.clone();
+                let rt = rt.clone();
+                tokio::task::spawn_blocking(move || pinner.pin(&rt)).await
+            };
+            let mut state = match pinned {
+                Ok(Ok(state)) => state,
+                Ok(Err(e)) => {
+                    tracing::error!(plugin = %rt.id, "egress pin failed, plugin not started: {e}");
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(plugin = %rt.id, "egress pin task died: {e}");
+                    return;
+                }
+            };
+            rt.spawn();
+            self.watch(rt.clone());
+
+            if !state.needs_refresh() {
+                return;
+            }
+            loop {
+                tokio::time::sleep(Duration::from_secs(300)).await;
+                let pinner = pinner.clone();
+                let Ok((returned, outcome)) = tokio::task::spawn_blocking(move || {
+                    let mut state = state;
+                    let outcome = pinner.refresh(&mut state);
+                    (state, outcome)
+                })
+                .await
+                else {
+                    return;
+                };
+                state = returned;
+                match outcome {
+                    Ok(true) => tracing::info!(plugin = %rt.id, "egress endpoints re-resolved"),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(plugin = %rt.id, "egress refresh failed: {e}"),
+                }
+            }
+        });
     }
 
     /// restart a plugin that dies, with a backoff, and quarantine it after too

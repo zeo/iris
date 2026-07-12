@@ -10,6 +10,8 @@ mod conn;
 #[cfg(windows)]
 mod dns;
 #[cfg(windows)]
+mod egress;
+#[cfg(windows)]
 mod etw;
 #[cfg(windows)]
 mod proc;
@@ -26,6 +28,8 @@ pub use adapters::AdapterMap;
 pub use conn::{kill_connection, ConnCounter};
 #[cfg(windows)]
 pub use dns::{new_map, DnsMap};
+#[cfg(windows)]
+pub use egress::{AppPin, PluginNet};
 #[cfg(windows)]
 pub use etw::Monitor;
 #[cfg(windows)]

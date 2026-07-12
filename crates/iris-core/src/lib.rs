@@ -22,8 +22,8 @@ pub use alert::{Alert, AlertKind};
 pub use engine::{FirewallController, MonitorSink, NetworkMonitor};
 pub use error::{EngineError, EngineResult};
 pub use model::{
-    AppId, AppSample, ByteCounts, Conn, ConnState, Direction, Endpoint, LiveConnection, ProcSample,
-    Protocol, StatsTick,
+    AdapterKind, AppId, AppSample, ByteCounts, Conn, ConnState, Direction, Endpoint,
+    LiveConnection, ProcSample, Protocol, StatsTick,
 };
 pub use rule::{parse_backup, BackupRule, Rule, RuleAction, StoredRule, BACKUP_MAX_BYTES};
 pub use usage::{Granularity, UsageBucket, UsageQuery};

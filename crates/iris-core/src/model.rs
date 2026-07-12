@@ -17,6 +17,42 @@ pub enum Direction {
     Outbound,
 }
 
+/// the kind of network adapter a flow's local address is bound to, for the
+/// per-adapter traffic breakdown
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AdapterKind {
+    Ethernet,
+    Wifi,
+    Vpn,
+    Loopback,
+    Other,
+}
+
+impl AdapterKind {
+    /// the wire/storage name, matching the serde form
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AdapterKind::Ethernet => "ethernet",
+            AdapterKind::Wifi => "wifi",
+            AdapterKind::Vpn => "vpn",
+            AdapterKind::Loopback => "loopback",
+            AdapterKind::Other => "other",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<AdapterKind> {
+        match s {
+            "ethernet" => Some(AdapterKind::Ethernet),
+            "wifi" => Some(AdapterKind::Wifi),
+            "vpn" => Some(AdapterKind::Vpn),
+            "loopback" => Some(AdapterKind::Loopback),
+            "other" => Some(AdapterKind::Other),
+            _ => None,
+        }
+    }
+}
+
 /// stable identity of an application: its on-disk image path, lowercased and
 /// normalized. the firewall keys rules on this and history rows reference it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

@@ -4,6 +4,8 @@
 //! targets so the service can depend on it unconditionally.
 
 #[cfg(windows)]
+mod adapters;
+#[cfg(windows)]
 mod conn;
 #[cfg(windows)]
 mod dns;
@@ -16,6 +18,8 @@ mod svc;
 #[cfg(windows)]
 mod wfp;
 
+#[cfg(windows)]
+pub use adapters::AdapterMap;
 #[cfg(windows)]
 pub use conn::{kill_connection, ConnCounter};
 #[cfg(windows)]

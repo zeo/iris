@@ -114,12 +114,15 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentReg
             engine.publish(ServerMessage::Tick(tick));
 
             // resolve and push enrichment off the tick path so a slow enricher
-            // never delays the next sample
+            // never delays the next sample. this runs on a blocking thread: a
+            // built-in enricher may touch disk (the watchlist file) and an
+            // out-of-process plugin proxy blocks on a pipe round-trip, neither of
+            // which may run on an async worker.
             if !new_targets.is_empty() {
                 let engine = engine.clone();
                 let enrich = enrich.clone();
                 let store = store.clone();
-                tokio::spawn(async move {
+                tokio::task::spawn_blocking(move || {
                     for target in new_targets {
                         let annotations = enrich.resolve(&target);
                         if annotations.is_empty() {

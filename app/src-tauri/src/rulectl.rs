@@ -41,6 +41,14 @@ pub async fn rule_set_enabled(app: tauri::AppHandle, id: i64, enabled: bool) -> 
     crate::svcctl::run_engine_elevated(app, format!("--rule-enable {id} {enabled}")).await
 }
 
+/// accept a plugin's rule proposal: the enforcement half runs elevated over the
+/// admin pipe, exactly like adding the rule by hand
+#[cfg(windows)]
+#[tauri::command]
+pub async fn proposal_accept(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    crate::svcctl::run_engine_elevated(app, format!("--proposal-accept {id}")).await
+}
+
 /// pick a rules backup file and restore it in one elevated run (a single UAC
 /// prompt for the whole file). returns the rule count, or None if the picker
 /// was cancelled.
@@ -108,5 +116,11 @@ pub fn rule_set_enabled(_app: tauri::AppHandle, _id: i64, _enabled: bool) -> Res
 #[cfg(not(windows))]
 #[tauri::command]
 pub fn rule_import(_app: tauri::AppHandle) -> Result<Option<usize>, String> {
+    Err("rule control is Windows-only".into())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn proposal_accept(_app: tauri::AppHandle, _id: i64) -> Result<(), String> {
     Err("rule control is Windows-only".into())
 }

@@ -2,6 +2,7 @@ import { createSignal } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type { Sample } from "../components/BandwidthGraph";
+import { upsertProposal, type RuleProposal } from "./proposals";
 
 // shapes mirror iris-core's serialized types. AppId is a newtype over String, so
 // it arrives as a plain path string.
@@ -137,6 +138,8 @@ export function initEngine() {
   listen<EnrichmentEvent>("engine-enrichment", (e) => {
     mergeEnrichment(e.payload.target, e.payload.annotations);
   });
+
+  listen<RuleProposal>("engine-proposal", (e) => upsertProposal(e.payload));
 
   // seed from managed state so a status event that fired before this listener
   // registered is not missed

@@ -46,7 +46,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     // elevated one-shot rule mutations (launched by the UI with a UAC prompt)
-    if let Some(idx) = args.iter().position(|a| a.starts_with("--rule-")) {
+    if let Some(idx) = args
+        .iter()
+        .position(|a| a.starts_with("--rule-") || a == "--proposal-accept")
+    {
         return adminclient::run(&args[idx..]);
     }
 

@@ -54,6 +54,7 @@ pub fn run() {
             rulectl::rule_remove,
             rulectl::rule_set_enabled,
             rulectl::rule_import,
+            rulectl::proposal_accept,
             startup::get_launch_at_login,
             startup::set_launch_at_login,
             report::save_download,

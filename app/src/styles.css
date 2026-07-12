@@ -1516,6 +1516,18 @@ html {
   padding: var(--s3);
   margin-bottom: var(--s4);
 }
+
+/* plugin rule proposals awaiting review */
+.proposals {
+  padding: var(--s3);
+  margin-bottom: var(--s4);
+}
+.proposals .rows {
+  margin-top: 0;
+}
+.proposals .row .btn {
+  flex: 0 0 auto;
+}
 .picker-head {
   display: flex;
   align-items: center;

@@ -5,6 +5,7 @@ import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import { engine } from "../lib/engine";
 import { addRule, refreshRules, removeRule, rules, setRuleEnabled } from "../lib/rules";
+import { acceptProposal, pendingProposals, refreshProposals, rejectProposal } from "../lib/proposals";
 
 function fileName(path: string): string {
   const seg = path.split(/[\\/]/).pop();
@@ -56,8 +57,28 @@ export function Protect() {
   // service is still starting fills in once it comes online instead of staying
   // stuck on "No rules yet"
   createEffect(() => {
-    if (engine.online()) refreshRules();
+    if (engine.online()) {
+      refreshRules();
+      refreshProposals();
+    }
   });
+  const [proposalErr, setProposalErr] = createSignal("");
+  const accept = async (id: number) => {
+    setProposalErr("");
+    try {
+      await acceptProposal(id);
+    } catch (e) {
+      setProposalErr(String(e));
+    }
+  };
+  const dismiss = async (id: number) => {
+    setProposalErr("");
+    try {
+      await rejectProposal(id);
+    } catch (e) {
+      setProposalErr(String(e));
+    }
+  };
 
   const list = createMemo(() => {
     const needle = q().trim().toLowerCase();
@@ -113,6 +134,42 @@ export function Protect() {
         <div class="tile"><div class="k">blocked apps</div><div class="v">{blockedCount()}</div></div>
         <div class="tile"><div class="k">enforcement</div><div class="v" style={{ "font-size": "var(--fz-h)" }}>WFP</div></div>
       </div>
+
+      <Show when={pendingProposals().length > 0}>
+        <div class="panel proposals">
+          <div class="picker-head">
+            <span class="label">
+              suggested by plugins · {pendingProposals().length} pending
+            </span>
+          </div>
+          <Show when={proposalErr()}>
+            <div class="tool-err">{proposalErr()}</div>
+          </Show>
+          <div class="rows">
+            <For each={pendingProposals()}>
+              {(p) => (
+                <div class="row">
+                  <AppIcon path={p.rule.app} />
+                  <div class="meta">
+                    <span class="name">{fileName(p.rule.app)}</span>
+                    <span class="path">{p.source} · {p.reason}</span>
+                  </div>
+                  <span class="grow" />
+                  <span class="tag" classList={{ block: p.rule.action === "block", allow: p.rule.action === "allow" }}>
+                    {p.rule.action} · {p.rule.direction === "outbound" ? "out" : "in"}
+                  </span>
+                  <button class="btn" onClick={() => accept(p.id)} title="Enforce this rule (asks for elevation)">
+                    <Icon name="shield" /> Accept
+                  </button>
+                  <button class="iconbtn" onClick={() => dismiss(p.id)} aria-label="dismiss proposal" title="Dismiss">
+                    <Icon name="x" />
+                  </button>
+                </div>
+              )}
+            </For>
+          </div>
+        </div>
+      </Show>
 
       <Show when={adding()}>
         <div class="panel picker">

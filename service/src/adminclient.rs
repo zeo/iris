@@ -51,6 +51,10 @@ fn build_op(args: &[String]) -> anyhow::Result<Op> {
             let path = args.get(1).context("rule-import: missing file path")?;
             Ok(Op::Import(read_backup(Path::new(path))?))
         }
+        Some("--proposal-accept") => {
+            let id = parse_id(args.get(1))?;
+            Ok(Op::Single(ClientMessage::ResolveProposal { req: 1, id, accept: true }))
+        }
         _ => bail!("unknown rule command"),
     }
 }

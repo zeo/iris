@@ -13,8 +13,9 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::core::PCWSTR;
 use windows::Win32::Security::{
     CreateRestrictedToken, CreateWellKnownSid, GetLengthSid, SetTokenInformation, TokenIntegrityLevel,
-    DISABLE_MAX_PRIVILEGE, LUA_TOKEN, PSID, SID_AND_ATTRIBUTES, TOKEN_ASSIGN_PRIMARY,
-    TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, WinBuiltinAdministratorsSid, WinLowLabelSid,
+    DISABLE_MAX_PRIVILEGE, LUA_TOKEN, PSID, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT,
+    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    WinBuiltinAdministratorsSid, WinLowLabelSid,
 };
 use windows::Win32::System::SystemServices::{SE_GROUP_INTEGRITY, SE_GROUP_USE_FOR_DENY_ONLY};
 use windows::Win32::System::Threading::{
@@ -100,11 +101,14 @@ pub fn spawn_restricted(
     extra_env: &[(String, String)],
 ) -> io::Result<RestrictedChild> {
     unsafe {
-        // start from the service's own primary token
+        // start from the service's own primary token. the restricted token
+        // inherits this handle's access, and lowering its integrity later needs
+        // TOKEN_ADJUST_DEFAULT, so request it here or SetTokenInformation fails
+        // with access denied.
         let mut base = HANDLE::default();
         OpenProcessToken(
             GetCurrentProcess(),
-            TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY,
+            TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT,
             &mut base,
         )
         .map_err(io::Error::other)?;
@@ -165,14 +169,12 @@ pub fn spawn_restricted(
 
         // a low-integrity token cannot open the process's window station and
         // desktop (medium-IL objects), so CreateProcessAsUserW would fail with
-        // access denied. label both Low so the sandboxed child can attach.
-        let mut desktop = grant_low_il_desktop();
+        // access denied. label both Low in place so the child, inheriting them,
+        // can attach.
+        allow_low_il_on_desktop();
 
         let mut si: STARTUPINFOW = std::mem::zeroed();
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-        if let Some(name) = desktop.as_mut() {
-            si.lpDesktop = PWSTR(name.as_mut_ptr());
-        }
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
 
         let result = CreateProcessAsUserW(
@@ -198,11 +200,13 @@ pub fn spawn_restricted(
     }
 }
 
-/// label the current window station and desktop Low so a low-integrity child
-/// can attach to them, and return the `station\desktop` name to hand
-/// CreateProcessAsUserW. best-effort: on any failure we return None and let the
-/// spawn inherit the parent's desktop (which then fails loudly, as before).
-unsafe fn grant_low_il_desktop() -> Option<Vec<u16>> {
+/// label the process's own window station and desktop Low so a low-integrity
+/// child that inherits them can attach. without this CreateProcessAsUserW fails
+/// with access denied against the medium-labeled default desktop. best-effort
+/// and idempotent: the objects are the service's own, and the label only ever
+/// lets a lower-IL process in, never a higher one.
+unsafe fn allow_low_il_on_desktop() {
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows::Win32::Security::{
         SetUserObjectSecurity, LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
@@ -210,55 +214,35 @@ unsafe fn grant_low_il_desktop() -> Option<Vec<u16>> {
     use windows::Win32::System::StationsAndDesktops::{GetProcessWindowStation, GetThreadDesktop};
     use windows::Win32::System::Threading::GetCurrentThreadId;
 
-    let station = GetProcessWindowStation().ok()?;
-    let desktop = GetThreadDesktop(GetCurrentThreadId()).ok()?;
-    let station_h = HANDLE(station.0);
-    let desktop_h = HANDLE(desktop.0);
+    let (Ok(station), Ok(desktop)) =
+        (GetProcessWindowStation(), GetThreadDesktop(GetCurrentThreadId()))
+    else {
+        tracing::warn!("no window station/desktop to label for the plugin child");
+        return;
+    };
 
-    // build a security descriptor carrying only a Low mandatory label; setting
-    // it with LABEL_SECURITY_INFORMATION leaves the DACL untouched
+    // a security descriptor carrying only a Low mandatory label; applying it
+    // with LABEL_SECURITY_INFORMATION leaves the DACL untouched
     let sddl = wide("S:(ML;;NW;;;LW)");
     let mut psd = PSECURITY_DESCRIPTOR::default();
-    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    if let Err(e) = ConvertStringSecurityDescriptorToSecurityDescriptorW(
         PCWSTR(sddl.as_ptr()),
         1, // SDDL_REVISION_1
         &mut psd,
         None,
-    )
-    .ok()?;
+    ) {
+        tracing::warn!("could not build the low integrity label: {e}");
+        return;
+    }
 
     let info = LABEL_SECURITY_INFORMATION;
-    let _ = SetUserObjectSecurity(station_h, &info, psd);
-    let _ = SetUserObjectSecurity(desktop_h, &info, psd);
-    let _ = windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(
-        psd.0,
-    )));
-
-    let station_name = user_object_name(station_h)?;
-    let desktop_name = user_object_name(desktop_h)?;
-    Some(wide(&format!("{station_name}\\{desktop_name}")))
-}
-
-/// read a window-station or desktop object's name
-unsafe fn user_object_name(obj: HANDLE) -> Option<String> {
-    use windows::Win32::System::StationsAndDesktops::{GetUserObjectInformationW, UOI_NAME};
-    let mut needed: u32 = 0;
-    // first call sizes the buffer; it "fails" with the length set
-    let _ = GetUserObjectInformationW(obj, UOI_NAME, None, 0, Some(&mut needed));
-    if needed == 0 {
-        return None;
+    if let Err(e) = SetUserObjectSecurity(HANDLE(station.0), &info, psd) {
+        tracing::warn!("could not label window station low: {e}");
     }
-    let mut buf = vec![0u16; (needed as usize / 2) + 1];
-    GetUserObjectInformationW(
-        obj,
-        UOI_NAME,
-        Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
-        needed,
-        Some(&mut needed),
-    )
-    .ok()?;
-    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    Some(String::from_utf16_lossy(&buf[..end]))
+    if let Err(e) = SetUserObjectSecurity(HANDLE(desktop.0), &info, psd) {
+        tracing::warn!("could not label desktop low: {e}");
+    }
+    let _ = LocalFree(Some(HLOCAL(psd.0)));
 }
 
 /// stamp the token's mandatory integrity level down to Low

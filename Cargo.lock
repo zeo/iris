@@ -1862,7 +1862,6 @@ dependencies = [
  "dns-lookup",
  "iris-core",
  "iris-ipc",
- "maxminddb",
  "png 0.17.16",
  "serde",
  "serde_json",

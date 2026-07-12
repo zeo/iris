@@ -2,7 +2,6 @@
 //! window, exposes the command surface the UI needs, runs a tray icon, and
 //! bridges the UI to the privileged engine service over the named-pipe IPC.
 
-mod geo;
 mod icon;
 mod ipc;
 mod net;
@@ -47,7 +46,6 @@ pub fn run() {
             ipc::grant_plugin,
             ipc::set_plugin_enabled,
             net::reverse_dns,
-            geo::geo_country,
             svcctl::install_service,
             svcctl::uninstall_service,
             rulectl::rule_add,
@@ -60,7 +58,6 @@ pub fn run() {
             icon::app_icon
         ])
         .setup(move |app| {
-            app.manage(geo::load(app.handle()));
             ipc::spawn(app.handle().clone(), cmd_rx);
             build_tray(app.handle())?;
             // a login launch passes --tray so it comes up quietly in the tray

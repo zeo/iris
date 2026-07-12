@@ -11,10 +11,6 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
     () => props.conn.remote.addr,
     (ip) => invoke<string | null>("reverse_dns", { ip }),
   );
-  const [country] = createResource(
-    () => props.conn.remote.addr,
-    (ip) => invoke<string | null>("geo_country", { ip }),
-  );
   // pull any cached engine annotations for this endpoint; live pushes keep the
   // store current while the drawer is open
   createEffect(() => {
@@ -86,12 +82,6 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
           "Reverse DNS",
           <Show when={!rdns.loading} fallback={<span class="resolving">resolving…</span>}>
             {rdns() ?? <span class="unresolved">Unresolved</span>}
-          </Show>,
-        )}
-        {row(
-          "Country",
-          <Show when={!country.loading} fallback={<span class="resolving">…</span>}>
-            {country() ?? <span class="unresolved">Unresolved</span>}
           </Show>,
         )}
         <For each={annotations()}>

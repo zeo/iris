@@ -1913,6 +1913,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "iris-core",
+ "iris-ipc",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "iris-service"
 version = "0.1.0"
 dependencies = [

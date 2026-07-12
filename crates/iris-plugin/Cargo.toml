@@ -1,0 +1,15 @@
+[package]
+name = "iris-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SDK for writing out-of-process Iris plugins"
+
+[dependencies]
+iris-core = { workspace = true }
+iris-ipc = { workspace = true, features = ["transport"] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

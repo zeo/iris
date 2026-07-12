@@ -31,3 +31,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Services",
     "Win32_Security",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+iris-platform-linux = { workspace = true }
+libc = "0.2"

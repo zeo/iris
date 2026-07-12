@@ -27,10 +27,10 @@ fn lock_agg(agg: &Mutex<Aggregator>) -> MutexGuard<'_, Aggregator> {
 
 pub struct Tracker {
     agg: Arc<Mutex<Aggregator>>,
-    #[cfg(windows)]
-    conns: iris_platform_win::ConnCounter,
-    #[cfg(windows)]
-    svc: iris_platform_win::ServiceMap,
+    #[cfg(has_platform)]
+    conns: crate::platform::ConnCounter,
+    #[cfg(has_platform)]
+    svc: crate::platform::ServiceMap,
     /// tick counter, so the service map is re-enumerated on a slow cadence
     ticks: u64,
     /// when each idle process went offline; absent while active. keyed by PID.
@@ -42,12 +42,12 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    #[cfg(windows)]
-    pub fn new(agg: Arc<Mutex<Aggregator>>, dns: iris_platform_win::DnsMap) -> Self {
+    #[cfg(has_platform)]
+    pub fn new(agg: Arc<Mutex<Aggregator>>, dns: crate::platform::DnsMap) -> Self {
         Tracker {
             agg,
-            conns: iris_platform_win::ConnCounter::new(dns),
-            svc: iris_platform_win::ServiceMap::new(),
+            conns: crate::platform::ConnCounter::new(dns),
+            svc: crate::platform::ServiceMap::new(),
             ticks: 0,
             offline_since: HashMap::new(),
             conn_history: HashMap::new(),
@@ -55,7 +55,7 @@ impl Tracker {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(has_platform))]
     pub fn new(agg: Arc<Mutex<Aggregator>>) -> Self {
         Tracker {
             agg,
@@ -67,11 +67,11 @@ impl Tracker {
     }
 
     fn snapshot(&mut self) -> HashMap<u32, (String, Vec<Conn>)> {
-        #[cfg(windows)]
+        #[cfg(has_platform)]
         {
             self.conns.by_pid()
         }
-        #[cfg(not(windows))]
+        #[cfg(not(has_platform))]
         {
             HashMap::new()
         }
@@ -110,7 +110,7 @@ impl Tracker {
     pub fn tick(&mut self, now: u64) -> StatsTick {
         // service to pid bindings are stable, so re-enumerate them only every
         // tenth tick (~10s) rather than on every sample
-        #[cfg(windows)]
+        #[cfg(has_platform)]
         if self.ticks.is_multiple_of(10) {
             self.svc.refresh();
         }
@@ -145,9 +145,9 @@ impl Tracker {
                 }
             }
 
-            #[cfg(windows)]
+            #[cfg(has_platform)]
             let service = self.svc.get(ps.pid).map(|names| names.join(", "));
-            #[cfg(not(windows))]
+            #[cfg(not(has_platform))]
             let service: Option<String> = None;
 
             let proc = ProcSample {
@@ -214,7 +214,7 @@ impl Tracker {
     }
 
     pub fn clear_cache(&mut self) {
-        #[cfg(windows)]
+        #[cfg(has_platform)]
         self.conns.clear_cache();
     }
 }

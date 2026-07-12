@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 
 /// the plugin root, alongside the db and rules file
 pub fn plugins_dir() -> PathBuf {
-    let base = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
-    PathBuf::from(base).join("Iris").join("plugins")
+    crate::paths::plugins_dir()
 }
 
 /// the declared shape of a plugin, parsed from its `plugin.json`. this is the

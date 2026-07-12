@@ -3,8 +3,8 @@
 //! rotated DNS record does not strand a healthy plugin, while the pin itself
 //! stays fail-closed: no pin, no child.
 
+use crate::platform::{AppPin, PluginNet};
 use crate::plugins::supervisor::PluginRuntime;
-use iris_platform_win::{AppPin, PluginNet};
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;

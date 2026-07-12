@@ -33,11 +33,11 @@ fn target_name(target: &EnrichTarget) -> String {
 pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentRegistry>) {
     let agg = Arc::new(Mutex::new(Aggregator::new(now_ms())));
 
-    #[cfg(windows)]
-    let dns = iris_platform_win::new_map();
+    #[cfg(has_platform)]
+    let dns = crate::platform::new_map();
 
-    #[cfg(windows)]
-    let byte_monitor = match iris_platform_win::Monitor::start(agg.clone(), dns.clone()) {
+    #[cfg(has_platform)]
+    let byte_monitor = match crate::platform::Monitor::start(agg.clone(), dns.clone()) {
         Ok(m) => Some(m),
         Err(e) => {
             tracing::error!("byte monitor unavailable (connections still shown): {e}");
@@ -45,13 +45,13 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentReg
         }
     };
 
-    #[cfg(windows)]
+    #[cfg(has_platform)]
     let mut tracker = Tracker::new(agg, dns);
-    #[cfg(not(windows))]
+    #[cfg(not(has_platform))]
     let mut tracker = Tracker::new(agg);
 
     tokio::spawn(async move {
-        #[cfg(windows)]
+        #[cfg(has_platform)]
         let byte_monitor = byte_monitor;
         let mut ticks: u64 = 0;
         // register everything already connected silently for the first few
@@ -149,7 +149,7 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentReg
             ticks += 1;
             if ticks.is_multiple_of(30) {
                 tracker.clear_cache();
-                #[cfg(windows)]
+                #[cfg(has_platform)]
                 if let Some(m) = byte_monitor.as_ref() {
                     m.clear_cache();
                     m.refresh_adapters();

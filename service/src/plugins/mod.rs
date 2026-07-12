@@ -5,7 +5,7 @@
 //! learn whether an enricher is built in or a plugin.
 
 pub mod builtin;
-#[cfg(windows)]
+#[cfg(has_platform)]
 pub mod egress;
 pub mod manifest;
 pub mod proxy;

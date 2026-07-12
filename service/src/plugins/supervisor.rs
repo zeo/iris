@@ -39,8 +39,8 @@ pub struct PluginRuntime {
     pub dir: PathBuf,
     pub link: Arc<PluginLink>,
     token: String,
-    #[cfg(windows)]
-    child: Mutex<Option<iris_platform_win::RestrictedChild>>,
+    #[cfg(has_platform)]
+    child: Mutex<Option<crate::platform::RestrictedChild>>,
 }
 
 impl PluginRuntime {
@@ -70,11 +70,11 @@ impl PluginRuntime {
             .collect()
     }
 
-    #[cfg(windows)]
+    #[cfg(has_platform)]
     fn spawn(&self) {
         let exe = self.manifest.entry_path(&self.dir);
         let env = vec![(iris_ipc::plugin::TOKEN_ENV.to_string(), self.token.clone())];
-        match iris_platform_win::spawn_restricted(&exe, &env) {
+        match crate::platform::spawn_restricted(&exe, &env) {
             Ok(child) => {
                 tracing::info!(plugin = %self.id, "plugin started");
                 *self.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
@@ -83,12 +83,14 @@ impl PluginRuntime {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(has_platform)]
     fn is_alive(&self) -> bool {
+        // as_mut: the Linux child checks liveness via try_wait, which reaps and
+        // needs a mutable borrow; the Windows handle is fine through it too
         self.child
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
+            .as_mut()
             .map(|c| c.is_alive())
             .unwrap_or(false)
     }
@@ -176,9 +178,9 @@ pub fn plan(store: &Arc<Mutex<Store>>) -> Vec<Arc<PluginRuntime>> {
             }
         };
         let link = Arc::new(PluginLink::new(manifest.id.clone(), target_kinds(&manifest)));
-        #[cfg(windows)]
-        let token = iris_platform_win::random_token();
-        #[cfg(not(windows))]
+        #[cfg(has_platform)]
+        let token = crate::platform::random_token();
+        #[cfg(not(has_platform))]
         let token = String::new();
         runtimes.push(Arc::new(PluginRuntime {
             id: manifest.id.clone(),
@@ -187,7 +189,7 @@ pub fn plan(store: &Arc<Mutex<Store>>) -> Vec<Arc<PluginRuntime>> {
             dir,
             link,
             token,
-            #[cfg(windows)]
+            #[cfg(has_platform)]
             child: Mutex::new(None),
         }));
     }
@@ -228,19 +230,32 @@ impl Supervisor {
         let this = Arc::new(self);
 
         // fail closed: a child that cannot be pinned to its granted egress
-        // never runs at all
-        #[cfg(windows)]
-        match crate::plugins::egress::Pinner::open() {
+        // never runs at all. the pinner owns the network filters (a dynamic WFP
+        // session on Windows, the plugin nftables table on Linux), so it must
+        // outlive the launch tasks: bind it here so it lives for the whole serve
+        // loop rather than being dropped after launch, which would tear the pins
+        // down (and reopen the plugin's network) the moment spawning finished.
+        #[cfg(has_platform)]
+        let _pinner = match crate::plugins::egress::Pinner::open() {
             Ok(pinner) => {
                 let pinner = Arc::new(pinner);
                 for rt in &this.runtimes {
                     this.clone().launch(pinner.clone(), rt.clone());
                 }
+                Some(pinner)
             }
-            Err(e) => tracing::error!("cannot pin plugin networking, plugins stay stopped: {e}"),
-        }
+            Err(e) => {
+                tracing::error!("cannot pin plugin networking, plugins stay stopped: {e}");
+                None
+            }
+        };
 
         let listener = transport::listen_plugins()?;
+        // on Linux the sandboxed plugin child connects as the iris-plugin user;
+        // group-own the socket so only that account can reach it (the Windows
+        // side enforces the same via the pipe SDDL)
+        #[cfg(target_os = "linux")]
+        crate::paths::grant_plugin_socket(iris_ipc::PLUGIN_PIPE_NAME);
         tracing::info!(pipe = iris_ipc::PLUGIN_PIPE_NAME, "plugin host listening");
         loop {
             let conn = match transport::accept(&listener).await {
@@ -263,7 +278,7 @@ impl Supervisor {
     /// pin the plugin's binary to its granted egress, then start it and keep it
     /// alive. named hosts re-resolve on a slow cadence so a rotated record does
     /// not strand the child, while the pin never widens past the grant.
-    #[cfg(windows)]
+    #[cfg(has_platform)]
     fn launch(self: Arc<Self>, pinner: Arc<crate::plugins::egress::Pinner>, rt: Arc<PluginRuntime>) {
         tokio::spawn(async move {
             let pinned = {
@@ -312,7 +327,7 @@ impl Supervisor {
 
     /// restart a plugin that dies, with a backoff, and quarantine it after too
     /// many quick failures so a crash-looping plugin cannot burn the machine
-    #[cfg(windows)]
+    #[cfg(has_platform)]
     fn watch(self: Arc<Self>, rt: Arc<PluginRuntime>) {
         tokio::spawn(async move {
             const MAX_QUICK_FAILURES: u32 = 5;

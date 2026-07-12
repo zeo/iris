@@ -449,14 +449,14 @@ fn now_ms() -> u64 {
 }
 
 fn kill_conn(local_port: u16, remote_addr: &str, remote_port: u16) -> bool {
-    #[cfg(windows)]
+    #[cfg(has_platform)]
     {
         match remote_addr.parse() {
-            Ok(ip) => iris_platform_win::kill_connection(local_port, ip, remote_port),
+            Ok(ip) => crate::platform::kill_connection(local_port, ip, remote_port),
             Err(_) => false,
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(not(has_platform))]
     {
         let _ = (local_port, remote_addr, remote_port);
         false

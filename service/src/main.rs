@@ -7,24 +7,27 @@ mod engine;
 #[cfg(windows)]
 mod install;
 mod monitor;
+mod paths;
+#[cfg(has_platform)]
+mod platform;
 mod plugins;
 mod rules;
 mod server;
 mod tracker;
 #[cfg(windows)]
 mod svc;
+#[cfg(target_os = "linux")]
+mod systemd;
 
 use engine::Engine;
 use iris_store::Store;
 use rules::RuleStore;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 fn open_store() -> Store {
-    let base = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
-    let dir = PathBuf::from(base).join("Iris");
+    let dir = paths::data_dir();
     let _ = std::fs::create_dir_all(&dir);
-    Store::open(&dir.join("iris.db")).unwrap_or_else(|e| {
+    Store::open(&paths::store_file()).unwrap_or_else(|e| {
         tracing::error!("history store unavailable, using in-memory: {e}");
         Store::open_in_memory().expect("in-memory store")
     })
@@ -46,8 +49,18 @@ fn main() -> anyhow::Result<()> {
             return install::uninstall();
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        if has("--install") {
+            return systemd::install();
+        }
+        if has("--uninstall") {
+            return systemd::uninstall();
+        }
+    }
 
-    // elevated one-shot rule mutations (launched by the UI with a UAC prompt)
+    // elevated one-shot rule mutations (launched by the UI with an elevation
+    // prompt: a UAC dialog on Windows, a polkit prompt via pkexec on Linux)
     if let Some(idx) = args
         .iter()
         .position(|a| a.starts_with("--rule-") || a == "--proposal-accept")
@@ -63,7 +76,11 @@ fn main() -> anyhow::Result<()> {
     {
         svc::run()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        systemd::run()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         run_console()
     }
@@ -90,8 +107,7 @@ fn init_logging(to_file: bool) {
             .unwrap_or_else(|_| "info".into())
     };
     if to_file {
-        let base = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
-        let dir = PathBuf::from(base).join("Iris").join("logs");
+        let dir = paths::log_dir();
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("engine.log");
         // roll a grown log at startup so it never eats the disk
@@ -114,16 +130,23 @@ fn init_logging(to_file: bool) {
 fn run_console() -> anyhow::Result<()> {
     tracing::info!("iris-engine starting (console mode)");
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        let engine = Engine::new();
-        let store = Arc::new(Mutex::new(open_store()));
-        let (enrich, panels, supervisor) = plugins::build(store.clone(), engine.clone());
-        monitor::spawn(engine.clone(), store.clone(), enrich.clone());
-        let rules = Arc::new(Mutex::new(RuleStore::new()));
-        tokio::select! {
-            r = server::serve(engine, rules.clone(), store.clone(), enrich, panels) => r,
-            r = server::serve_admin(rules, store) => r,
-            r = supervisor.serve() => r,
-        }
-    })
+    rt.block_on(run_engine())
+}
+
+/// the engine's async main: monitor, plugin host, and both IPC servers, run to
+/// the first one that ends. shared by the console path and the platform service
+/// hosts (SCM on Windows, systemd on Linux).
+pub(crate) async fn run_engine() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    paths::ensure_runtime_dirs();
+    let engine = Engine::new();
+    let store = Arc::new(Mutex::new(open_store()));
+    let (enrich, panels, supervisor) = plugins::build(store.clone(), engine.clone());
+    monitor::spawn(engine.clone(), store.clone(), enrich.clone());
+    let rules = Arc::new(Mutex::new(RuleStore::new()));
+    tokio::select! {
+        r = server::serve(engine, rules.clone(), store.clone(), enrich, panels) => r,
+        r = server::serve_admin(rules, store) => r,
+        r = supervisor.serve() => r,
+    }
 }

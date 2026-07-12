@@ -54,8 +54,8 @@ fn back_up_corrupt(path: &Path) {
 }
 
 pub struct RuleStore {
-    #[cfg(windows)]
-    wfp: Option<iris_platform_win::Wfp>,
+    #[cfg(has_platform)]
+    wfp: Option<crate::platform::Wfp>,
     rules: Vec<StoredRule>,
     next_id: i64,
     path: PathBuf,
@@ -66,8 +66,8 @@ impl RuleStore {
         let path = store_path();
         let loaded = load_persisted(&path);
 
-        #[cfg(windows)]
-        let mut wfp = match iris_platform_win::Wfp::open() {
+        #[cfg(has_platform)]
+        let mut wfp = match crate::platform::Wfp::open() {
             Ok(w) => Some(w),
             Err(e) => {
                 tracing::error!("WFP unavailable (rules will not be enforced): {e}");
@@ -81,14 +81,14 @@ impl RuleStore {
         // filters and re-apply from the file (the single source of truth).
         let persisted: Vec<Persisted> = match loaded {
             Loaded::Rules(v) => {
-                #[cfg(windows)]
+                #[cfg(has_platform)]
                 if let Some(w) = wfp.as_mut() {
                     let _ = w.reset();
                 }
                 v
             }
             Loaded::Empty => {
-                #[cfg(windows)]
+                #[cfg(has_platform)]
                 if let Some(w) = wfp.as_mut() {
                     let _ = w.reset();
                 }
@@ -116,11 +116,11 @@ impl RuleStore {
                 x
             };
             let filter_ids = if p.enabled {
-                #[cfg(windows)]
+                #[cfg(has_platform)]
                 {
                     apply(wfp.as_mut(), &p.rule)
                 }
-                #[cfg(not(windows))]
+                #[cfg(not(has_platform))]
                 {
                     Vec::new()
                 }
@@ -136,7 +136,7 @@ impl RuleStore {
         }
 
         RuleStore {
-            #[cfg(windows)]
+            #[cfg(has_platform)]
             wfp,
             rules,
             next_id,
@@ -207,11 +207,11 @@ impl RuleStore {
     }
 
     fn apply_rule(&mut self, rule: &Rule) -> Vec<u64> {
-        #[cfg(windows)]
+        #[cfg(has_platform)]
         {
             apply(self.wfp.as_mut(), rule)
         }
-        #[cfg(not(windows))]
+        #[cfg(not(has_platform))]
         {
             let _ = rule;
             Vec::new()
@@ -219,13 +219,13 @@ impl RuleStore {
     }
 
     fn unapply(&mut self, ids: &[u64]) {
-        #[cfg(windows)]
+        #[cfg(has_platform)]
         {
             if let Some(w) = self.wfp.as_mut() {
                 let _ = w.remove(ids);
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(not(has_platform))]
         {
             let _ = ids;
         }
@@ -271,8 +271,8 @@ impl Default for RuleStore {
     }
 }
 
-#[cfg(windows)]
-fn apply(wfp: Option<&mut iris_platform_win::Wfp>, rule: &Rule) -> Vec<u64> {
+#[cfg(has_platform)]
+fn apply(wfp: Option<&mut crate::platform::Wfp>, rule: &Rule) -> Vec<u64> {
     match wfp {
         Some(w) => w
             .apply(rule.app.as_str(), rule.direction, rule.action)
@@ -285,6 +285,5 @@ fn apply(wfp: Option<&mut iris_platform_win::Wfp>, rule: &Rule) -> Vec<u64> {
 }
 
 fn store_path() -> PathBuf {
-    let base = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
-    PathBuf::from(base).join("Iris").join("rules.json")
+    crate::paths::rules_file()
 }

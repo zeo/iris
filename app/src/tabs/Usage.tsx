@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
-import { engine } from "../lib/engine";
+import { adapterLabel, engine, type AdapterKind } from "../lib/engine";
 import { persisted } from "../lib/persist";
 import { bytes } from "../lib/format";
 import { formatGb, quota } from "../lib/quota";
@@ -27,6 +27,10 @@ interface AppTotal {
   app: string;
   sent: number;
   recv: number;
+}
+interface AdapterUsageRow {
+  kind: AdapterKind;
+  bytes: { sent: number; recv: number };
 }
 
 function fileName(path: string): string {
@@ -74,7 +78,22 @@ export function Usage() {
     return [...map.values()].sort((a, b) => b.sent + b.recv - (a.sent + a.recv));
   });
 
+  const [byAdapter] = createResource(
+    () => ({ span: span(), online: engine.online() }),
+    async ({ span: s }): Promise<AdapterUsageRow[]> => {
+      try {
+        return await invoke<AdapterUsageRow[]>("get_adapter_usage", {
+          fromMs: since(s),
+          toMs: Date.now(),
+        });
+      } catch {
+        return [];
+      }
+    },
+  );
+
   const list = () => totals() ?? [];
+  const adapterRows = () => (byAdapter() ?? []).filter((a) => a.bytes.sent + a.bytes.recv > 0);
   const totalDown = () => list().reduce((n, a) => n + a.recv, 0);
   const totalUp = () => list().reduce((n, a) => n + a.sent, 0);
   const peak = createMemo(() => list().reduce((m, a) => Math.max(m, a.sent + a.recv), 1));
@@ -147,6 +166,23 @@ export function Usage() {
           <div class="v" style={{ "font-size": "var(--fz-h)" }}>{list()[0] ? fileName(list()[0].app) : "–"}</div>
         </div>
       </div>
+
+      <Show when={adapterRows().length > 0}>
+        <div class="tiles">
+          <For each={adapterRows()}>
+            {(a) => (
+              <div class="tile">
+                <div class="k">{adapterLabel(a.kind)}</div>
+                <div class="v">{bytes(a.bytes.sent + a.bytes.recv)}</div>
+                <div class="sub">
+                  <span class="dn">↓ {bytes(a.bytes.recv)}</span>
+                  <span class="up">↑ {bytes(a.bytes.sent)}</span>
+                </div>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
 
       <Show
         when={list().length > 0}

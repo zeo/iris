@@ -9,7 +9,7 @@ use iris_core::{
     AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, Granularity, StoredRule,
     UsageBucket, UsageQuery,
 };
-use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
+use iris_ipc::message::{ClientMessage, PluginInfo, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,6 +43,9 @@ pub enum EngineCmd {
     AckAlert(i64),
     KillConnection(u16, String, u16),
     GetEnrichment(Vec<EnrichTarget>),
+    ListPlugins,
+    GrantPlugin(String, Vec<String>, Vec<String>),
+    SetPluginEnabled(String, bool),
 }
 pub struct Command {
     cmd: EngineCmd,
@@ -172,6 +175,38 @@ pub async fn get_adapter_usage(
 }
 
 #[tauri::command]
+pub async fn list_plugins(app: AppHandle) -> Result<Vec<PluginInfo>, String> {
+    match dispatch(&app, EngineCmd::ListPlugins).await? {
+        Reply::Plugins(p) => Ok(p),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn grant_plugin(
+    app: AppHandle,
+    id: String,
+    caps: Vec<String>,
+    egress: Vec<String>,
+) -> Result<(), String> {
+    match dispatch(&app, EngineCmd::GrantPlugin(id, caps, egress)).await? {
+        Reply::Ok => Ok(()),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn set_plugin_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(), String> {
+    match dispatch(&app, EngineCmd::SetPluginEnabled(id, enabled)).await? {
+        Reply::Ok => Ok(()),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
 pub async fn get_enrichment(app: AppHandle, ips: Vec<String>) -> Result<Vec<EnrichmentEvent>, String> {
     let targets: Vec<EnrichTarget> = ips
         .iter()
@@ -252,6 +287,11 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     EngineCmd::KillConnection(local_port, remote_addr, remote_port) =>
                         ClientMessage::KillConnection { req, local_port, remote_addr, remote_port },
                     EngineCmd::GetEnrichment(targets) => ClientMessage::GetEnrichment { req, targets },
+                    EngineCmd::ListPlugins => ClientMessage::ListPlugins { req },
+                    EngineCmd::GrantPlugin(id, caps, egress) =>
+                        ClientMessage::GrantPlugin { req, id, caps, egress },
+                    EngineCmd::SetPluginEnabled(id, enabled) =>
+                        ClientMessage::SetPluginEnabled { req, id, enabled },
                 };
                 pending.insert(req, command.resp);
                 if let Err(e) = transport::write_frame(&mut send, &msg).await {

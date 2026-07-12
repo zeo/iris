@@ -1,21 +1,23 @@
 # iris
 
-A firewall and network monitor for Windows. Iris watches every application's
-network traffic and puts you in control of what is allowed to connect: per-app
-allow and block rules, a live view of what every process is talking to, and a
-running history of how much each one uses.
+A firewall and network monitor for Windows and Linux. Iris watches every
+application's network traffic and puts you in control of what is allowed to
+connect: per-app allow and block rules, a live view of what every process is
+talking to, and a running history of how much each one uses.
 
-Built native: a small privileged engine (Windows service) does the real work
-with the OS filtering platform and kernel network events, and an unprivileged
-Tauri UI drives it over a local, access-controlled pipe. Monitoring and rules
-keep running with the window closed. Changing a firewall rule prompts for
-elevation over a separate admin-only channel, so no unprivileged process can
-rewrite what the system enforces.
+Built native: a small privileged engine (a Windows service, or a systemd unit on
+Linux) does the real work with the OS filtering layer and kernel network events,
+and an unprivileged Tauri UI drives it over a local, access-controlled socket.
+Monitoring and rules keep running with the window closed. Changing a firewall
+rule prompts for elevation over a separate admin-only channel (a UAC prompt on
+Windows, a polkit prompt on Linux), so no unprivileged process can rewrite what
+the system enforces.
 
 ## What it does
 
-- **Protect**: per-app allow and block rules enforced at the Windows Filtering
-  Platform, so a blocked app stays blocked whether or not the UI is open.
+- **Protect**: per-app allow and block rules, so a blocked app stays blocked
+  whether or not the UI is open. Windows enforces them at the Filtering Platform;
+  Linux decides each new connection in the engine behind an nftables queue.
   Adding, removing, or toggling a rule asks for elevation.
 - **Activity**: a live table of every app's up and down rate, open connections,
   and the remote endpoints it is talking to. Open a connection for its host name,
@@ -40,22 +42,26 @@ is resolved in the engine and shown on the connection detail drawer.
 Rules can be backed up to a JSON file and restored from one; a restore runs
 through the same elevation gate as any other rule change, one prompt for the
 whole file. To watch addresses, put one IP or CIDR per line (with `#` comments)
-in `%ProgramData%\Iris\watchlist.txt`; matching endpoints get a danger badge and
-an alert on first contact.
+in the watchlist file (`%ProgramData%\Iris\watchlist.txt` on Windows,
+`/var/lib/iris/watchlist.txt` on Linux); matching endpoints get a danger badge
+and an alert on first contact.
 
 ## Plugins
 
 Iris extends through out-of-process plugins rather than code in the engine. A
-plugin is a normal executable installed under `%ProgramData%\Iris\plugins\<id>\`
-with a `plugin.json` manifest declaring what it wants: capabilities (observe
+plugin is a normal executable installed under the plugins directory
+(`%ProgramData%\Iris\plugins\<id>\` on Windows, `/var/lib/iris/plugins/<id>/` on
+Linux) with a `plugin.json` manifest declaring what it wants: capabilities (observe
 traffic, annotate endpoints, raise alerts, suggest rules, show a panel) and the
 exact hosts it needs to reach. Nothing runs until the user reviews that
 declaration in the Plugins tab and enables it.
 
-The sandbox is enforced by the service, not trusted to the plugin. Each child
-runs under a restricted low-integrity token with every privilege stripped, and
-its network access is pinned with the Windows Filtering Platform to exactly the
-endpoints the user consented to; an empty egress list means no network at all.
+The sandbox is enforced by the service, not trusted to the plugin. On Windows
+each child runs under a restricted low-integrity token with every privilege
+stripped; on Linux it runs as a dedicated unprivileged account with no new
+privileges and capped resources. Its network access is pinned to exactly the
+endpoints the user consented to (the Filtering Platform on Windows, an nftables
+table on Linux); an empty egress list means no network at all.
 A plugin cannot change firewall rules. The strongest thing it can do is file a
 rule proposal, which sits in Protect until the user accepts it through the same
 elevation gate as a manual rule. Panels are declarative: a plugin returns data

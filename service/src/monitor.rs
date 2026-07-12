@@ -7,7 +7,7 @@
 use crate::engine::Engine;
 use crate::plugins::registry::EnrichmentRegistry;
 use crate::tracker::Tracker;
-use iris_core::{Aggregator, AlertKind, EnrichTarget};
+use iris_core::{Aggregator, AlertKind, EnrichTarget, Severity};
 use iris_ipc::ServerMessage;
 use iris_store::Store;
 use std::collections::HashSet;
@@ -20,6 +20,13 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn target_name(target: &EnrichTarget) -> String {
+    match target {
+        EnrichTarget::Endpoint(ip) => ip.to_string(),
+        EnrichTarget::App(app) => app.file_name().to_string(),
+    }
 }
 
 /// start monitoring and the flush loop.
@@ -111,12 +118,27 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentReg
             if !new_targets.is_empty() {
                 let engine = engine.clone();
                 let enrich = enrich.clone();
+                let store = store.clone();
                 tokio::spawn(async move {
                     for target in new_targets {
                         let annotations = enrich.resolve(&target);
-                        if !annotations.is_empty() {
-                            engine.publish(ServerMessage::Enrichment { target, annotations });
+                        if annotations.is_empty() {
+                            continue;
                         }
+                        // a danger-severity annotation is alert-worthy: the first
+                        // sighting persists and toasts, not just a drawer badge
+                        for a in annotations.iter().filter(|a| a.severity == Severity::Danger) {
+                            let kind = AlertKind::Plugin {
+                                source: a.label.clone(),
+                                message: format!("{} flagged {}", a.label, target_name(&target)),
+                            };
+                            let alert = store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert_alert(&kind, now_ms());
+                            engine.publish(ServerMessage::Alert(alert));
+                        }
+                        engine.publish(ServerMessage::Enrichment { target, annotations });
                     }
                 });
             }

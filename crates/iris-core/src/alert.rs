@@ -9,6 +9,9 @@ pub enum AlertKind {
     NewApp { app: AppId },
     /// a rule blocked an application's connection attempt
     Blocked { app: AppId, remote: Endpoint },
+    /// an enricher or plugin flagged activity it considers noteworthy; `source`
+    /// is its human-readable name and `message` is the full sentence to show
+    Plugin { source: String, message: String },
 }
 
 /// a durable alert. persisted so it survives a UI that is closed when the event

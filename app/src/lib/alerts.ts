@@ -10,7 +10,8 @@ import { showNotifications } from "./settings";
 
 export type AlertKind =
   | { kind: "new_app"; app: string }
-  | { kind: "blocked"; app: string; remote: { addr: string; port: number } };
+  | { kind: "blocked"; app: string; remote: { addr: string; port: number } }
+  | { kind: "plugin"; source: string; message: string };
 
 export interface Alert {
   id: number;
@@ -24,9 +25,6 @@ export { alerts };
 
 export const unackedCount = () => alerts().filter((a) => !a.acknowledged).length;
 
-function appOf(a: Alert): string {
-  return a.kind.app;
-}
 export function fileName(path: string): string {
   const seg = path.split(/[\\/]/).pop();
   return seg && seg.length ? seg : path;
@@ -66,10 +64,17 @@ export async function ackAll(): Promise<void> {
 
 async function toast(a: Alert): Promise<void> {
   if (!showNotifications()) return;
-  const name = fileName(appOf(a));
-  const isNew = a.kind.kind === "new_app";
-  const title = isNew ? "New app on the network" : "Connection blocked";
-  const body = isNew ? `${name} connected for the first time` : `Blocked ${name}`;
+  let title: string;
+  let body: string;
+  if (a.kind.kind === "plugin") {
+    title = a.kind.source;
+    body = a.kind.message;
+  } else {
+    const name = fileName(a.kind.app);
+    const isNew = a.kind.kind === "new_app";
+    title = isNew ? "New app on the network" : "Connection blocked";
+    body = isNew ? `${name} connected for the first time` : `Blocked ${name}`;
+  }
   try {
     let granted = await isPermissionGranted();
     if (!granted) granted = (await requestPermission()) === "granted";

@@ -4,7 +4,7 @@ import { AppIcon } from "../components/AppIcon";
 import { ackAlert, ackAll, alerts, fileName, initAlerts, refreshAlerts, type Alert } from "../lib/alerts";
 import { persisted } from "../lib/persist";
 
-const FILTERS = ["all", "new apps", "blocks"] as const;
+const FILTERS = ["all", "new apps", "blocks", "flags"] as const;
 
 function ago(atMs: number, nowMs: number): string {
   const s = Math.max(0, Math.floor((nowMs - atMs) / 1000));
@@ -33,6 +33,7 @@ export function Alerts() {
     let a = alerts();
     if (f === "new apps") a = a.filter((x) => x.kind.kind === "new_app");
     else if (f === "blocks") a = a.filter((x) => x.kind.kind === "blocked");
+    else if (f === "flags") a = a.filter((x) => x.kind.kind === "plugin");
     return a;
   });
 
@@ -41,12 +42,26 @@ export function Alerts() {
       ? "initiated its first network connection."
       : "was blocked from connecting.";
 
+  const flagRow = (a: Alert, k: Extract<Alert["kind"], { kind: "plugin" }>) => (
+    <div class="row alert" classList={{ unread: !a.acknowledged }} onClick={() => ackAlert(a.id)}>
+      <span class="unread-dot" />
+      <span class="alert-badge block">
+        <Icon name="eye" size={13} />
+      </span>
+      <div class="alert-body">{k.message}</div>
+      <div class="alert-when">
+        <span class="alert-cat">{k.source}</span>
+        <span class="alert-time">{ago(a.at_ms, now())}</span>
+      </div>
+    </div>
+  );
+
   return (
     <section>
       <div class="head">
         <div class="titles">
           <h2>Alerts</h2>
-          <span class="sub">first-seen apps and blocks</span>
+          <span class="sub">first-seen apps, blocks, and flags</span>
         </div>
         <div class="actions">
           <div class="seg" role="group" aria-label="filter">
@@ -78,16 +93,18 @@ export function Alerts() {
         <div class="rows">
           <For each={list()}>
             {(a) => {
-              const blocked = a.kind.kind === "blocked";
+              const k = a.kind;
+              if (k.kind === "plugin") return flagRow(a, k);
+              const blocked = k.kind === "blocked";
               return (
                 <div class="row alert" classList={{ unread: !a.acknowledged }} onClick={() => ackAlert(a.id)}>
                   <span class="unread-dot" />
                   <span class="alert-badge" classList={{ block: blocked }}>
                     {blocked ? <Icon name="block" size={13} /> : "NEW"}
                   </span>
-                  <AppIcon path={a.kind.app} />
+                  <AppIcon path={k.app} />
                   <div class="alert-body">
-                    <b>{fileName(a.kind.app)}</b> {title(a)}
+                    <b>{fileName(k.app)}</b> {title(a)}
                   </div>
                   <div class="alert-when">
                     <span class="alert-cat">{blocked ? "Blocked connection" : "First network activity"}</span>

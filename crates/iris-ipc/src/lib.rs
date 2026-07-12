@@ -15,19 +15,32 @@ pub mod transport;
 pub use codec::{encode, read_frame, write_frame, CodecError, MAX_FRAME_LEN};
 pub use message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 
-/// the telemetry named-pipe the unprivileged UI connects to for live stats,
-/// reads, and connection kills. its DACL grants interactively-logged-on users
-/// (the UI's context) and admins, with a medium integrity label so sandboxed
-/// low-integrity processes cannot reach it.
+/// the telemetry endpoint the unprivileged UI connects to for live stats,
+/// reads, and connection kills. on Windows it is a named pipe whose DACL grants
+/// interactively-logged-on users and admins with a medium integrity label; on
+/// Linux it is a unix socket under the engine's runtime directory, world
+/// read/write so the desktop-user UI can reach the root-owned engine.
+#[cfg(windows)]
 pub const PIPE_NAME: &str = r"\\.\pipe\iris-engine";
+#[cfg(not(windows))]
+pub const PIPE_NAME: &str = "/run/iris/engine.sock";
 
-/// the admin-only named-pipe that carries privileged rule mutations. its DACL
-/// grants SYSTEM and Administrators only, so a non-elevated process cannot open
-/// it and rule changes therefore require elevation, enforced by the OS.
+/// the admin-only endpoint that carries privileged rule mutations. on Windows
+/// its DACL grants SYSTEM and Administrators only; on Linux it lives in a
+/// root-only directory (`/run/iris/admin`, mode 0700 root) so only a process
+/// running as root can traverse to it. either way the OS enforces that rule
+/// changes require elevation, with no impersonation code on the service side.
+#[cfg(windows)]
 pub const ADMIN_PIPE_NAME: &str = r"\\.\pipe\iris-engine-admin";
+#[cfg(not(windows))]
+pub const ADMIN_PIPE_NAME: &str = "/run/iris/admin/engine.sock";
 
-/// the plugin named-pipe out-of-process plugins connect back on. its DACL
-/// grants SYSTEM only (the restricted plugin child still runs as SYSTEM, with
-/// privileges stripped and a low integrity level, so the label admits it);
-/// per-plugin identity comes from the spawn-time token handshake, not the pipe.
+/// the endpoint out-of-process plugins connect back on. on Windows its DACL
+/// grants SYSTEM only with a low integrity label so the restricted child fits;
+/// on Linux it lives in a directory owned by the dedicated plugin group
+/// (`/run/iris/plugins`, mode 0750) so only the sandboxed plugin user can
+/// connect. per-plugin identity comes from the spawn-time token handshake.
+#[cfg(windows)]
 pub const PLUGIN_PIPE_NAME: &str = r"\\.\pipe\iris-plugins";
+#[cfg(not(windows))]
+pub const PLUGIN_PIPE_NAME: &str = "/run/iris/plugins/plugins.sock";

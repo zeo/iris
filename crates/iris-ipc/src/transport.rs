@@ -14,41 +14,57 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub use interprocess::local_socket::tokio::{Listener, RecvHalf, SendHalf, Stream};
 
+// the security descriptors below apply only on Windows; on other targets the
+// endpoint access is enforced by unix socket and directory permissions, so these
+// are passed to the ignoring `listen_with` fallback and never read.
+
 // the telemetry pipe: SYSTEM + Administrators full, read/write to interactively
 // logged-on users (the unprivileged UI), medium integrity label so sandboxed
 // low-integrity processes are excluded.
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 const TELEMETRY_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)S:(ML;;NW;;;ME)";
 // the admin pipe: SYSTEM and Administrators only, no interactive-user grant. a
 // non-elevated process (even an admin user's, whose UAC-filtered token has the
 // Administrators SID as deny-only) cannot open it, so the OS enforces "elevation
 // required" for the privileged rule mutations carried here, with no impersonation
 // code on the service side.
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 const ADMIN_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)";
 // the plugin pipe: SYSTEM only in the DACL, with a low integrity label so the
 // restricted plugin children (SYSTEM user, privileges stripped, low IL) can
 // still open it. per-plugin identity is the spawn-time token, not the pipe.
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 const PLUGIN_SDDL: &str = "D:(A;;GA;;;SY)S:(ML;;NW;;;LW)";
+
+// on non-Windows the endpoints are unix sockets; access is enforced by the mode
+// of the socket file and its parent directory, set after bind. the telemetry
+// socket is world read/write (the desktop-user UI reaches the root engine); the
+// admin and plugin sockets sit in restricted directories the service creates.
+// these are ignored on Windows, where the security descriptor governs access.
+#[cfg_attr(windows, allow(dead_code))]
+const TELEMETRY_MODE: u32 = 0o666;
+#[cfg_attr(windows, allow(dead_code))]
+const ADMIN_MODE: u32 = 0o600;
+#[cfg_attr(windows, allow(dead_code))]
+const PLUGIN_MODE: u32 = 0o660;
 
 /// bind the service listener for the unprivileged telemetry pipe.
 pub fn listen() -> io::Result<Listener> {
-    listen_with(PIPE_NAME, TELEMETRY_SDDL)
+    listen_with(PIPE_NAME, TELEMETRY_SDDL, TELEMETRY_MODE)
 }
 
 /// bind the service listener for the admin-only pipe that carries rule mutations.
 pub fn listen_admin() -> io::Result<Listener> {
-    listen_with(ADMIN_PIPE_NAME, ADMIN_SDDL)
+    listen_with(ADMIN_PIPE_NAME, ADMIN_SDDL, ADMIN_MODE)
 }
 
 /// bind the service listener for the out-of-process plugin pipe.
 pub fn listen_plugins() -> io::Result<Listener> {
-    listen_with(PLUGIN_PIPE_NAME, PLUGIN_SDDL)
+    listen_with(PLUGIN_PIPE_NAME, PLUGIN_SDDL, PLUGIN_MODE)
 }
 
 #[cfg(windows)]
-fn listen_with(name: &str, sddl: &str) -> io::Result<Listener> {
+fn listen_with(name: &str, sddl: &str, _mode: u32) -> io::Result<Listener> {
     use interprocess::os::windows::local_socket::ListenerOptionsExt;
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
     use widestring::U16CString;
@@ -64,9 +80,28 @@ fn listen_with(name: &str, sddl: &str) -> io::Result<Listener> {
 }
 
 #[cfg(not(windows))]
-fn listen_with(name: &str, _sddl: &str) -> io::Result<Listener> {
+fn listen_with(name: &str, _sddl: &str, mode: u32) -> io::Result<Listener> {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    let path = Path::new(name);
+    // the runtime directory is created by the service host with the right
+    // ownership; make sure it at least exists so a bare console run works
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    // a leftover socket from an unclean exit makes bind fail with EADDRINUSE;
+    // the directory permissions, not the stale node, are the security boundary
+    let _ = fs::remove_file(path);
+
     let fs_name = name.to_fs_name::<GenericFilePath>()?;
-    ListenerOptions::new().name(fs_name).create_tokio()
+    let listener = ListenerOptions::new().name(fs_name).create_tokio()?;
+    // interprocess binds under the process umask; set the intended mode
+    // explicitly so a restrictive umask cannot lock the UI out and a permissive
+    // one cannot widen the admin socket
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    Ok(listener)
 }
 
 /// connect the UI client to the telemetry pipe.

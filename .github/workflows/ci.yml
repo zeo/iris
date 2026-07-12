@@ -1,0 +1,114 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# the self-hosted runners build the whole (heavy) Rust workspace, so back-to-back
+# pushes would otherwise stack full runs. collapse a ref to its latest run: a new
+# push cancels the older in-progress or queued run for the same branch or PR.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # bypass the runner's machine-level sccache wrapper, whose server drops
+  # connections mid-build; Swatinem/rust-cache still caches deps between runs
+  RUSTC_WRAPPER: ""
+
+jobs:
+  # build, test, and clippy on Windows. compiling the app crate embeds the built
+  # frontend and validates the bundled engine binary, so the frontend is built and
+  # the release engine produced before the cargo steps.
+  windows:
+    if: github.actor == 'lintowe'
+    runs-on: [self-hosted, windows-vm]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: build frontend
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: build engine (release, for the app resource)
+        run: cargo build --release -p iris-service
+      - name: test
+        run: cargo test
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  # the same gate for Linux: this is where the platform-linux backend (sock_diag,
+  # nftables, NFQUEUE, the sandboxed spawn) is actually compiled and linted, since
+  # it is empty on Windows.
+  linux:
+    if: github.actor == 'lintowe'
+    runs-on: [self-hosted, linux-vm]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+          components: clippy
+      # the ephemeral linux vms image rustup without user-level shims, so nothing
+      # puts cargo on PATH; ask rustup where the real cargo binary lives
+      - name: cargo on PATH
+        run: |
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+          dirname "$(rustup which cargo)" | tee -a "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config libwebkit2gtk-4.1-dev \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: build frontend
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: build engine (release, for the app resource)
+        run: cargo build --release -p iris-service
+      - name: test
+        run: cargo test
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  # security advisory scan of the dependency tree (RUSTSEC database)
+  audit:
+    if: github.actor == 'lintowe'
+    runs-on: [self-hosted, linux-vm]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: install cargo-audit
+        uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
+        with:
+          tool: cargo-audit
+      - name: audit
+        run: cargo audit

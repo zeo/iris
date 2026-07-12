@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 
 /// bump when the wire shape changes incompatibly. the UI refuses to drive a
 /// service whose protocol differs, so a partial update never mismatches schemas.
-/// v2 added the enrichment channel (annotations for endpoints/apps).
-pub const PROTOCOL_VERSION: u32 = 2;
+/// v2 added the enrichment channel (annotations for endpoints/apps); v3 added
+/// the per-adapter breakdown carried in every tick.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// a UI -> service message. every request carries a correlation `req` id the
 /// service echoes in its [`Reply`]; control messages that need no reply use 0.

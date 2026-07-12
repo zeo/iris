@@ -124,6 +124,7 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentReg
                 #[cfg(windows)]
                 if let Some(m) = byte_monitor.as_ref() {
                     m.clear_cache();
+                    m.refresh_adapters();
                 }
             }
             // prune usage older than 45 days, hourly

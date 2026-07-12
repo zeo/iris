@@ -1,3 +1,4 @@
+use crate::adapters::AdapterMap;
 use crate::dns::{self, DnsMap};
 use crate::proc::PidCache;
 use ferrisetw::parser::Parser;
@@ -5,7 +6,8 @@ use ferrisetw::provider::Provider;
 use ferrisetw::schema_locator::SchemaLocator;
 use ferrisetw::trace::UserTrace;
 use ferrisetw::EventRecord;
-use iris_core::Aggregator;
+use iris_core::{AdapterKind, Aggregator};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use windows::core::PCWSTR;
 use windows::Win32::System::Diagnostics::Etw::{
@@ -45,17 +47,20 @@ pub struct Monitor {
     net_trace: Option<UserTrace>,
     dns_trace: Option<UserTrace>,
     cache: Arc<Mutex<PidCache>>,
+    adapters: Arc<AdapterMap>,
 }
 
 impl Monitor {
     pub fn start(agg: Arc<Mutex<Aggregator>>, dns_map: DnsMap) -> anyhow::Result<Monitor> {
         let cache = Arc::new(Mutex::new(PidCache::new()));
+        let adapters = Arc::new(AdapterMap::new());
 
         // byte counts, required
         let net_agg = agg;
         let net_cache = cache.clone();
+        let net_adapters = adapters.clone();
         let net_cb = move |record: &EventRecord, locator: &SchemaLocator| {
-            on_net_event(record, locator, &net_agg, &net_cache);
+            on_net_event(record, locator, &net_agg, &net_cache, &net_adapters);
         };
         let net_provider = Provider::by_guid(KERNEL_NETWORK_GUID)
             .add_callback(net_cb)
@@ -90,6 +95,7 @@ impl Monitor {
             net_trace: Some(net_trace),
             dns_trace,
             cache,
+            adapters,
         })
     }
 
@@ -98,6 +104,12 @@ impl Monitor {
         if let Ok(mut c) = self.cache.lock() {
             c.clear();
         }
+    }
+
+    /// rebuild the address-to-adapter table; called on a slow cadence so an
+    /// adapter change is picked up even without a lookup miss
+    pub fn refresh_adapters(&self) {
+        self.adapters.refresh();
     }
 
     pub fn stop(mut self) {
@@ -141,6 +153,7 @@ fn on_net_event(
     locator: &SchemaLocator,
     agg: &Arc<Mutex<Aggregator>>,
     cache: &Arc<Mutex<PidCache>>,
+    adapters: &Arc<AdapterMap>,
 ) {
     let Some(dir) = direction(record.event_id()) else {
         return;
@@ -167,10 +180,23 @@ fn on_net_event(
         return;
     };
 
+    // the event stamps the packet's addresses; hand the end expected to be
+    // local first, and the map falls back to the other end on a miss
+    let kind = match (
+        parser.try_parse::<IpAddr>("saddr"),
+        parser.try_parse::<IpAddr>("daddr"),
+    ) {
+        (Ok(s), Ok(d)) => match dir {
+            Dir::Sent => adapters.kind_for(s, d),
+            Dir::Recv => adapters.kind_for(d, s),
+        },
+        _ => AdapterKind::Other,
+    };
+
     if let Ok(mut a) = agg.lock() {
         match dir {
-            Dir::Sent => a.record(pid, &path, None, size as u64, 0),
-            Dir::Recv => a.record(pid, &path, None, 0, size as u64),
+            Dir::Sent => a.record(pid, &path, None, kind, size as u64, 0),
+            Dir::Recv => a.record(pid, &path, None, kind, 0, size as u64),
         }
     }
 }

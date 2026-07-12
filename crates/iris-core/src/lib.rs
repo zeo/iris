@@ -16,14 +16,14 @@ pub mod model;
 pub mod rule;
 pub mod usage;
 
-pub use aggregate::{Aggregator, PidSample};
+pub use aggregate::{Aggregator, Flushed, PidSample};
 pub use enrich::{Annotation, AnnotationValue, EnrichTarget, Enricher, Observer, Severity, TargetKind};
 pub use alert::{Alert, AlertKind};
 pub use engine::{FirewallController, MonitorSink, NetworkMonitor};
 pub use error::{EngineError, EngineResult};
 pub use model::{
-    AdapterKind, AppId, AppSample, ByteCounts, Conn, ConnState, Direction, Endpoint,
-    LiveConnection, ProcSample, Protocol, StatsTick,
+    AdapterKind, AdapterSample, AppId, AppSample, ByteCounts, Conn, ConnState, Direction,
+    Endpoint, LiveConnection, ProcSample, Protocol, StatsTick,
 };
 pub use rule::{parse_backup, BackupRule, Rule, RuleAction, StoredRule, BACKUP_MAX_BYTES};
 pub use usage::{Granularity, UsageBucket, UsageQuery};

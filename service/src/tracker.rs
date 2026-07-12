@@ -4,7 +4,7 @@
 //! their app, and each process carries its own online/offline lifecycle: one
 //! that stops connecting enters a grace window (shown red) before it is dropped.
 
-use iris_core::{AppId, Aggregator, AppSample, ByteCounts, Conn, ProcSample, StatsTick};
+use iris_core::{AppId, Aggregator, AppSample, ByteCounts, Conn, Flushed, ProcSample, StatsTick};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -124,7 +124,7 @@ impl Tracker {
                 a.touch(*pid, path);
             }
         }
-        let pid_samples = lock_agg(&self.agg).flush(now);
+        let Flushed { procs: pid_samples, adapters } = lock_agg(&self.agg).flush(now);
 
         let mut apps: HashMap<String, AppAcc> = HashMap::new();
         let mut expired: Vec<u32> = Vec::new();
@@ -209,6 +209,7 @@ impl Tracker {
             total_rate_sent: total_sent,
             total_rate_recv: total_recv,
             apps: out,
+            adapters,
         }
     }
 

@@ -151,6 +151,15 @@ pub struct AppSample {
     pub processes: Vec<ProcSample>,
 }
 
+/// one adapter kind's row in a sample tick: live rates plus session totals
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterSample {
+    pub kind: AdapterKind,
+    pub rate_sent: u64,
+    pub rate_recv: u64,
+    pub total: ByteCounts,
+}
+
 /// one monitor sample tick: a wall-clock stamp plus every active app's sample
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatsTick {
@@ -160,6 +169,8 @@ pub struct StatsTick {
     pub total_rate_sent: u64,
     pub total_rate_recv: u64,
     pub apps: Vec<AppSample>,
+    /// traffic split by adapter kind, for kinds seen this session
+    pub adapters: Vec<AdapterSample>,
 }
 
 /// a live connection row for the activity table's drill-down

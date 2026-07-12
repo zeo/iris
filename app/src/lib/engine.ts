@@ -36,11 +36,30 @@ export interface AppSample {
   online: boolean;
   processes: ProcSample[];
 }
+export type AdapterKind = "ethernet" | "wifi" | "vpn" | "loopback" | "other";
+export interface AdapterSample {
+  kind: AdapterKind;
+  rate_sent: number;
+  rate_recv: number;
+  total: { sent: number; recv: number };
+}
 export interface StatsTick {
   at_ms: number;
   total_rate_sent: number;
   total_rate_recv: number;
   apps: AppSample[];
+  adapters: AdapterSample[];
+}
+
+const ADAPTER_LABELS: Record<AdapterKind, string> = {
+  ethernet: "Ethernet",
+  wifi: "Wi-Fi",
+  vpn: "VPN",
+  loopback: "Loopback",
+  other: "Other",
+};
+export function adapterLabel(kind: AdapterKind): string {
+  return ADAPTER_LABELS[kind] ?? kind;
 }
 interface Status {
   online: boolean;
@@ -149,4 +168,5 @@ export const engine = {
   down: () => tick()?.total_rate_recv ?? 0,
   up: () => tick()?.total_rate_sent ?? 0,
   apps: () => tick()?.apps ?? [],
+  adapters: () => tick()?.adapters ?? [],
 };

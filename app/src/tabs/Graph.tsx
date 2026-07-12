@@ -2,7 +2,7 @@ import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { BandwidthGraph, type Sample } from "../components/BandwidthGraph";
 import { AppIcon } from "../components/AppIcon";
-import { engine } from "../lib/engine";
+import { adapterLabel, engine } from "../lib/engine";
 import { rate } from "../lib/format";
 
 const RANGES = ["5m", "1h", "24h", "7d"] as const;
@@ -111,6 +111,23 @@ export function Graph() {
         <span class="label">peak</span>
         <b>{peak() > 0 ? rate(peak()) : "–"}</b>
       </div>
+
+      <Show when={engine.adapters().length > 0}>
+        <div class="tiles adapters">
+          <For each={engine.adapters()}>
+            {(a) => (
+              <div class="tile">
+                <div class="k">{adapterLabel(a.kind)}</div>
+                <div class="v">{rate(a.rate_recv + a.rate_sent)}</div>
+                <div class="sub">
+                  <span class="dn">↓ {rate(a.rate_recv)}</span>
+                  <span class="up">↑ {rate(a.rate_sent)}</span>
+                </div>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
 
       <div class="top-apps">
         <div class="label">top consumers</div>

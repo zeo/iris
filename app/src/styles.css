@@ -1284,6 +1284,24 @@ html {
   color: var(--muted);
   margin-left: 3px;
 }
+.tile .sub {
+  margin-top: 4px;
+  display: flex;
+  gap: var(--s3);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fz-sm);
+}
+.tile .sub .dn {
+  color: var(--text-2);
+}
+.tile .sub .up {
+  color: var(--muted);
+}
+.tiles.adapters {
+  margin-top: var(--s4);
+  margin-bottom: 0;
+}
 
 /* rules / list rows */
 .rows {

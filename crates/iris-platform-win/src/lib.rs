@@ -14,6 +14,8 @@ mod etw;
 #[cfg(windows)]
 mod proc;
 #[cfg(windows)]
+mod spawn;
+#[cfg(windows)]
 mod svc;
 #[cfg(windows)]
 mod wfp;
@@ -26,6 +28,8 @@ pub use conn::{kill_connection, ConnCounter};
 pub use dns::{new_map, DnsMap};
 #[cfg(windows)]
 pub use etw::Monitor;
+#[cfg(windows)]
+pub use spawn::{random_token, spawn_restricted, RestrictedChild};
 #[cfg(windows)]
 pub use svc::ServiceMap;
 #[cfg(windows)]

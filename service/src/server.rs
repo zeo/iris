@@ -153,6 +153,43 @@ async fn handle(
                         let anns = enrich.cached_for(&targets);
                         reply(&mut send, req, Reply::Enrichment(anns)).await?;
                     }
+                    ClientMessage::ListPlugins { req } => {
+                        let store = store.clone();
+                        let list = tokio::task::spawn_blocking(move || {
+                            crate::plugins::supervisor::catalog(&store)
+                        })
+                        .await
+                        .unwrap_or_default();
+                        reply(&mut send, req, Reply::Plugins(list)).await?;
+                    }
+                    ClientMessage::GrantPlugin { req, id, caps, egress } => {
+                        let store = store.clone();
+                        let ok = tokio::task::spawn_blocking(move || {
+                            crate::plugins::supervisor::grant(&store, &id, &caps, &egress, now_ms())
+                        })
+                        .await
+                        .unwrap_or(false);
+                        let result = if ok {
+                            Reply::Ok
+                        } else {
+                            Reply::Error("no such plugin installed".into())
+                        };
+                        reply(&mut send, req, result).await?;
+                    }
+                    ClientMessage::SetPluginEnabled { req, id, enabled } => {
+                        let store = store.clone();
+                        let ok = tokio::task::spawn_blocking(move || {
+                            crate::plugins::supervisor::set_enabled(&store, &id, enabled)
+                        })
+                        .await
+                        .unwrap_or(false);
+                        let result = if ok {
+                            Reply::Ok
+                        } else {
+                            Reply::Error("plugin has no consent grant yet".into())
+                        };
+                        reply(&mut send, req, result).await?;
+                    }
                     ClientMessage::GetAdapterUsage { req, from_ms, to_ms } => {
                         // same window bound as GetUsage, for the same reason
                         const MAX_WINDOW_MS: u64 = 400 * 86_400_000;
@@ -325,9 +362,19 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::KillConnection { req, .. }
         | ClientMessage::GetEnrichment { req, .. }
         | ClientMessage::GetAdapterUsage { req, .. }
+        | ClientMessage::ListPlugins { req }
+        | ClientMessage::GrantPlugin { req, .. }
+        | ClientMessage::SetPluginEnabled { req, .. }
         | ClientMessage::Ping { req } => Some(*req),
         ClientMessage::Hello { .. } | ClientMessage::Subscribe | ClientMessage::Unsubscribe => None,
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn kill_conn(local_port: u16, remote_addr: &str, remote_port: u16) -> bool {

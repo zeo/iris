@@ -20,6 +20,10 @@ pub fn plugins_dir() -> PathBuf {
 pub struct Manifest {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
     /// the entry binary, resolved relative to the plugin directory
     pub entry: String,
     /// requested capabilities, e.g. `observe:ticks`, `enrich:endpoint`,

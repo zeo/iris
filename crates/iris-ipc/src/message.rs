@@ -7,8 +7,26 @@ use serde::{Deserialize, Serialize};
 /// bump when the wire shape changes incompatibly. the UI refuses to drive a
 /// service whose protocol differs, so a partial update never mismatches schemas.
 /// v2 added the enrichment channel (annotations for endpoints/apps); v3 added
-/// the per-adapter breakdown carried in every tick.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// the per-adapter breakdown carried in every tick; v4 added plugin management.
+pub const PROTOCOL_VERSION: u32 = 4;
+
+/// what the UI shows for one installed plugin: its declared identity and
+/// capabilities, plus whether the user has consented and enabled it
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginInfo {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    /// what the manifest declares it may do (the ceiling)
+    pub capabilities: Vec<String>,
+    /// declared egress hosts (`host:port`)
+    pub egress: Vec<String>,
+    /// whether a consent grant exists for it
+    pub granted: bool,
+    /// whether it is currently switched on
+    pub enabled: bool,
+}
 
 /// a UI -> service message. every request carries a correlation `req` id the
 /// service echoes in its [`Reply`]; control messages that need no reply use 0.
@@ -42,6 +60,12 @@ pub enum ClientMessage {
     Ping { req: u64 },
     /// per-adapter-kind traffic totals over a window
     GetAdapterUsage { req: u64, from_ms: u64, to_ms: u64 },
+    /// enumerate installed plugins and their consent state
+    ListPlugins { req: u64 },
+    /// record the user's consent for a plugin (the caps and egress they approved)
+    GrantPlugin { req: u64, id: String, caps: Vec<String>, egress: Vec<String> },
+    /// switch a granted plugin on or off
+    SetPluginEnabled { req: u64, id: String, enabled: bool },
 }
 
 /// a service -> UI message: either an unsolicited push (`Tick`, `Alert`,
@@ -82,4 +106,6 @@ pub enum Reply {
     Error(String),
     /// per-adapter-kind totals, biggest first
     AdapterUsage(Vec<(AdapterKind, ByteCounts)>),
+    /// installed plugins and their consent state
+    Plugins(Vec<PluginInfo>),
 }

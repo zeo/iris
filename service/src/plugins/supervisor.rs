@@ -78,6 +78,59 @@ impl PluginRuntime {
     }
 }
 
+/// enumerate every installed plugin joined with its consent state, for the
+/// management UI. re-reads the manifests from disk, so a newly-installed plugin
+/// shows up without a service restart.
+pub fn catalog(store: &Arc<Mutex<Store>>) -> Vec<iris_ipc::message::PluginInfo> {
+    manifest::discover()
+        .into_iter()
+        .map(|(_, m)| {
+            let grant = store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .plugin_grant(&m.id);
+            iris_ipc::message::PluginInfo {
+                id: m.id,
+                name: m.name,
+                version: m.version,
+                description: m.description,
+                capabilities: m.capabilities,
+                egress: m.egress,
+                granted: grant.is_some(),
+                enabled: grant.map(|g| g.enabled).unwrap_or(false),
+            }
+        })
+        .collect()
+}
+
+/// record the user's consent for a plugin, clamped to what its manifest
+/// actually declares so a stale or crafted grant can never exceed the ceiling.
+/// returns whether a matching installed plugin was found.
+pub fn grant(store: &Arc<Mutex<Store>>, id: &str, caps: &[String], egress: &[String], at_ms: u64) -> bool {
+    let Some((_, manifest)) = manifest::discover().into_iter().find(|(_, m)| m.id == id) else {
+        return false;
+    };
+    let caps: Vec<String> = caps.iter().filter(|c| manifest.declares(c)).cloned().collect();
+    let egress: Vec<String> = egress
+        .iter()
+        .filter(|e| manifest.egress.iter().any(|d| d == *e))
+        .cloned()
+        .collect();
+    store
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_plugin_grant(id, &caps, &egress, true, at_ms);
+    true
+}
+
+/// switch a granted plugin on or off; false when it was never granted
+pub fn set_enabled(store: &Arc<Mutex<Store>>, id: &str, enabled: bool) -> bool {
+    store
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_plugin_enabled(id, enabled)
+}
+
 /// maps a manifest's enrich capabilities to the target kinds the proxy declares
 fn target_kinds(manifest: &Manifest) -> Vec<TargetKind> {
     let mut kinds = Vec::new();

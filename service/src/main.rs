@@ -33,7 +33,9 @@ fn open_store() -> Store {
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
-    init_logging();
+    // the SCM discards stdout, so the service path logs to a file; console and
+    // one-shot runs keep the terminal
+    init_logging(!has("--console") && args.len() == 1);
 
     #[cfg(windows)]
     {
@@ -67,13 +69,46 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn init_logging() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "iris_service=info,iris_ipc=info".into()),
-        )
-        .init();
+/// share one append handle across the subscriber's writer calls
+struct LogFile(std::sync::Arc<std::fs::File>);
+
+impl std::io::Write for LogFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::Write::write(&mut &*self.0, buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut &*self.0)
+    }
+}
+
+/// how large the engine log may grow before it rolls to engine.log.1
+const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+
+fn init_logging(to_file: bool) {
+    let filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "info".into())
+    };
+    if to_file {
+        let base = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+        let dir = PathBuf::from(base).join("Iris").join("logs");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("engine.log");
+        // roll a grown log at startup so it never eats the disk
+        if std::fs::metadata(&path).map(|m| m.len() > LOG_ROTATE_BYTES).unwrap_or(false) {
+            let _ = std::fs::rename(&path, dir.join("engine.log.1"));
+        }
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let file = std::sync::Arc::new(file);
+            tracing_subscriber::fmt()
+                .with_env_filter(filter())
+                .with_ansi(false)
+                .with_writer(move || LogFile(file.clone()))
+                .init();
+            return;
+        }
+    }
+    tracing_subscriber::fmt().with_env_filter(filter()).init();
 }
 
 fn run_console() -> anyhow::Result<()> {

@@ -10,12 +10,13 @@
 //! connection. the service stamps the authenticated plugin id onto everything
 //! the plugin emits, so a plugin cannot speak in another's name.
 
-use iris_core::{Alert, Annotation, EnrichTarget, StatsTick};
+use iris_core::{Alert, Annotation, EnrichTarget, Rule, StatsTick};
 use serde::{Deserialize, Serialize};
 
 /// bump when the plugin wire shape changes incompatibly. independent of the UI
 /// pipe's `PROTOCOL_VERSION`; plugins declare compatibility in their manifest.
-pub const PLUGIN_PROTOCOL_VERSION: u32 = 1;
+/// v2 added rule proposals.
+pub const PLUGIN_PROTOCOL_VERSION: u32 = 2;
 
 /// the env var carrying the spawn-time auth token to the child, cleared by the
 /// SDK as soon as it is read
@@ -55,6 +56,10 @@ pub enum PluginMessage {
     /// raise a durable alert (subject to `emit:alerts`); the host stamps the
     /// source from the authenticated id, never from the wire
     RaiseAlert { message: String },
+    /// suggest a firewall rule (subject to `emit:rule-proposals`). the host
+    /// only records it for the user's review; nothing is enforced until an
+    /// elevated caller accepts.
+    ProposeRule { rule: Rule, reason: String },
     /// keepalive response
     Pong { req: u64 },
 }

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 // so a plugin author depends only on iris-plugin for the whole surface
-pub use iris_core::{AnnotationValue, AppId, Severity, TargetKind};
+pub use iris_core::{AnnotationValue, AppId, Direction, Rule, RuleAction, Severity, TargetKind};
 pub use iris_ipc::plugin::StreamKind as Stream;
 
 /// what an out-of-process plugin implements. every method has a default, so a
@@ -70,6 +70,13 @@ impl PluginCtx {
     /// authenticated id, so `message` is the only field the plugin controls.
     pub fn raise_alert(&self, message: impl Into<String>) {
         let _ = self.tx.try_send(PluginMessage::RaiseAlert { message: message.into() });
+    }
+
+    /// suggest a firewall rule with a human-readable reason. needs the
+    /// `emit:rule-proposals` capability. the suggestion only ever reaches the
+    /// user's review list; the plugin learns nothing about its fate.
+    pub fn propose_rule(&self, rule: iris_core::Rule, reason: impl Into<String>) {
+        let _ = self.tx.try_send(PluginMessage::ProposeRule { rule, reason: reason.into() });
     }
 }
 

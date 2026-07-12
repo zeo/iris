@@ -473,6 +473,20 @@ impl Supervisor {
                     self.engine.publish(ServerMessage::Alert(alert));
                 }
             }
+            PluginMessage::ProposeRule { rule, reason } => {
+                if rt.effective_caps().iter().any(|c| c == "emit:rule-proposals") {
+                    // recorded for review only; enforcement stays behind the
+                    // elevated accept on the admin pipe
+                    let proposal = self
+                        .store
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert_proposal(&rt.manifest.name, &rule, &reason, now_ms());
+                    if let Some(proposal) = proposal {
+                        self.engine.publish(ServerMessage::Proposal(proposal));
+                    }
+                }
+            }
             PluginMessage::Subscribe { streams: requested } => {
                 let granted = rt.effective_caps();
                 streams.clear();

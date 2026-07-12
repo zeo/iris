@@ -8,6 +8,7 @@
 
 pub mod codec;
 pub mod message;
+pub mod plugin;
 #[cfg(feature = "transport")]
 pub mod transport;
 
@@ -24,3 +25,9 @@ pub const PIPE_NAME: &str = r"\\.\pipe\iris-engine";
 /// grants SYSTEM and Administrators only, so a non-elevated process cannot open
 /// it and rule changes therefore require elevation, enforced by the OS.
 pub const ADMIN_PIPE_NAME: &str = r"\\.\pipe\iris-engine-admin";
+
+/// the plugin named-pipe out-of-process plugins connect back on. its DACL
+/// grants SYSTEM only (the restricted plugin child still runs as SYSTEM, with
+/// privileges stripped and a low integrity level, so the label admits it);
+/// per-plugin identity comes from the spawn-time token handshake, not the pipe.
+pub const PLUGIN_PIPE_NAME: &str = r"\\.\pipe\iris-plugins";

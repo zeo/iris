@@ -4,7 +4,7 @@
 //! halves so the service can push ticks while a reader handles commands.
 
 use crate::codec::MAX_FRAME_LEN;
-use crate::{ADMIN_PIPE_NAME, PIPE_NAME};
+use crate::{ADMIN_PIPE_NAME, PIPE_NAME, PLUGIN_PIPE_NAME};
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::{GenericFilePath, ListenerOptions};
 use serde::de::DeserializeOwned;
@@ -26,6 +26,11 @@ const TELEMETRY_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)S:(ML;;NW;
 // code on the service side.
 #[cfg(windows)]
 const ADMIN_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)";
+// the plugin pipe: SYSTEM only in the DACL, with a low integrity label so the
+// restricted plugin children (SYSTEM user, privileges stripped, low IL) can
+// still open it. per-plugin identity is the spawn-time token, not the pipe.
+#[cfg(windows)]
+const PLUGIN_SDDL: &str = "D:(A;;GA;;;SY)S:(ML;;NW;;;LW)";
 
 /// bind the service listener for the unprivileged telemetry pipe.
 pub fn listen() -> io::Result<Listener> {
@@ -35,6 +40,11 @@ pub fn listen() -> io::Result<Listener> {
 /// bind the service listener for the admin-only pipe that carries rule mutations.
 pub fn listen_admin() -> io::Result<Listener> {
     listen_with(ADMIN_PIPE_NAME, ADMIN_SDDL)
+}
+
+/// bind the service listener for the out-of-process plugin pipe.
+pub fn listen_plugins() -> io::Result<Listener> {
+    listen_with(PLUGIN_PIPE_NAME, PLUGIN_SDDL)
 }
 
 #[cfg(windows)]
@@ -67,6 +77,11 @@ pub async fn connect() -> io::Result<Stream> {
 /// connect to the admin pipe (only an elevated caller can open it).
 pub async fn connect_admin() -> io::Result<Stream> {
     connect_to(ADMIN_PIPE_NAME).await
+}
+
+/// connect a plugin child back to the service's plugin pipe.
+pub async fn connect_plugins() -> io::Result<Stream> {
+    connect_to(PLUGIN_PIPE_NAME).await
 }
 
 async fn connect_to(pipe: &str) -> io::Result<Stream> {

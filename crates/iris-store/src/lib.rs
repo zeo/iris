@@ -41,11 +41,49 @@ CREATE TABLE IF NOT EXISTS adapter_usage (
 CREATE INDEX IF NOT EXISTS adapter_usage_bucket ON adapter_usage(bucket);
 ";
 
+/// v3: per-plugin consent grants. `caps` and `egress` are JSON string arrays;
+/// nothing runs out-of-process before a row here says the user allowed it.
+const SCHEMA_V3_PLUGIN_GRANTS: &str = "
+CREATE TABLE IF NOT EXISTS plugin_grants (
+    id TEXT PRIMARY KEY,
+    caps TEXT NOT NULL,
+    egress TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    granted_at INTEGER NOT NULL
+);
+";
+
 /// bump when the schema changes; drives the migration ladder in [`Store::migrate`]
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Store {
     conn: Connection,
+}
+
+/// the user's persisted consent for one plugin: the capability and egress sets
+/// approved on first enable, and whether it is currently switched on
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginGrant {
+    pub id: String,
+    pub caps: Vec<String>,
+    pub egress: Vec<String>,
+    pub enabled: bool,
+    pub granted_at: u64,
+}
+
+fn grant_row(r: &rusqlite::Row) -> rusqlite::Result<PluginGrant> {
+    let id: String = r.get(0)?;
+    let caps: String = r.get(1)?;
+    let egress: String = r.get(2)?;
+    let enabled: i64 = r.get(3)?;
+    let granted_at: i64 = r.get(4)?;
+    Ok(PluginGrant {
+        id,
+        caps: serde_json::from_str(&caps).unwrap_or_default(),
+        egress: serde_json::from_str(&egress).unwrap_or_default(),
+        enabled: enabled != 0,
+        granted_at: granted_at as u64,
+    })
 }
 
 impl Store {
@@ -101,6 +139,9 @@ impl Store {
         }
         if version < 2 {
             self.conn.execute_batch(SCHEMA_V2_ADAPTER_USAGE)?;
+        }
+        if version < 3 {
+            self.conn.execute_batch(SCHEMA_V3_PLUGIN_GRANTS)?;
         }
         if version < SCHEMA_VERSION {
             self.conn
@@ -359,6 +400,67 @@ impl Store {
         }
     }
 
+    /// record (or replace) the user's consent for a plugin
+    pub fn set_plugin_grant(
+        &self,
+        id: &str,
+        caps: &[String],
+        egress: &[String],
+        enabled: bool,
+        at_ms: u64,
+    ) {
+        let caps_json = serde_json::to_string(caps).unwrap_or_else(|_| "[]".into());
+        let egress_json = serde_json::to_string(egress).unwrap_or_else(|_| "[]".into());
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO plugin_grants(id, caps, egress, enabled, granted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+               caps = ?2, egress = ?3, enabled = ?4, granted_at = ?5",
+            params![id, caps_json, egress_json, enabled as i64, at_ms as i64],
+        ) {
+            tracing::warn!("could not record plugin grant for {id}: {e}");
+        }
+    }
+
+    /// flip a granted plugin on or off; false when no grant exists
+    pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> bool {
+        match self.conn.execute(
+            "UPDATE plugin_grants SET enabled = ?2 WHERE id = ?1",
+            params![id, enabled as i64],
+        ) {
+            Ok(rows) => rows > 0,
+            Err(e) => {
+                tracing::warn!("could not update plugin grant for {id}: {e}");
+                false
+            }
+        }
+    }
+
+    pub fn plugin_grant(&self, id: &str) -> Option<PluginGrant> {
+        self.conn
+            .query_row(
+                "SELECT id, caps, egress, enabled, granted_at FROM plugin_grants WHERE id = ?1",
+                params![id],
+                grant_row,
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    pub fn list_plugin_grants(&self) -> Vec<PluginGrant> {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT id, caps, egress, enabled, granted_at FROM plugin_grants ORDER BY id")
+        {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], grant_row)
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
     pub fn first_seen(&self, path: &str) -> Option<u64> {
         self.conn
             .query_row(
@@ -410,6 +512,27 @@ mod tests {
         assert_eq!(totals[1].0, AdapterKind::Vpn);
         // outside the window
         assert!(s.adapter_usage_totals(120_000, 240_000).is_empty());
+    }
+
+    #[test]
+    fn plugin_grants_roundtrip_and_toggle() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.plugin_grant("com.example.rep").is_none());
+        assert!(!s.set_plugin_enabled("com.example.rep", true));
+        s.set_plugin_grant(
+            "com.example.rep",
+            &["observe:ticks".into(), "enrich:endpoint".into()],
+            &["api.example.com:443".into()],
+            true,
+            1_000,
+        );
+        let g = s.plugin_grant("com.example.rep").unwrap();
+        assert!(g.enabled);
+        assert_eq!(g.caps.len(), 2);
+        assert_eq!(g.egress, vec!["api.example.com:443".to_string()]);
+        assert!(s.set_plugin_enabled("com.example.rep", false));
+        assert!(!s.plugin_grant("com.example.rep").unwrap().enabled);
+        assert_eq!(s.list_plugin_grants().len(), 1);
     }
 
     #[test]

@@ -13,11 +13,11 @@ mod platform;
 mod plugins;
 mod rules;
 mod server;
-mod tracker;
 #[cfg(windows)]
 mod svc;
 #[cfg(target_os = "linux")]
 mod systemd;
+mod tracker;
 
 use engine::Engine;
 use iris_store::Store;
@@ -102,19 +102,24 @@ impl std::io::Write for LogFile {
 const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 
 fn init_logging(to_file: bool) {
-    let filter = || {
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info".into())
-    };
+    let filter =
+        || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     if to_file {
         let dir = paths::log_dir();
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("engine.log");
         // roll a grown log at startup so it never eats the disk
-        if std::fs::metadata(&path).map(|m| m.len() > LOG_ROTATE_BYTES).unwrap_or(false) {
+        if std::fs::metadata(&path)
+            .map(|m| m.len() > LOG_ROTATE_BYTES)
+            .unwrap_or(false)
+        {
             let _ = std::fs::rename(&path, dir.join("engine.log.1"));
         }
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let file = std::sync::Arc::new(file);
             tracing_subscriber::fmt()
                 .with_env_filter(filter())
@@ -138,15 +143,35 @@ fn run_console() -> anyhow::Result<()> {
 /// hosts (SCM on Windows, systemd on Linux).
 pub(crate) async fn run_engine() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
-    paths::ensure_runtime_dirs();
+    paths::ensure_runtime_dirs()?;
     let engine = Engine::new();
     let store = Arc::new(Mutex::new(open_store()));
     let (enrich, panels, supervisor) = plugins::build(store.clone(), engine.clone());
     monitor::spawn(engine.clone(), store.clone(), enrich.clone());
-    let rules = Arc::new(Mutex::new(RuleStore::new()));
+    let rules = Arc::new(Mutex::new(RuleStore::new()?));
     tokio::select! {
         r = server::serve(engine, rules.clone(), store.clone(), enrich, panels) => r,
-        r = server::serve_admin(rules, store) => r,
+        r = server::serve_admin(rules.clone(), store) => r,
         r = supervisor.serve() => r,
+        r = watch_enforcement(rules) => r,
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn watch_enforcement(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let healthy = rules
+            .lock()
+            .map(|rules| rules.enforcement_healthy())
+            .unwrap_or(false);
+        if !healthy {
+            anyhow::bail!("firewall enforcement worker stopped");
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn watch_enforcement(_rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
+    std::future::pending().await
 }

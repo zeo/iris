@@ -49,10 +49,29 @@ impl SockInfo {
 /// dump every TCP and UDP socket (v4 and v6). a family/proto whose dump fails is
 /// logged and skipped so a partial result still drives the UI.
 pub fn dump() -> Vec<SockInfo> {
+    dump_with_tcp_states(tcp_states())
+}
+
+/// dump sockets used to attribute a queued packet, including TCP listeners
+pub fn dump_for_attribution() -> Vec<SockInfo> {
+    dump_with_tcp_states(STATES_ALL)
+}
+
+fn dump_with_tcp_states(tcp_state_mask: u32) -> Vec<SockInfo> {
     let mut out = Vec::new();
     for (family, proto, ipproto, states) in [
-        (libc::AF_INET, Protocol::Tcp, libc::IPPROTO_TCP, tcp_states()),
-        (libc::AF_INET6, Protocol::Tcp, libc::IPPROTO_TCP, tcp_states()),
+        (
+            libc::AF_INET,
+            Protocol::Tcp,
+            libc::IPPROTO_TCP,
+            tcp_state_mask,
+        ),
+        (
+            libc::AF_INET6,
+            Protocol::Tcp,
+            libc::IPPROTO_TCP,
+            tcp_state_mask,
+        ),
         (libc::AF_INET, Protocol::Udp, libc::IPPROTO_UDP, STATES_ALL),
         (libc::AF_INET6, Protocol::Udp, libc::IPPROTO_UDP, STATES_ALL),
     ] {
@@ -239,5 +258,20 @@ fn write_addr(dst: &mut [u8], ip: IpAddr) {
     match ip {
         IpAddr::V4(v4) => dst[0..4].copy_from_slice(&v4.octets()),
         IpAddr::V6(v6) => dst[0..16].copy_from_slice(&v6.octets()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_dump_excludes_listeners() {
+        assert_eq!(tcp_states() & (1 << TCP_LISTEN), 0);
+    }
+
+    #[test]
+    fn attribution_dump_requests_listeners() {
+        assert_ne!(STATES_ALL & (1 << TCP_LISTEN), 0);
     }
 }

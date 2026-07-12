@@ -5,9 +5,9 @@
 //! each app is connected to even when the byte monitor could not start.
 
 use crate::dns::{self, DnsMap};
+use crate::proc;
 use crate::proc::PidCache;
 use crate::sockets::{self, SockInfo};
-use crate::{ct, proc};
 use iris_core::{Conn, ConnState, Direction, Endpoint, Protocol};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -102,21 +102,19 @@ impl ConnCounter {
 }
 
 /// terminate an established TCP connection matching the tuple. tries the clean
-/// SOCK_DESTROY path first (needs CONFIG_INET_DIAG_DESTROY, present on stock
-/// distro kernels) and falls back to dropping the flow's conntrack state.
-/// returns true if a matching connection was found and acted on.
+/// SOCK_DESTROY path and return false when the kernel cannot close the socket
 pub fn kill_connection(local_port: u16, remote: IpAddr, remote_port: u16) -> bool {
     // find the live socket so we know its local address, family, and owner
     let Some(target) = sockets::dump().into_iter().find(|s| {
-        s.is_tcp()
-            && s.local.1 == local_port
-            && s.remote.0 == remote
-            && s.remote.1 == remote_port
+        s.is_tcp() && s.local.1 == local_port && s.remote.0 == remote && s.remote.1 == remote_port
     }) else {
         return false;
     };
     if target.uid < FIRST_NORMAL_UID {
-        tracing::warn!("refusing to kill a system-owned connection (uid {})", target.uid);
+        tracing::warn!(
+            "refusing to kill a system-owned connection (uid {})",
+            target.uid
+        );
         return false;
     }
 
@@ -128,13 +126,11 @@ pub fn kill_connection(local_port: u16, remote: IpAddr, remote_port: u16) -> boo
     match sockets::destroy(family, libc::IPPROTO_TCP as u8, target.local, target.remote) {
         Ok(true) => return true,
         Ok(false) => {
-            tracing::info!("kernel lacks SOCK_DESTROY; cutting the flow via conntrack");
+            tracing::warn!("kernel lacks SOCK_DESTROY; connection kill is unavailable");
         }
         Err(e) => {
             tracing::warn!("SOCK_DESTROY failed: {e}");
         }
     }
-    // fallback: delete the conntrack entry so the flow's state is gone. the local
-    // socket lingers, but the connection is severed at the kernel.
-    ct::delete_flow(target.local, target.remote, libc::IPPROTO_TCP as u8).unwrap_or(false)
+    false
 }

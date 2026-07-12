@@ -67,21 +67,25 @@ export function App() {
   // offer to install the background service if the engine stays unreachable
   const [offerInstall, setOfferInstall] = createSignal(false);
   const [installing, setInstalling] = createSignal(false);
+  const [installError, setInstallError] = createSignal<string>();
   createEffect(() => {
-    if (engine.online()) {
+    const current = engine.online() && engine.version() === __APP_VERSION__;
+    if (current) {
       setOfferInstall(false);
       return;
     }
-    const t = setTimeout(() => !engine.online() && setOfferInstall(true), 8000);
+    const delay = engine.online() ? 0 : 8000;
+    const t = setTimeout(() => setOfferInstall(true), delay);
     onCleanup(() => clearTimeout(t));
   });
   const installService = async () => {
     setInstalling(true);
+    setInstallError(undefined);
     try {
       await invoke("install_service");
       setOfferInstall(false);
-    } catch {
-      /* prompt declined */
+    } catch (error) {
+      setInstallError(String(error));
     }
     setInstalling(false);
   };
@@ -118,7 +122,12 @@ export function App() {
       <Show when={offerInstall()}>
         <div class="install-banner">
           <Icon name="shield" />
-          <span>The Iris engine service isn't running. Install it to start monitoring in the background.</span>
+          <span>
+            {installError() ??
+              (engine.online()
+                ? "The Iris engine needs to be updated to match this version of Iris."
+                : "The Iris engine service isn't running. Install it to start monitoring in the background.")}
+          </span>
           <span class="grow" />
           <button class="btn" onClick={installService} disabled={installing()}>
             {installing() ? "Installing…" : "Install service"}

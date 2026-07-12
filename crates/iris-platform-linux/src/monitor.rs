@@ -10,9 +10,9 @@
 //!   answered address under the host name that produced it.
 
 use crate::adapters::AdapterMap;
+use crate::ct;
 use crate::dns::{self, DnsMap};
 use crate::proc::{self, PidCache};
-use crate::ct;
 use crate::sockets::{self, SockInfo};
 use iris_core::Aggregator;
 use std::collections::HashMap;
@@ -146,10 +146,25 @@ fn account_tcp(
         }
         // a socket we have not seen this session contributes no history: record
         // its current counters as the baseline and no delta
-        let base = seen.get(&s.cookie).copied().unwrap_or_default();
+        let Some(base) = seen.get(&s.cookie).copied() else {
+            live.insert(
+                s.cookie,
+                Baseline {
+                    sent: cur_sent,
+                    recv: cur_recv,
+                },
+            );
+            continue;
+        };
         let d_sent = cur_sent.saturating_sub(base.sent);
         let d_recv = cur_recv.saturating_sub(base.recv);
-        live.insert(s.cookie, Baseline { sent: cur_sent, recv: cur_recv });
+        live.insert(
+            s.cookie,
+            Baseline {
+                sent: cur_sent,
+                recv: cur_recv,
+            },
+        );
         if d_sent == 0 && d_recv == 0 {
             continue;
         }
@@ -206,7 +221,16 @@ fn account_udp(
             sport: flow.sport,
             dport: flow.dport,
         };
-        let base = seen.get(&key).copied().unwrap_or_default();
+        let Some(base) = seen.get(&key).copied() else {
+            live.insert(
+                key,
+                Baseline {
+                    sent: flow.orig_bytes,
+                    recv: flow.reply_bytes,
+                },
+            );
+            continue;
+        };
         let d_orig = flow.orig_bytes.saturating_sub(base.sent);
         let d_reply = flow.reply_bytes.saturating_sub(base.recv);
         live.insert(
@@ -246,11 +270,16 @@ struct DnsSniffer {
 impl DnsSniffer {
     fn open() -> std::io::Result<DnsSniffer> {
         use std::os::fd::FromRawFd;
-        // ETH_P_IP in network order; SOCK_DGRAM strips the link header so we read
-        // straight into the IPv4 packet
-        const ETH_P_IP: u16 = 0x0800;
-        let proto = (ETH_P_IP as libc::c_int).to_be();
-        let fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, proto) };
+        // SOCK_DGRAM strips the link header so the buffer starts at IPv4 or IPv6
+        const ETH_P_ALL: u16 = 0x0003;
+        let proto = i32::from(ETH_P_ALL.to_be());
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_PACKET,
+                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+                proto,
+            )
+        };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -293,17 +322,24 @@ impl DnsSniffer {
     }
 }
 
-/// parse an IPv4 UDP packet; if it is a DNS response (source port 53), record
-/// every A/AAAA answer under the queried host name
+/// parse an IPv4 or IPv6 UDP DNS response
 fn parse_dns_packet(pkt: &[u8], dns_map: &DnsMap) {
-    if pkt.len() < 20 || (pkt[0] >> 4) != 4 {
-        return;
-    }
-    let ihl = ((pkt[0] & 0x0f) as usize) * 4;
-    if pkt[9] != libc::IPPROTO_UDP as u8 || pkt.len() < ihl + 8 {
-        return;
-    }
-    let udp = &pkt[ihl..];
+    let udp = match pkt.first().map(|byte| byte >> 4) {
+        Some(4) if pkt.len() >= 20 => {
+            let ihl = ((pkt[0] & 0x0f) as usize) * 4;
+            if pkt[9] != libc::IPPROTO_UDP as u8 || pkt.len() < ihl + 8 {
+                return;
+            }
+            &pkt[ihl..]
+        }
+        Some(6) if pkt.len() >= 48 => {
+            if pkt[6] != libc::IPPROTO_UDP as u8 {
+                return;
+            }
+            &pkt[40..]
+        }
+        _ => return,
+    };
     let src_port = u16::from_be_bytes([udp[0], udp[1]]);
     if src_port != 53 {
         return;

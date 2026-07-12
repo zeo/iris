@@ -18,8 +18,8 @@ pub use message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 /// the telemetry endpoint the unprivileged UI connects to for live stats,
 /// reads, and connection kills. on Windows it is a named pipe whose DACL grants
 /// interactively-logged-on users and admins with a medium integrity label; on
-/// Linux it is a unix socket under the engine's runtime directory, world
-/// read/write so the desktop-user UI can reach the root-owned engine.
+/// Linux it is a group-restricted Unix socket and the engine verifies the
+/// connecting account through peer credentials
 #[cfg(windows)]
 pub const PIPE_NAME: &str = r"\\.\pipe\iris-engine";
 #[cfg(not(windows))]

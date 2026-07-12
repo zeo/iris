@@ -12,6 +12,7 @@ const UNIT_NAME: &str = "iris-engine.service";
 const UNIT_PATH: &str = "/etc/systemd/system/iris-engine.service";
 const PLUGIN_USER: &str = "iris-plugin";
 const POLKIT_POLICY: &str = "/usr/share/polkit-1/actions/com.iris.engine.policy";
+const INSTALLED_ENGINE: &str = "/usr/libexec/iris/iris-engine";
 
 /// run the engine under systemd until SIGTERM/SIGINT, then return so the Drop
 /// paths clean up. must run as root: netlink sock_diag/conntrack, NFQUEUE,
@@ -20,7 +21,7 @@ pub fn run() -> anyhow::Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         anyhow::bail!("iris-engine must run as root");
     }
-    paths::ensure_runtime_dirs();
+    paths::ensure_runtime_dirs()?;
     tracing::info!("iris-engine starting (systemd)");
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -48,10 +49,20 @@ pub fn install() -> anyhow::Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         anyhow::bail!("installing the service requires root");
     }
-    let exe = std::env::current_exe()?;
+    let source_exe = std::env::current_exe()?;
     ensure_plugin_user()?;
     std::fs::create_dir_all(paths::data_dir())?;
     std::fs::create_dir_all(paths::plugins_dir())?;
+    let desktop_uid = std::env::var("PKEXEC_UID")
+        .map_err(|_| {
+            anyhow::anyhow!("PKEXEC_UID is missing; install must be launched through pkexec")
+        })?
+        .parse::<u32>()
+        .map_err(|_| anyhow::anyhow!("PKEXEC_UID is invalid"))?;
+    paths::record_desktop_uid(desktop_uid)?;
+    paths::secure_state()?;
+    install_engine(&source_exe)?;
+    let exe = std::path::Path::new(INSTALLED_ENGINE);
 
     let unit = format!(
         "[Unit]
@@ -67,7 +78,8 @@ RestartSec=5
 RuntimeDirectory=iris
 RuntimeDirectoryMode=0755
 StateDirectory=iris
-StateDirectoryMode=0755
+StateDirectoryMode=0700
+UMask=0077
 # the engine drops privilege only for plugin children; it needs root itself for
 # netlink, NFQUEUE, nftables, and reading other processes' executables
 NoNewPrivileges=false
@@ -81,7 +93,8 @@ WantedBy=multi-user.target
     std::fs::write(POLKIT_POLICY, polkit_policy(&exe))?;
 
     run_ok(Command::new("systemctl").arg("daemon-reload"))?;
-    run_ok(Command::new("systemctl").args(["enable", "--now", UNIT_NAME]))?;
+    run_ok(Command::new("systemctl").args(["enable", UNIT_NAME]))?;
+    run_ok(Command::new("systemctl").args(["restart", UNIT_NAME]))?;
     tracing::info!("iris-engine installed and started");
     Ok(())
 }
@@ -91,14 +104,36 @@ pub fn uninstall() -> anyhow::Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         anyhow::bail!("uninstalling the service requires root");
     }
-    let _ = Command::new("systemctl")
-        .args(["disable", "--now", UNIT_NAME])
-        .status();
-    let _ = std::fs::remove_file(UNIT_PATH);
-    let _ = std::fs::remove_file(POLKIT_POLICY);
-    let _ = Command::new("systemctl").arg("daemon-reload").status();
+    run_ok(Command::new("systemctl").args(["disable", "--now", UNIT_NAME]))?;
+    remove_if_present(UNIT_PATH)?;
+    remove_if_present(POLKIT_POLICY)?;
+    remove_if_present(INSTALLED_ENGINE)?;
+    run_ok(Command::new("systemctl").arg("daemon-reload"))?;
     tracing::info!("iris-engine uninstalled");
     Ok(())
+}
+
+fn install_engine(source: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let destination = std::path::Path::new(INSTALLED_ENGINE);
+    let directory = destination
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("installed engine path has no parent"))?;
+    std::fs::create_dir_all(directory)?;
+    let temporary = destination.with_extension("new");
+    std::fs::copy(source, &temporary)?;
+    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::rename(&temporary, destination)?;
+    Ok(())
+}
+
+fn remove_if_present(path: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// create the unprivileged, no-login account plugins are sandboxed to, if it is

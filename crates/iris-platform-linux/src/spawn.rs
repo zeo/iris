@@ -140,13 +140,15 @@ fn drop_privileges(uid: u32, gid: u32) -> io::Result<()> {
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
             return Err(io::Error::last_os_error());
         }
-        cap_resources();
+        cap_resources()?;
         // detach from any controlling terminal so the child cannot signal the
         // session or read terminal input
-        libc::setsid();
+        if libc::setsid() < 0 {
+            return Err(io::Error::last_os_error());
+        }
         // clear every supplementary group, then set the primary gid, before
         // dropping the uid (which would forbid the gid change)
-        if libc::setgroups(1, &gid) != 0 {
+        if libc::setgroups(0, std::ptr::null()) != 0 {
             return Err(io::Error::last_os_error());
         }
         if libc::setgid(gid) != 0 {
@@ -162,24 +164,33 @@ fn drop_privileges(uid: u32, gid: u32) -> io::Result<()> {
         }
         // PDEATHSIG is cleared by the credential change above, so arm it now: the
         // child gets SIGKILL if the engine exits
-        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if libc::getppid() == 1 {
+            return Err(io::Error::other("engine exited during plugin startup"));
+        }
     }
     Ok(())
 }
 
 /// cap the resources a plugin can consume so a buggy or hostile one cannot
 /// exhaust the host
-unsafe fn cap_resources() {
+unsafe fn cap_resources() -> io::Result<()> {
     let set = |res: libc::__rlimit_resource_t, soft: u64, hard: u64| {
         let lim = libc::rlimit {
             rlim_cur: soft,
             rlim_max: hard,
         };
-        libc::setrlimit(res, &lim);
+        if unsafe { libc::setrlimit(res, &lim) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     };
-    set(libc::RLIMIT_NPROC, 64, 64);
-    set(libc::RLIMIT_NOFILE, 256, 256);
-    set(libc::RLIMIT_CORE, 0, 0);
+    set(libc::RLIMIT_NPROC, 64, 64)?;
+    set(libc::RLIMIT_NOFILE, 256, 256)?;
+    set(libc::RLIMIT_CORE, 0, 0)?;
     // 512 MiB address space is generous for an enricher and still bounds a leak
-    set(libc::RLIMIT_AS, 512 * 1024 * 1024, 512 * 1024 * 1024);
+    set(libc::RLIMIT_AS, 512 * 1024 * 1024, 512 * 1024 * 1024)?;
+    Ok(())
 }

@@ -1,7 +1,7 @@
 # iris
 
-A firewall and network monitor for Windows and Linux. Iris watches every
-application's network traffic and puts you in control of what is allowed to
+A firewall and network monitor for Windows and Linux. Iris watches application
+network traffic and puts you in control of what is allowed to
 connect: per-app allow and block rules, a live view of what every process is
 talking to, and a running history of how much each one uses.
 
@@ -31,7 +31,7 @@ the system enforces.
   and raises a tray notification. Watched addresses raise a flag the moment
   anything contacts them.
 - **Plugins**: optional extensions run out of process in a restricted sandbox,
-  each with only the powers you approve. A plugin can annotate endpoints, raise
+  with capabilities limited to the powers you approve. A plugin can annotate endpoints, raise
   alerts, suggest firewall rules for your review, and show its own panel tab.
 - **Settings**: throughput units, notifications, launch at login, and one-click
   install or removal of the background engine.
@@ -59,9 +59,10 @@ declaration in the Plugins tab and enables it.
 The sandbox is enforced by the service, not trusted to the plugin. On Windows
 each child runs under a restricted low-integrity token with every privilege
 stripped; on Linux it runs as a dedicated unprivileged account with no new
-privileges and capped resources. Its network access is pinned to exactly the
-endpoints the user consented to (the Filtering Platform on Windows, an nftables
-table on Linux); an empty egress list means no network at all.
+privileges and capped resources. Its network access is pinned to consented
+endpoints through the Filtering Platform on Windows and nftables on Linux. Linux
+plugins currently share one sandbox account, so their active endpoint grants are
+combined; an empty combined egress list means no network at all.
 A plugin cannot change firewall rules. The strongest thing it can do is file a
 rule proposal, which sits in Protect until the user accepts it through the same
 elevation gate as a manual rule. Panels are declarative: a plugin returns data
@@ -77,14 +78,15 @@ Plugin authors implement one trait from the `iris-plugin` crate and call
 crates/iris-core          platform-neutral models, engine traits, aggregation
 crates/iris-ipc           framed wire protocol shared by the service and UI
 crates/iris-platform-win  Windows backend: ETW capture, WFP filters, connections
+crates/iris-platform-linux Linux backend: sock_diag, NFQUEUE, nftables, systemd
 crates/iris-plugin        the SDK plugin authors build against
 crates/iris-store         SQLite history, usage rollups, and alerts
-service                   the privileged Windows service (engine host)
+service                   the privileged Windows/systemd engine host
 app                       the Tauri v2 + SolidJS desktop UI
 ```
 
-The engine is written against traits in `iris-core`, so the Windows backend and
-a later Linux one are just two implementations behind the same surface.
+The engine is written against traits in `iris-core`; Windows and Linux provide
+platform implementations behind the same service surface.
 
 ## Building
 
@@ -107,7 +109,7 @@ licensed under CC-BY-4.0.
 Working: the instrument shell, live per-app/per-process Activity with connection
 drill-down, host names, and endpoint enrichment; the scrolling bandwidth graph
 over live and historical ranges with a per-adapter split; elevation-gated WFP
-allow/block rules with JSON backup and restore; usage history with per-adapter
+allow/block rules on Windows and Linux with JSON backup and restore; usage history with per-adapter
 totals and CSV export; first-seen and watchlist alerts with tray toasts; the
 sandboxed plugin runtime with consent, egress pinning, rule proposals, and panel
 tabs; a settings surface; and the self-installing background service with signed

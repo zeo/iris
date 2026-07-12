@@ -62,18 +62,12 @@ pub struct RuleStore {
 }
 
 impl RuleStore {
-    pub fn new() -> Self {
+    pub fn new() -> anyhow::Result<Self> {
         let path = store_path();
         let loaded = load_persisted(&path);
 
         #[cfg(has_platform)]
-        let mut wfp = match crate::platform::Wfp::open() {
-            Ok(w) => Some(w),
-            Err(e) => {
-                tracing::error!("WFP unavailable (rules will not be enforced): {e}");
-                None
-            }
-        };
+        let mut wfp = Some(crate::platform::Wfp::open()?);
 
         // a corrupt file is the one case we must not reset on: we cannot know the
         // intended rules, so leaving the last-good filters enforcing and starting
@@ -83,14 +77,14 @@ impl RuleStore {
             Loaded::Rules(v) => {
                 #[cfg(has_platform)]
                 if let Some(w) = wfp.as_mut() {
-                    let _ = w.reset();
+                    w.reset()?;
                 }
                 v
             }
             Loaded::Empty => {
                 #[cfg(has_platform)]
                 if let Some(w) = wfp.as_mut() {
-                    let _ = w.reset();
+                    w.reset()?;
                 }
                 Vec::new()
             }
@@ -118,7 +112,7 @@ impl RuleStore {
             let filter_ids = if p.enabled {
                 #[cfg(has_platform)]
                 {
-                    apply(wfp.as_mut(), &p.rule)
+                    apply(wfp.as_mut(), &p.rule)?
                 }
                 #[cfg(not(has_platform))]
                 {
@@ -135,21 +129,28 @@ impl RuleStore {
             });
         }
 
-        RuleStore {
+        Ok(RuleStore {
             #[cfg(has_platform)]
             wfp,
             rules,
             next_id,
             path,
-        }
+        })
     }
 
     pub fn list(&self) -> Vec<StoredRule> {
         self.rules.clone()
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn enforcement_healthy(&self) -> bool {
+        self.wfp
+            .as_ref()
+            .is_some_and(crate::platform::Wfp::is_healthy)
+    }
+
     /// add (or replace) a rule for an app+direction and enforce it now
-    pub fn add(&mut self, rule: Rule) -> StoredRule {
+    pub fn add(&mut self, rule: Rule) -> anyhow::Result<StoredRule> {
         // replace any existing rule for the same app + direction
         let dupes: Vec<usize> = self
             .rules
@@ -160,12 +161,12 @@ impl RuleStore {
             .collect();
         for i in dupes.into_iter().rev() {
             let old = self.rules.remove(i);
-            self.unapply(&old.filter_ids);
+            self.unapply(&old.filter_ids)?;
         }
 
         let id = self.next_id;
         self.next_id += 1;
-        let filter_ids = self.apply_rule(&rule);
+        let filter_ids = self.apply_rule(&rule)?;
         let stored = StoredRule {
             id,
             rule,
@@ -173,65 +174,68 @@ impl RuleStore {
             enabled: true,
         };
         self.rules.push(stored.clone());
-        self.save();
-        stored
+        self.save()?;
+        Ok(stored)
     }
 
     /// remove a rule; returns whether a rule with that id existed, so the caller
     /// can tell the UI the truth instead of a blanket success
-    pub fn remove(&mut self, id: i64) -> bool {
+    pub fn remove(&mut self, id: i64) -> anyhow::Result<bool> {
         if let Some(pos) = self.rules.iter().position(|r| r.id == id) {
             let removed = self.rules.remove(pos);
-            self.unapply(&removed.filter_ids);
-            self.save();
-            true
+            self.unapply(&removed.filter_ids)?;
+            self.save()?;
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
-    pub fn set_enabled(&mut self, id: i64, enabled: bool) -> Option<StoredRule> {
-        let pos = self.rules.iter().position(|r| r.id == id)?;
+    pub fn set_enabled(&mut self, id: i64, enabled: bool) -> anyhow::Result<Option<StoredRule>> {
+        let Some(pos) = self.rules.iter().position(|r| r.id == id) else {
+            return Ok(None);
+        };
         if enabled && !self.rules[pos].enabled {
             let rule = self.rules[pos].rule.clone();
-            let ids = self.apply_rule(&rule);
+            let ids = self.apply_rule(&rule)?;
             self.rules[pos].filter_ids = ids;
             self.rules[pos].enabled = true;
         } else if !enabled && self.rules[pos].enabled {
             let ids = std::mem::take(&mut self.rules[pos].filter_ids);
-            self.unapply(&ids);
+            self.unapply(&ids)?;
             self.rules[pos].enabled = false;
         }
-        self.save();
-        Some(self.rules[pos].clone())
+        self.save()?;
+        Ok(Some(self.rules[pos].clone()))
     }
 
-    fn apply_rule(&mut self, rule: &Rule) -> Vec<u64> {
+    fn apply_rule(&mut self, rule: &Rule) -> anyhow::Result<Vec<u64>> {
         #[cfg(has_platform)]
         {
-            apply(self.wfp.as_mut(), rule)
+            Ok(apply(self.wfp.as_mut(), rule)?)
         }
         #[cfg(not(has_platform))]
         {
             let _ = rule;
-            Vec::new()
+            Ok(Vec::new())
         }
     }
 
-    fn unapply(&mut self, ids: &[u64]) {
+    fn unapply(&mut self, ids: &[u64]) -> anyhow::Result<()> {
         #[cfg(has_platform)]
         {
             if let Some(w) = self.wfp.as_mut() {
-                let _ = w.remove(ids);
+                w.remove(ids)?;
             }
         }
         #[cfg(not(has_platform))]
         {
             let _ = ids;
         }
+        Ok(())
     }
 
-    fn save(&self) {
+    fn save(&self) -> anyhow::Result<()> {
         let persisted: Vec<Persisted> = self
             .rules
             .iter()
@@ -242,45 +246,23 @@ impl RuleStore {
             })
             .collect();
         if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)?;
         }
-        let json = match serde_json::to_string_pretty(&persisted) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::error!("could not serialize rules: {e}");
-                return;
-            }
-        };
+        let json = serde_json::to_string_pretty(&persisted)?;
         // write a temp file then rename over the target so a crash mid-write can
         // never truncate the live rules file into something that parses as empty
         let tmp = self.path.with_extension("json.tmp");
-        if let Err(e) = std::fs::write(&tmp, json.as_bytes()) {
-            tracing::error!("could not write rules: {e}");
-            return;
-        }
-        if let Err(e) = std::fs::rename(&tmp, &self.path) {
-            tracing::error!("could not commit rules file: {e}");
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
-}
-
-impl Default for RuleStore {
-    fn default() -> Self {
-        Self::new()
+        std::fs::write(&tmp, json.as_bytes())?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
     }
 }
 
 #[cfg(has_platform)]
-fn apply(wfp: Option<&mut crate::platform::Wfp>, rule: &Rule) -> Vec<u64> {
+fn apply(wfp: Option<&mut crate::platform::Wfp>, rule: &Rule) -> iris_core::EngineResult<Vec<u64>> {
     match wfp {
-        Some(w) => w
-            .apply(rule.app.as_str(), rule.direction, rule.action)
-            .unwrap_or_else(|e| {
-                tracing::error!("failed to enforce rule for {}: {e}", rule.app.as_str());
-                Vec::new()
-            }),
-        None => Vec::new(),
+        Some(w) => w.apply(rule.app.as_str(), rule.direction, rule.action),
+        None => Err(iris_core::EngineError::NotInitialized),
     }
 }
 

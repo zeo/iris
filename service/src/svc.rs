@@ -65,12 +65,12 @@ fn run_service() -> anyhow::Result<()> {
     ))?;
 
     let rt = tokio::runtime::Runtime::new()?;
+    let rules = std::sync::Arc::new(std::sync::Mutex::new(crate::rules::RuleStore::new()?));
     let failed = rt.block_on(async {
         let engine = Engine::new();
         let store = std::sync::Arc::new(std::sync::Mutex::new(crate::open_store()));
         let (enrich, panels, supervisor) = crate::plugins::build(store.clone(), engine.clone());
         crate::monitor::spawn(engine.clone(), store.clone(), enrich.clone());
-        let rules = std::sync::Arc::new(std::sync::Mutex::new(crate::rules::RuleStore::new()));
         tokio::select! {
             r = supervisor.serve() => {
                 tracing::error!("plugin host ended: {r:?}");

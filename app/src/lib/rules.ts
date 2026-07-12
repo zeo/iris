@@ -17,6 +17,9 @@ export interface StoredRule {
 const [rules, setRules] = createSignal<StoredRule[]>([]);
 export { rules };
 
+const pathKey = (path: string): string =>
+  navigator.userAgent.includes("Windows") ? path.toLowerCase() : path;
+
 export async function refreshRules(): Promise<void> {
   try {
     setRules(await invoke<StoredRule[]>("list_rules"));
@@ -27,7 +30,7 @@ export async function refreshRules(): Promise<void> {
 
 /// is there an enabled block rule covering this app path?
 export function isBlocked(path: string): boolean {
-  const p = path.toLowerCase();
+  const p = pathKey(path);
   return rules().some((r) => r.enabled && r.rule.action === "block" && r.rule.app === p);
 }
 
@@ -50,7 +53,7 @@ export async function blockApp(path: string): Promise<void> {
 }
 
 export async function unblockApp(path: string): Promise<void> {
-  const p = path.toLowerCase();
+  const p = pathKey(path);
   const hits = rules().filter((r) => r.rule.action === "block" && r.rule.app === p);
   for (const r of hits) await invoke("rule_remove", { id: r.id });
   await refreshRules();

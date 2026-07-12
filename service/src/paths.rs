@@ -38,31 +38,78 @@ pub fn store_file() -> PathBuf {
     data_dir().join("iris.db")
 }
 
+#[cfg(target_os = "linux")]
+fn desktop_uid_file() -> PathBuf {
+    data_dir().join("desktop.uid")
+}
+
+#[cfg(target_os = "linux")]
+pub fn desktop_uid() -> std::io::Result<u32> {
+    let raw = std::fs::read_to_string(desktop_uid_file())?;
+    raw.trim()
+        .parse()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid desktop uid"))
+}
+
+#[cfg(target_os = "linux")]
+pub fn record_desktop_uid(uid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true).mode(0o600);
+    std::io::Write::write_all(
+        &mut options.open(desktop_uid_file())?,
+        uid.to_string().as_bytes(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn secure_state() -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(data_dir(), std::fs::Permissions::from_mode(0o700))?;
+    for path in [
+        store_file(),
+        data_dir().join("iris.db-wal"),
+        data_dir().join("iris.db-shm"),
+        rules_file(),
+        desktop_uid_file(),
+    ] {
+        match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 /// create the socket runtime directories with the ownership and modes the
 /// endpoint security depends on: `/run/iris` world-traversable, `/run/iris/admin`
 /// root-only (so only root can reach the admin socket, enforcing elevation), and
 /// `/run/iris/plugins` group-owned by the sandbox account (so only plugin
-/// children can reach the plugin socket). idempotent; best-effort per directory.
+/// children can reach the plugin socket)
 #[cfg(target_os = "linux")]
-pub fn ensure_runtime_dirs() {
+pub fn ensure_runtime_dirs() -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let run = PathBuf::from("/run/iris");
-    let _ = std::fs::create_dir_all(&run);
-    let _ = std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755));
+    std::fs::create_dir_all(&run)?;
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755))?;
 
     let admin = run.join("admin");
-    let _ = std::fs::create_dir_all(&admin);
-    let _ = std::fs::set_permissions(&admin, std::fs::Permissions::from_mode(0o700));
+    std::fs::create_dir_all(&admin)?;
+    std::fs::set_permissions(&admin, std::fs::Permissions::from_mode(0o700))?;
 
     let plugins = run.join("plugins");
-    let _ = std::fs::create_dir_all(&plugins);
+    std::fs::create_dir_all(&plugins)?;
     // group-own by the sandbox account and give the group traverse+read so a
     // plugin child can reach the socket the engine binds inside
     if let Some(gid) = plugin_gid() {
-        let _ = chown(&plugins, 0, gid);
+        chown(&plugins, 0, gid)?;
     }
-    let _ = std::fs::set_permissions(&plugins, std::fs::Permissions::from_mode(0o750));
+    std::fs::set_permissions(&plugins, std::fs::Permissions::from_mode(0o750))?;
+    Ok(())
 }
 
 /// the gid of the plugin sandbox account, if it exists
@@ -76,17 +123,39 @@ pub fn plugin_gid() -> Option<u32> {
     Some(unsafe { (*pw).pw_gid })
 }
 
-/// group-own the plugin socket by the sandbox account and make it group
-/// read/write, so only a plugin child can connect. best-effort: without the
-/// account the socket keeps its default (root-only) ownership, which fails safe.
+/// group-own the plugin socket by the sandbox account
 #[cfg(target_os = "linux")]
-pub fn grant_plugin_socket(path: &str) {
+pub fn grant_plugin_socket(path: &str) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    if let Some(gid) = plugin_gid() {
-        let p = std::path::Path::new(path);
-        let _ = chown(p, 0, gid);
-        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o660));
+    let gid = plugin_gid().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "iris-plugin account missing")
+    })?;
+    let path = std::path::Path::new(path);
+    chown(path, 0, gid)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+}
+
+#[cfg(target_os = "linux")]
+pub fn grant_telemetry_socket(path: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let uid = desktop_uid()?;
+    let gid = primary_gid(uid)?;
+    let path = std::path::Path::new(path);
+    chown(path, 0, gid)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+}
+
+#[cfg(target_os = "linux")]
+fn primary_gid(uid: u32) -> std::io::Result<u32> {
+    let pw = unsafe { libc::getpwuid(uid) };
+    if pw.is_null() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "desktop account missing",
+        ));
     }
+    Ok(unsafe { (*pw).pw_gid })
 }
 
 #[cfg(target_os = "linux")]

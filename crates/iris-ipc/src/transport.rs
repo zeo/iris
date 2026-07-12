@@ -37,12 +37,9 @@ const ADMIN_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)";
 const PLUGIN_SDDL: &str = "D:(A;;GA;;;SY)S:(ML;;NW;;;LW)";
 
 // on non-Windows the endpoints are unix sockets; access is enforced by the mode
-// of the socket file and its parent directory, set after bind. the telemetry
-// socket is world read/write (the desktop-user UI reaches the root engine); the
-// admin and plugin sockets sit in restricted directories the service creates.
-// these are ignored on Windows, where the security descriptor governs access.
+// of the socket file and its parent directory, set after bind
 #[cfg_attr(windows, allow(dead_code))]
-const TELEMETRY_MODE: u32 = 0o666;
+const TELEMETRY_MODE: u32 = 0o660;
 #[cfg_attr(windows, allow(dead_code))]
 const ADMIN_MODE: u32 = 0o600;
 #[cfg_attr(windows, allow(dead_code))]
@@ -136,6 +133,17 @@ pub fn split(stream: Stream) -> (RecvHalf, SendHalf) {
     stream.split()
 }
 
+/// return the effective uid attached to a Unix-domain peer
+#[cfg(unix)]
+pub fn peer_euid(stream: &Stream) -> io::Result<u32> {
+    use interprocess::local_socket::traits::StreamCommon;
+
+    stream
+        .peer_creds()?
+        .euid()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "peer uid unavailable"))
+}
+
 /// write one length-prefixed bincode frame.
 pub async fn write_frame<W, T>(w: &mut W, msg: &T) -> io::Result<()>
 where
@@ -145,7 +153,10 @@ where
     let payload =
         bincode::serialize(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     if payload.len() as u64 > MAX_FRAME_LEN as u64 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
     w.write_all(&(payload.len() as u32).to_le_bytes()).await?;
     w.write_all(&payload).await?;
@@ -167,11 +178,14 @@ where
     }
     let len = u32::from_le_bytes(len_buf);
     if len > MAX_FRAME_LEN {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
     let mut payload = vec![0u8; len as usize];
     r.read_exact(&mut payload).await?;
-    let msg =
-        bincode::deserialize(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let msg = bincode::deserialize(&payload)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     Ok(Some(msg))
 }

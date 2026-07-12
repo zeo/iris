@@ -151,7 +151,7 @@ export function Settings() {
         <div class="set-row">
           <div class="set-meta">
             <span class="set-name">Launch at login</span>
-            <span class="set-desc">Start Iris in the tray when you sign in to Windows.</span>
+            <span class="set-desc">Start Iris in the tray when you sign in.</span>
           </div>
           <button class="rocker" role="switch" aria-checked={atLogin()} onClick={toggleLogin}>
             <span class="knob" />

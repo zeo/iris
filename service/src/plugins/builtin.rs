@@ -28,7 +28,12 @@ impl Enricher for NetworkScope {
         let EnrichTarget::Endpoint(ip) = target else {
             return Vec::new();
         };
-        vec![Annotation::text("net.scope", "Network", ip_scope(ip), Severity::Info)]
+        vec![Annotation::text(
+            "net.scope",
+            "Network",
+            ip_scope(ip),
+            Severity::Info,
+        )]
     }
 }
 
@@ -44,7 +49,9 @@ impl Geo {
         let reader = Self::locate().and_then(|path| {
             maxminddb::Reader::open_readfile(&path)
                 .inspect(|_| tracing::info!("country database loaded from {}", path.display()))
-                .inspect_err(|e| tracing::warn!("country database at {} unreadable: {e}", path.display()))
+                .inspect_err(|e| {
+                    tracing::warn!("country database at {} unreadable: {e}", path.display())
+                })
                 .ok()
         });
         if reader.is_none() {
@@ -59,11 +66,24 @@ impl Geo {
     fn locate() -> Option<PathBuf> {
         let mut candidates = Vec::new();
         if let Ok(base) = std::env::var("ProgramData") {
-            candidates.push(PathBuf::from(base).join("Iris").join("geo").join("dbip-country.mmdb"));
+            candidates.push(
+                PathBuf::from(base)
+                    .join("Iris")
+                    .join("geo")
+                    .join("dbip-country.mmdb"),
+            );
         }
-        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        {
             candidates.push(dir.join("resources").join("geo").join("dbip-country.mmdb"));
-            candidates.push(dir.join("..").join("resources").join("geo").join("dbip-country.mmdb"));
+            candidates.push(
+                dir.join("..")
+                    .join("resources")
+                    .join("geo")
+                    .join("dbip-country.mmdb"),
+            );
         }
         candidates.into_iter().find(|p| p.is_file())
     }
@@ -105,14 +125,19 @@ impl Enricher for Geo {
         else {
             return Vec::new();
         };
-        vec![Annotation::text("geo.country", "Country", name, Severity::Info)]
+        vec![Annotation::text(
+            "geo.country",
+            "Country",
+            name,
+            Severity::Info,
+        )]
     }
 }
 
 /// how often the watchlist file's mtime is re-checked at most
 const WATCHLIST_RECHECK: Duration = Duration::from_secs(5);
 
-/// flags endpoints on the user's watchlist: %ProgramData%\Iris\watchlist.txt,
+/// flags endpoints on the user's watchlist under the Iris data directory,
 /// one address or CIDR per line, `#` comments. offline by design; the file is
 /// reloaded when its modification time changes. a hit is danger-severity, so
 /// the monitor also raises an alert the first time such an endpoint is seen.
@@ -129,9 +154,8 @@ struct WatchlistState {
 
 impl Watchlist {
     pub fn new() -> Self {
-        let base = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
         Watchlist {
-            path: PathBuf::from(base).join("Iris").join("watchlist.txt"),
+            path: crate::paths::data_dir().join("watchlist.txt"),
             state: Mutex::new(WatchlistState {
                 set: IpSet::default(),
                 modified: None,
@@ -150,7 +174,9 @@ impl Watchlist {
             }
         }
         state.checked = Some(Instant::now());
-        let modified = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        let modified = std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok();
         if modified == state.modified {
             return;
         }
@@ -166,7 +192,11 @@ impl Watchlist {
 
     fn hit(&self, ip: &std::net::IpAddr) -> bool {
         self.refresh();
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).set.contains(ip)
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set
+            .contains(ip)
     }
 }
 

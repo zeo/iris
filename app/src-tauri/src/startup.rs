@@ -78,7 +78,9 @@ pub fn set_launch_at_login(enabled: bool) -> Result<(), String> {
 fn autostart_file() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+        })?;
     Some(base.join("autostart").join("iris.desktop"))
 }
 
@@ -93,13 +95,17 @@ pub fn get_launch_at_login() -> bool {
 pub fn set_launch_at_login(enabled: bool) -> Result<(), String> {
     let path = autostart_file().ok_or("no config directory")?;
     if enabled {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = std::env::var_os("APPIMAGE")
+            .map(std::path::PathBuf::from)
+            .map(Ok)
+            .unwrap_or_else(std::env::current_exe)
+            .map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let entry = format!(
-            "[Desktop Entry]\nType=Application\nName=Iris\nExec={} --tray\nX-GNOME-Autostart-enabled=true\nTerminal=false\n",
-            exe.display()
+            "[Desktop Entry]\nType=Application\nName=Iris\nExec=\"{}\" --tray\nX-GNOME-Autostart-enabled=true\nTerminal=false\n",
+            exe.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
         );
         std::fs::write(&path, entry).map_err(|e| e.to_string())?;
     } else {

@@ -124,11 +124,21 @@ pub fn catalog(store: &Arc<Mutex<Store>>) -> Vec<iris_ipc::message::PluginInfo> 
 /// record the user's consent for a plugin, clamped to what its manifest
 /// actually declares so a stale or crafted grant can never exceed the ceiling.
 /// returns whether a matching installed plugin was found.
-pub fn grant(store: &Arc<Mutex<Store>>, id: &str, caps: &[String], egress: &[String], at_ms: u64) -> bool {
+pub fn grant(
+    store: &Arc<Mutex<Store>>,
+    id: &str,
+    caps: &[String],
+    egress: &[String],
+    at_ms: u64,
+) -> bool {
     let Some((_, manifest)) = manifest::discover().into_iter().find(|(_, m)| m.id == id) else {
         return false;
     };
-    let caps: Vec<String> = caps.iter().filter(|c| manifest.declares(c)).cloned().collect();
+    let caps: Vec<String> = caps
+        .iter()
+        .filter(|c| manifest.declares(c))
+        .cloned()
+        .collect();
     let egress: Vec<String> = egress
         .iter()
         .filter(|e| manifest.egress.iter().any(|d| d == *e))
@@ -177,7 +187,10 @@ pub fn plan(store: &Arc<Mutex<Store>>) -> Vec<Arc<PluginRuntime>> {
                 continue;
             }
         };
-        let link = Arc::new(PluginLink::new(manifest.id.clone(), target_kinds(&manifest)));
+        let link = Arc::new(PluginLink::new(
+            manifest.id.clone(),
+            target_kinds(&manifest),
+        ));
         #[cfg(has_platform)]
         let token = crate::platform::random_token();
         #[cfg(not(has_platform))]
@@ -215,7 +228,11 @@ impl Supervisor {
         store: Arc<Mutex<Store>>,
         engine: Engine,
     ) -> Self {
-        Supervisor { runtimes, store, engine }
+        Supervisor {
+            runtimes,
+            store,
+            engine,
+        }
     }
 
     /// spawn every plugin child and accept their connections until shutdown. a
@@ -255,7 +272,7 @@ impl Supervisor {
         // group-own the socket so only that account can reach it (the Windows
         // side enforces the same via the pipe SDDL)
         #[cfg(target_os = "linux")]
-        crate::paths::grant_plugin_socket(iris_ipc::PLUGIN_PIPE_NAME);
+        crate::paths::grant_plugin_socket(iris_ipc::PLUGIN_PIPE_NAME)?;
         tracing::info!(pipe = iris_ipc::PLUGIN_PIPE_NAME, "plugin host listening");
         loop {
             let conn = match transport::accept(&listener).await {
@@ -279,7 +296,11 @@ impl Supervisor {
     /// alive. named hosts re-resolve on a slow cadence so a rotated record does
     /// not strand the child, while the pin never widens past the grant.
     #[cfg(has_platform)]
-    fn launch(self: Arc<Self>, pinner: Arc<crate::plugins::egress::Pinner>, rt: Arc<PluginRuntime>) {
+    fn launch(
+        self: Arc<Self>,
+        pinner: Arc<crate::plugins::egress::Pinner>,
+        rt: Arc<PluginRuntime>,
+    ) {
         tokio::spawn(async move {
             let pinned = {
                 let pinner = pinner.clone();
@@ -362,16 +383,20 @@ impl Supervisor {
 
         // the first frame must authenticate; anything else drops the pipe
         let rt = match transport::read_frame::<_, PluginMessage>(&mut recv).await? {
-            Some(PluginMessage::Register { id, protocol, token, caps }) => {
-                match self.authenticate(&id, protocol, &token, &caps) {
-                    Ok(rt) => rt,
-                    Err(reason) => {
-                        tracing::warn!(plugin = %id, "plugin registration rejected: {reason}");
-                        let _ = transport::write_frame(&mut send, &HostMessage::Rejected { reason }).await;
-                        return Ok(());
-                    }
+            Some(PluginMessage::Register {
+                id,
+                protocol,
+                token,
+                caps,
+            }) => match self.authenticate(&id, protocol, &token, &caps) {
+                Ok(rt) => rt,
+                Err(reason) => {
+                    tracing::warn!(plugin = %id, "plugin registration rejected: {reason}");
+                    let _ =
+                        transport::write_frame(&mut send, &HostMessage::Rejected { reason }).await;
+                    return Ok(());
                 }
-            }
+            },
             _ => return Ok(()),
         };
 
@@ -491,11 +516,17 @@ impl Supervisor {
                     let _ = reply.send(panel);
                 }
             }
-            PluginMessage::Enrichment { target, annotations } => {
+            PluginMessage::Enrichment {
+                target,
+                annotations,
+            } => {
                 // an unsolicited push from a stream-watching plugin; surface it
                 // to the UI the same way a resolved lookup would
                 if !annotations.is_empty() {
-                    self.engine.publish(ServerMessage::Enrichment { target, annotations });
+                    self.engine.publish(ServerMessage::Enrichment {
+                        target,
+                        annotations,
+                    });
                 }
             }
             PluginMessage::RaiseAlert { message } => {
@@ -515,7 +546,11 @@ impl Supervisor {
                 }
             }
             PluginMessage::ProposeRule { rule, reason } => {
-                if rt.effective_caps().iter().any(|c| c == "emit:rule-proposals") {
+                if rt
+                    .effective_caps()
+                    .iter()
+                    .any(|c| c == "emit:rule-proposals")
+                {
                     // recorded for review only; enforcement stays behind the
                     // elevated accept on the admin pipe
                     let proposal = self

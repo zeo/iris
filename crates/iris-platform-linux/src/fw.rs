@@ -5,11 +5,10 @@
 //! verdict thread resolves that packet to the owning process, matches it against
 //! the rule set, and returns accept or drop.
 //!
-//! the queue rules carry the `bypass` flag, so if the verdict thread is not
-//! listening packets pass rather than the machine losing all networking; and the
-//! rules are installed only while at least one rule exists, so a stock install
-//! with no rules adds zero per-packet overhead. this type is named `Wfp` to match
-//! the Windows firewall seam the service calls through.
+//! queues are fail-closed while rules are active, and worker loss terminates the
+//! engine so systemd can restart it. the rules are installed only while at least
+//! one rule exists, so a stock install with no rules adds zero per-packet overhead.
+//! this type is named `Wfp` to match the Windows firewall seam the service calls.
 
 use crate::proc::PidCache;
 use crate::sockets;
@@ -17,12 +16,13 @@ use iris_core::{AppId, Direction, EngineError, EngineResult, RuleAction};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 const TABLE: &str = "iris";
-const QUEUE_OUT: u16 = 0;
-const QUEUE_IN: u16 = 1;
+const QUEUE_OUT: u16 = 17410;
+const QUEUE_IN: u16 = 17411;
+const WORKER_COUNT: u8 = 2;
 
 /// one enforced rule: which action applies to an app in a direction
 #[derive(Clone, Copy, PartialEq)]
@@ -60,6 +60,13 @@ impl RuleMap {
 
     fn remove_id(&mut self, id: u64) {
         if let Some((key, dir)) = self.by_id.remove(&id) {
+            if self
+                .by_id
+                .values()
+                .any(|(other_key, other_dir)| other_key == &key && *other_dir == dir)
+            {
+                return;
+            }
             match dir {
                 Direction::Outbound => self.out.remove(&key),
                 Direction::Inbound => self.inbound.remove(&key),
@@ -75,6 +82,7 @@ impl RuleMap {
 pub struct Wfp {
     rules: Arc<Mutex<RuleMap>>,
     stop: Arc<AtomicBool>,
+    ready_workers: Arc<AtomicU8>,
     threads: Vec<std::thread::JoinHandle<()>>,
     next_id: AtomicU64,
     /// whether the nftables queue hook is currently installed
@@ -92,19 +100,43 @@ impl Wfp {
         ensure_modules();
         let rules = Arc::new(Mutex::new(RuleMap::default()));
         let stop = Arc::new(AtomicBool::new(false));
+        let ready_workers = Arc::new(AtomicU8::new(0));
         let mut threads = Vec::new();
-        for (queue, dir) in [(QUEUE_OUT, Direction::Outbound), (QUEUE_IN, Direction::Inbound)] {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        for (queue, dir) in [
+            (QUEUE_OUT, Direction::Outbound),
+            (QUEUE_IN, Direction::Inbound),
+        ] {
             let rules = rules.clone();
             let stop = stop.clone();
+            let ready_workers = ready_workers.clone();
+            let ready_tx = ready_tx.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("iris-verdict-{queue}"))
-                .spawn(move || verdict_loop(queue, dir, rules, stop))
+                .spawn(move || verdict_loop(queue, dir, rules, stop, ready_workers, ready_tx))
                 .map_err(|e| EngineError::Os(format!("cannot start verdict thread: {e}")))?;
             threads.push(handle);
+        }
+        drop(ready_tx);
+        for _ in 0..WORKER_COUNT {
+            match ready_rx.recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    stop.store(true, Ordering::Release);
+                    return Err(EngineError::Os(e));
+                }
+                Err(e) => {
+                    stop.store(true, Ordering::Release);
+                    return Err(EngineError::Os(format!(
+                        "verdict worker stopped during startup: {e}"
+                    )));
+                }
+            }
         }
         Ok(Wfp {
             rules,
             stop,
+            ready_workers,
             threads,
             next_id: AtomicU64::new(1),
             hooked: false,
@@ -131,6 +163,7 @@ impl Wfp {
         direction: Direction,
         action: RuleAction,
     ) -> EngineResult<Vec<u64>> {
+        self.ensure_healthy()?;
         let key = AppId::from_path(path).0;
         let enforce = match action {
             RuleAction::Block => Enforce::Block,
@@ -141,13 +174,20 @@ impl Wfp {
             let mut map = self.rules.lock().unwrap_or_else(|e| e.into_inner());
             map.insert(id, key, direction, enforce);
         }
-        self.sync_hook()?;
+        if let Err(e) = self.sync_hook() {
+            self.rules
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove_id(id);
+            return Err(e);
+        }
         Ok(vec![id])
     }
 
     /// remove the rules backing the given ids, mapping each id back to the
     /// app+direction it enforced, then re-sync the hook
     pub fn remove(&mut self, filter_ids: &[u64]) -> EngineResult<()> {
+        self.ensure_healthy()?;
         {
             let mut map = self.rules.lock().unwrap_or_else(|e| e.into_inner());
             for id in filter_ids {
@@ -160,6 +200,7 @@ impl Wfp {
     /// install the nftables queue hook when at least one rule exists, remove it
     /// when none do, so idle installs pay nothing per packet
     fn sync_hook(&mut self) -> EngineResult<()> {
+        self.ensure_healthy()?;
         let empty = self
             .rules
             .lock()
@@ -173,6 +214,19 @@ impl Wfp {
             self.hooked = true;
         }
         Ok(())
+    }
+
+    fn ensure_healthy(&self) -> EngineResult<()> {
+        if self.ready_workers.load(Ordering::Acquire) != WORKER_COUNT {
+            return Err(EngineError::Os(
+                "firewall verdict worker is unavailable".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.ready_workers.load(Ordering::Acquire) == WORKER_COUNT
     }
 }
 
@@ -195,25 +249,23 @@ fn ensure_modules() {
 }
 
 /// the ruleset installed while rules exist: queue the first packet of every new
-/// flow to userspace in each direction, with bypass so a missing listener fails
-/// open. a priority just before the standard filter hook lets iris decide before
+/// flow to userspace in each direction. a priority just before the standard
+/// filter hook lets iris decide before
 /// a distro firewall.
 fn install_table() -> EngineResult<()> {
     let ruleset = format!(
         "table inet {TABLE} {{
     chain output {{
         type filter hook output priority -10; policy accept;
-        ct state new queue num {QUEUE_OUT} bypass
+        ct state new queue num {QUEUE_OUT}
     }}
     chain input {{
         type filter hook input priority -10; policy accept;
-        ct state new queue num {QUEUE_IN} bypass
+        ct state new queue num {QUEUE_IN}
     }}
 }}
 "
     );
-    // recreate cleanly so a stale table never doubles the hook
-    remove_table();
     run_nft(&ruleset)
 }
 
@@ -253,18 +305,27 @@ fn run_nft(ruleset: &str) -> EngineResult<()> {
 /// the NFQUEUE verdict loop for one direction. resolves each queued packet to the
 /// owning executable and accepts or drops per the rule map; anything it cannot
 /// resolve is accepted, so a lookup miss never silently cuts traffic.
-fn verdict_loop(queue: u16, dir: Direction, rules: Arc<Mutex<RuleMap>>, stop: Arc<AtomicBool>) {
+fn verdict_loop(
+    queue: u16,
+    dir: Direction,
+    rules: Arc<Mutex<RuleMap>>,
+    stop: Arc<AtomicBool>,
+    ready_workers: Arc<AtomicU8>,
+    ready: std::sync::mpsc::Sender<Result<(), String>>,
+) {
     let mut nfq = match nfq::Queue::open() {
         Ok(q) => q,
         Err(e) => {
-            tracing::error!("cannot open NFQUEUE {queue}: {e}");
+            let _ = ready.send(Err(format!("cannot open NFQUEUE {queue}: {e}")));
             return;
         }
     };
     if let Err(e) = nfq.bind(queue) {
-        tracing::error!("cannot bind NFQUEUE {queue}: {e}");
+        let _ = ready.send(Err(format!("cannot bind NFQUEUE {queue}: {e}")));
         return;
     }
+    ready_workers.fetch_add(1, Ordering::Release);
+    let _ = ready.send(Ok(()));
     let mut resolver = Resolver::new();
     tracing::info!("firewall verdict thread on queue {queue} ready");
     while !stop.load(Ordering::Relaxed) {
@@ -282,6 +343,7 @@ fn verdict_loop(queue: u16, dir: Direction, rules: Arc<Mutex<RuleMap>>, stop: Ar
             break;
         }
     }
+    ready_workers.fetch_sub(1, Ordering::Release);
 }
 
 fn decide(
@@ -325,6 +387,9 @@ fn parse_tuple(pkt: &[u8]) -> Option<(IpAddr, IpAddr, u16, u16)> {
                 return None;
             }
             let ihl = ((pkt[0] & 0x0f) as usize) * 4;
+            if ihl < 20 || u16::from_be_bytes([pkt[6], pkt[7]]) & 0x1fff != 0 {
+                return None;
+            }
             let proto = pkt[9];
             if !is_l4(proto) || pkt.len() < ihl + 4 {
                 return None;
@@ -337,18 +402,15 @@ fn parse_tuple(pkt: &[u8]) -> Option<(IpAddr, IpAddr, u16, u16)> {
             Some((src, dst, sport, dport))
         }
         6 => {
-            if pkt.len() < 44 {
+            if pkt.len() < 40 {
                 return None;
             }
-            let next = pkt[6];
-            if !is_l4(next) {
-                return None;
-            }
+            let (_, offset) = ipv6_transport(pkt, pkt[6], 40)?;
             let mut s = [0u8; 16];
             let mut d = [0u8; 16];
             s.copy_from_slice(&pkt[8..24]);
             d.copy_from_slice(&pkt[24..40]);
-            let l4 = &pkt[40..];
+            let l4 = pkt.get(offset..offset + 4)?;
             let sport = u16::from_be_bytes([l4[0], l4[1]]);
             let dport = u16::from_be_bytes([l4[2], l4[3]]);
             Some((IpAddr::from(s), IpAddr::from(d), sport, dport))
@@ -357,13 +419,69 @@ fn parse_tuple(pkt: &[u8]) -> Option<(IpAddr, IpAddr, u16, u16)> {
     }
 }
 
+fn ipv6_transport(pkt: &[u8], mut next: u8, mut offset: usize) -> Option<(u8, usize)> {
+    loop {
+        match next {
+            value if is_l4(value) => return Some((value, offset)),
+            0 | 43 | 60 => {
+                let header = pkt.get(offset..offset + 2)?;
+                next = header[0];
+                offset = offset.checked_add((header[1] as usize + 1) * 8)?;
+            }
+            44 => {
+                let header = pkt.get(offset..offset + 8)?;
+                let fragment = u16::from_be_bytes([header[2], header[3]]);
+                if fragment & 0xfff8 != 0 {
+                    return None;
+                }
+                next = header[0];
+                offset = offset.checked_add(8)?;
+            }
+            51 => {
+                let header = pkt.get(offset..offset + 2)?;
+                next = header[0];
+                offset = offset.checked_add((header[1] as usize + 2) * 4)?;
+            }
+            _ => return None,
+        }
+        if offset > pkt.len() {
+            return None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod packet_tests {
+    use super::parse_tuple;
+
+    #[test]
+    fn parses_ports_after_an_ipv6_extension_header() {
+        let mut packet = vec![0u8; 52];
+        packet[0] = 0x60;
+        packet[6] = 0;
+        packet[40] = libc::IPPROTO_TCP as u8;
+        packet[41] = 0;
+        packet[48..50].copy_from_slice(&1234u16.to_be_bytes());
+        packet[50..52].copy_from_slice(&443u16.to_be_bytes());
+        let (_, _, source, destination) = parse_tuple(&packet).unwrap();
+        assert_eq!((source, destination), (1234, 443));
+    }
+
+    #[test]
+    fn rejects_noninitial_ipv4_fragments() {
+        let mut packet = vec![0u8; 24];
+        packet[0] = 0x45;
+        packet[6..8].copy_from_slice(&1u16.to_be_bytes());
+        packet[9] = libc::IPPROTO_TCP as u8;
+        assert!(parse_tuple(&packet).is_none());
+    }
+}
+
 fn is_l4(proto: u8) -> bool {
     proto == libc::IPPROTO_TCP as u8 || proto == libc::IPPROTO_UDP as u8
 }
 
-/// resolves a packet's local endpoint to the owning executable, caching the
-/// socket table and inode->pid map briefly so a burst of new connections does not
-/// dump sock_diag per packet
+/// resolves a packet's local endpoint to the owning executable
 struct Resolver {
     cache: PidCache,
     by_local: HashMap<(IpAddr, u16), u32>,
@@ -386,7 +504,7 @@ impl Resolver {
     fn refresh(&mut self) {
         self.owners = crate::proc::socket_inode_owners();
         self.by_local.clear();
-        for s in sockets::dump() {
+        for s in sockets::dump_for_attribution() {
             self.by_local
                 .entry((s.local.0, s.local.1))
                 .or_insert(s.inode as u32);
@@ -401,6 +519,14 @@ impl Resolver {
         if self.stamp.elapsed() > std::time::Duration::from_millis(200) {
             self.refresh();
         }
+        if let Some(exe) = self.cached_exe(local) {
+            return Some(exe);
+        }
+        self.refresh();
+        self.cached_exe(local)
+    }
+
+    fn cached_exe(&mut self, local: (IpAddr, u16)) -> Option<String> {
         // try the exact local address first, then any socket on the port (a
         // wildcard-bound socket shows 0.0.0.0 in sock_diag)
         let inode = self

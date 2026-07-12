@@ -1,8 +1,8 @@
 //! network pinning for sandboxed plugin children. every plugin runs as the
 //! dedicated `iris-plugin` user, so a single nftables table constrains that
 //! user's egress: default-drop, with narrow permits for exactly the remote
-//! endpoints the user consented to (plus port 53 when a plugin resolves names
-//! itself) and loopback for local IPC. the table is rebuilt whenever a plugin's
+//! endpoints the user consented to. DNS is limited to the host's configured
+//! resolvers. the table is rebuilt whenever a plugin's
 //! grant changes, and torn down when the last plugin stops. this is named
 //! `PluginNet`/`AppPin` to match the Windows egress seam.
 //!
@@ -49,11 +49,12 @@ impl PluginNet {
     /// if the plugin account is missing, so no child ever runs unpinned.
     pub fn open() -> EngineResult<PluginNet> {
         let uid = plugin_uid()?;
-        let mut net = PluginNet {
+        let net = PluginNet {
             uid,
             pins: HashMap::new(),
         };
-        net.rebuild()?;
+        remove_table();
+        net.install()?;
         Ok(net)
     }
 
@@ -64,14 +65,17 @@ impl PluginNet {
         allowed: &[SocketAddr],
         allow_dns: bool,
     ) -> EngineResult<AppPin> {
-        self.pins.insert(
+        let previous = self.pins.insert(
             exe.to_path_buf(),
             Grant {
                 allowed: allowed.to_vec(),
                 allow_dns,
             },
         );
-        self.rebuild()?;
+        if let Err(error) = self.rebuild() {
+            restore_grant(&mut self.pins, exe, previous);
+            return Err(error);
+        }
         Ok(AppPin {
             exe: exe.to_path_buf(),
         })
@@ -85,19 +89,31 @@ impl PluginNet {
         allowed: &[SocketAddr],
         allow_dns: bool,
     ) -> EngineResult<()> {
-        self.pins.insert(
+        let previous = self.pins.insert(
             exe.to_path_buf(),
             Grant {
                 allowed: allowed.to_vec(),
                 allow_dns,
             },
         );
-        self.rebuild()
+        if let Err(error) = self.rebuild() {
+            restore_grant(&mut self.pins, exe, previous);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// regenerate the whole table from the current union of grants. the plugin
     /// user's traffic is dropped by default; everything else is untouched.
     fn rebuild(&mut self) -> EngineResult<()> {
+        run_nft(&format!("flush table inet {TABLE}\n{}", self.chain_rules()))
+    }
+
+    fn install(&self) -> EngineResult<()> {
+        run_nft(&format!("add table inet {TABLE}\n{}", self.chain_rules()))
+    }
+
+    fn chain_rules(&self) -> String {
         let mut permits = String::new();
         let mut any_dns = false;
         for grant in self.pins.values() {
@@ -107,34 +123,59 @@ impl PluginNet {
                     SocketAddr::V4(v4) => ("ip", v4.ip().to_string()),
                     SocketAddr::V6(v6) => ("ip6", v6.ip().to_string()),
                 };
-                // permit both TCP and UDP to the granted endpoint
                 permits.push_str(&format!(
-                    "        {proto_fam} daddr {ip} th dport {port} accept\n",
+                    "add rule inet {TABLE} out {proto_fam} daddr {ip} th dport {port} accept\n",
                     port = addr.port()
                 ));
             }
         }
         let dns = if any_dns {
-            "        udp dport 53 accept\n        tcp dport 53 accept\n"
+            resolver_rules()
         } else {
-            ""
+            String::new()
         };
 
-        let ruleset = format!(
-            "table inet {TABLE} {{
-    chain out {{
-        type filter hook output priority -5; policy accept;
-        meta skuid != {uid} accept
-        oif \"lo\" accept
-{dns}{permits}        meta skuid {uid} drop
-    }}
-}}
+        format!(
+            "add chain inet {TABLE} out {{ type filter hook output priority -5; policy accept; }}
+add rule inet {TABLE} out meta skuid != {uid} accept
+{dns}{permits}add rule inet {TABLE} out meta skuid {uid} drop
 ",
             uid = self.uid
-        );
-        remove_table();
-        run_nft(&ruleset)
+        )
     }
+}
+
+fn restore_grant(pins: &mut HashMap<PathBuf, Grant>, exe: &Path, previous: Option<Grant>) {
+    match previous {
+        Some(grant) => {
+            pins.insert(exe.to_path_buf(), grant);
+        }
+        None => {
+            pins.remove(exe);
+        }
+    }
+}
+
+fn resolver_rules() -> String {
+    let Ok(config) = std::fs::read_to_string("/etc/resolv.conf") else {
+        return String::new();
+    };
+    config
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            if fields.next()? != "nameserver" {
+                return None;
+            }
+            fields.next()?.parse::<std::net::IpAddr>().ok()
+        })
+        .map(|ip| {
+            let family = if ip.is_ipv4() { "ip" } else { "ip6" };
+            format!(
+                "add rule inet {TABLE} out {family} daddr {ip} udp dport 53 accept\nadd rule inet {TABLE} out {family} daddr {ip} tcp dport 53 accept\n"
+            )
+        })
+        .collect()
 }
 
 impl Drop for PluginNet {
@@ -183,4 +224,35 @@ fn run_nft(ruleset: &str) -> EngineResult<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_policy_has_no_loopback_escape() {
+        let net = PluginNet {
+            uid: 997,
+            pins: HashMap::new(),
+        };
+        let rules = net.chain_rules();
+        assert!(!rules.contains("oif"));
+        assert!(rules.contains("meta skuid 997 drop"));
+    }
+
+    #[test]
+    fn granted_endpoint_is_exact() {
+        let mut pins = HashMap::new();
+        pins.insert(
+            PathBuf::from("/plugin"),
+            Grant {
+                allowed: vec!["192.0.2.4:443".parse().unwrap()],
+                allow_dns: false,
+            },
+        );
+        let rules = PluginNet { uid: 997, pins }.chain_rules();
+        assert!(rules.contains("ip daddr 192.0.2.4 th dport 443 accept"));
+        assert!(!rules.contains("dport 53"));
+    }
 }

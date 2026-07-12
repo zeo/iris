@@ -36,13 +36,17 @@ fn elevate_and_wait(exe: &std::path::Path, args: &[String]) -> Result<(), String
         .arg(exe)
         .args(args)
         .status()
-        .map_err(|e| format!("could not run pkexec: {e}"))?;
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "pkexec is not installed".to_string()
+            } else {
+                format!("could not run pkexec: {error}")
+            }
+        })?;
     match status.code() {
         Some(0) => Ok(()),
-        // pkexec exits 126 when the prompt is dismissed, 127 when auth fails
-        Some(126) | Some(127) => {
-            Err("could not elevate (the prompt was declined)".to_string())
-        }
+        Some(126) => Err("the authentication prompt was dismissed".to_string()),
+        Some(127) => Err("authorization failed".to_string()),
         Some(code) => Err(format!("the engine reported failure (exit code {code})")),
         None => Err("the elevated process was terminated".to_string()),
     }

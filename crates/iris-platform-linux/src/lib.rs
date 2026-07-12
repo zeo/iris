@@ -3,7 +3,7 @@
 //! the target and calls the same names: sock_diag connection enumeration and
 //! per-socket byte accounting, DNS name capture off the wire, nftables + a
 //! NFQUEUE verdict thread for allow/block rules, per-uid egress pinning for
-//! sandboxed plugins, adapter classification from sysfs, and a setuid+seccomp
+//! sandboxed plugins, adapter classification from sysfs, and a restricted
 //! restricted spawn. everything here is `cfg(target_os = "linux")`; the crate is
 //! empty on other targets so the service can depend on it unconditionally.
 

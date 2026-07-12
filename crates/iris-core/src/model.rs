@@ -53,15 +53,18 @@ impl AdapterKind {
     }
 }
 
-/// stable identity of an application: its on-disk image path, lowercased and
-/// normalized. the firewall keys rules on this and history rows reference it.
+/// stable identity of an application image
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AppId(pub String);
 
 impl AppId {
-    /// normalize a raw image path into a stable id (lowercase, forward-agnostic)
+    /// normalize a raw image path according to the host filesystem
     pub fn from_path(path: &str) -> Self {
-        AppId(path.trim().to_lowercase())
+        let path = path.trim();
+        #[cfg(windows)]
+        return AppId(path.to_lowercase());
+        #[cfg(not(windows))]
+        return AppId(path.to_owned());
     }
 
     pub fn as_str(&self) -> &str {
@@ -75,6 +78,35 @@ impl AppId {
             .next()
             .filter(|s| !s.is_empty())
             .unwrap_or(&self.0)
+    }
+}
+
+#[cfg(test)]
+mod app_id_tests {
+    use super::AppId;
+
+    #[test]
+    fn trims_image_paths() {
+        assert_eq!(
+            AppId::from_path("  /opt/Iris/app  ").as_str(),
+            normalized("/opt/Iris/app")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn preserves_case_on_case_sensitive_hosts() {
+        assert_ne!(
+            AppId::from_path("/opt/Foo/app"),
+            AppId::from_path("/opt/foo/app")
+        );
+    }
+
+    fn normalized(_path: &str) -> &str {
+        #[cfg(windows)]
+        return "/opt/iris/app";
+        #[cfg(not(windows))]
+        return _path;
     }
 }
 

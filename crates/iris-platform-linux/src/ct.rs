@@ -1,10 +1,9 @@
 //! conntrack (ctnetlink) access: a flow dump with byte counters for UDP
-//! accounting, and a single-flow delete used as the connection-kill fallback on
-//! kernels without SOCK_DESTROY. TCP byte accounting comes from tcp_info in
+//! accounting. TCP byte accounting comes from tcp_info in
 //! [`crate::sockets`]; conntrack fills the UDP gap, where per-socket counters do
 //! not exist. all of this degrades to a no-op if conntrack is not present.
 
-use crate::netlink::{self, NlSocket, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST};
+use crate::netlink::{self, NlSocket, NLM_F_DUMP, NLM_F_REQUEST};
 use iris_core::Protocol;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -12,7 +11,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 const NETLINK_NETFILTER: libc::c_int = 12;
 const NFNL_SUBSYS_CTNETLINK: u16 = 1;
 const IPCTNL_MSG_CT_GET: u16 = 1;
-const IPCTNL_MSG_CT_DELETE: u16 = 2;
 
 // top-level conntrack attributes
 const CTA_TUPLE_ORIG: u16 = 1;
@@ -189,74 +187,4 @@ fn v6(b: &[u8]) -> IpAddr {
     let mut o = [0u8; 16];
     o.copy_from_slice(&b[0..16]);
     IpAddr::V6(Ipv6Addr::from(o))
-}
-
-/// delete the conntrack entry for one flow, identified by its original tuple.
-/// used as the kill fallback when the kernel has no SOCK_DESTROY.
-pub fn delete_flow(local: (IpAddr, u16), remote: (IpAddr, u16), ipproto: u8) -> io::Result<bool> {
-    let sock = NlSocket::open(NETLINK_NETFILTER)?;
-    sock.send(&build_delete(local, remote, ipproto))?;
-    match sock.recv_dump(|_, _| {}) {
-        Ok(()) => Ok(true),
-        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => Ok(false),
-        Err(e) => Err(e),
-    }
-}
-
-fn build_delete(local: (IpAddr, u16), remote: (IpAddr, u16), ipproto: u8) -> Vec<u8> {
-    let family = if local.0.is_ipv4() {
-        libc::AF_INET
-    } else {
-        libc::AF_INET6
-    } as u8;
-
-    let mut body = Vec::new();
-    // nfgenmsg
-    body.push(family);
-    body.push(0); // version
-    body.extend_from_slice(&0u16.to_ne_bytes()); // res_id
-
-    // CTA_TUPLE_ORIG { CTA_TUPLE_IP { src, dst }, CTA_TUPLE_PROTO { num, sport, dport } }
-    let mut ip = Vec::new();
-    match (local.0, remote.0) {
-        (IpAddr::V4(s), IpAddr::V4(d)) => {
-            push_attr(&mut ip, CTA_IP_V4_SRC, &s.octets());
-            push_attr(&mut ip, CTA_IP_V4_DST, &d.octets());
-        }
-        (IpAddr::V6(s), IpAddr::V6(d)) => {
-            push_attr(&mut ip, CTA_IP_V6_SRC, &s.octets());
-            push_attr(&mut ip, CTA_IP_V6_DST, &d.octets());
-        }
-        _ => {}
-    }
-    let mut proto = Vec::new();
-    push_attr(&mut proto, CTA_PROTO_NUM, &[ipproto]);
-    push_attr(&mut proto, CTA_PROTO_SRC_PORT, &local.1.to_be_bytes());
-    push_attr(&mut proto, CTA_PROTO_DST_PORT, &remote.1.to_be_bytes());
-
-    let mut tuple = Vec::new();
-    push_attr(&mut tuple, CTA_TUPLE_IP | NLA_F_NESTED, &ip);
-    push_attr(&mut tuple, CTA_TUPLE_PROTO | NLA_F_NESTED, &proto);
-    push_attr(&mut body, CTA_TUPLE_ORIG | NLA_F_NESTED, &tuple);
-
-    let total = 16 + body.len();
-    let mut buf = Vec::with_capacity(netlink::align4(total));
-    buf.extend_from_slice(&(total as u32).to_ne_bytes());
-    buf.extend_from_slice(&ct_msg_type(IPCTNL_MSG_CT_DELETE).to_ne_bytes());
-    buf.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes());
-    buf.extend_from_slice(&0u32.to_ne_bytes()); // seq
-    buf.extend_from_slice(&0u32.to_ne_bytes()); // pid
-    buf.extend_from_slice(&body);
-    buf
-}
-
-/// append one rtattr (type, payload) with 4-byte padding
-fn push_attr(buf: &mut Vec<u8>, ty: u16, payload: &[u8]) {
-    let len = 4 + payload.len();
-    buf.extend_from_slice(&(len as u16).to_ne_bytes());
-    buf.extend_from_slice(&ty.to_ne_bytes());
-    buf.extend_from_slice(payload);
-    while buf.len() % 4 != 0 {
-        buf.push(0);
-    }
 }

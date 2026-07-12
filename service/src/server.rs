@@ -20,6 +20,8 @@ pub async fn serve(
     panels: Arc<PanelHub>,
 ) -> anyhow::Result<()> {
     let listener = transport::listen()?;
+    #[cfg(target_os = "linux")]
+    crate::paths::grant_telemetry_socket(iris_ipc::PIPE_NAME)?;
     tracing::info!(pipe = iris_ipc::PIPE_NAME, "engine listening");
     // cap concurrent clients so a local process cannot exhaust the engine by
     // opening connections in a loop; a real deployment has one UI plus headroom
@@ -40,6 +42,14 @@ pub async fn serve(
                 continue;
             }
         };
+        #[cfg(target_os = "linux")]
+        if !authorized_linux_peer(&conn)? {
+            tracing::warn!(
+                uid = transport::peer_euid(&conn)?,
+                "refusing unauthorized client"
+            );
+            continue;
+        }
         let permit = match Arc::clone(&slots).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -60,6 +70,34 @@ pub async fn serve(
             }
         });
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_auth_tests {
+    use super::authorized_linux_uid;
+
+    #[test]
+    fn admits_root_and_the_installed_desktop_account() {
+        assert!(authorized_linux_uid(0, 1000));
+        assert!(authorized_linux_uid(1000, 1000));
+    }
+
+    #[test]
+    fn rejects_plugins_and_unrelated_accounts() {
+        assert!(!authorized_linux_uid(997, 1000));
+        assert!(!authorized_linux_uid(1001, 1000));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn authorized_linux_peer(stream: &transport::Stream) -> io::Result<bool> {
+    let uid = transport::peer_euid(stream)?;
+    Ok(authorized_linux_uid(uid, crate::paths::desktop_uid()?))
+}
+
+#[cfg(target_os = "linux")]
+fn authorized_linux_uid(peer: u32, desktop: u32) -> bool {
+    peer == 0 || peer == desktop
 }
 
 /// one client session: negotiate, then multiplex inbound commands against the
@@ -327,26 +365,31 @@ async fn handle_admin(
             ClientMessage::AddRule { req, rule } => {
                 let result = rules
                     .lock()
-                    .map(|mut r| r.add(rule))
+                    .map_err(|_| anyhow::anyhow!("rule store unavailable"))
+                    .and_then(|mut r| r.add(rule))
                     .map(Reply::RuleAdded)
-                    .unwrap_or_else(|_| Reply::Error("rule store unavailable".into()));
+                    .unwrap_or_else(|e| Reply::Error(e.to_string()));
                 reply(&mut send, req, result).await?;
             }
             ClientMessage::RemoveRule { req, id } => {
-                let removed = rules.lock().map(|mut r| r.remove(id)).unwrap_or(false);
-                let result = if removed {
-                    Reply::Ok
-                } else {
-                    Reply::Error("no rule with that id".into())
+                let result = match rules.lock() {
+                    Ok(mut rules) => match rules.remove(id) {
+                        Ok(true) => Reply::Ok,
+                        Ok(false) => Reply::Error("no rule with that id".into()),
+                        Err(e) => Reply::Error(e.to_string()),
+                    },
+                    Err(_) => Reply::Error("rule store unavailable".into()),
                 };
                 reply(&mut send, req, result).await?;
             }
             ClientMessage::SetRuleEnabled { req, id, enabled } => {
-                let updated = rules.lock().ok().and_then(|mut r| r.set_enabled(id, enabled));
-                let result = if updated.is_some() {
-                    Reply::Ok
-                } else {
-                    Reply::Error("no rule with that id".into())
+                let result = match rules.lock() {
+                    Ok(mut rules) => match rules.set_enabled(id, enabled) {
+                        Ok(Some(_)) => Reply::Ok,
+                        Ok(None) => Reply::Error("no rule with that id".into()),
+                        Err(e) => Reply::Error(e.to_string()),
+                    },
+                    Err(_) => Reply::Error("rule store unavailable".into()),
                 };
                 reply(&mut send, req, result).await?;
             }
@@ -360,9 +403,10 @@ async fn handle_admin(
                 let result = match settled {
                     Some(p) if accept => rules
                         .lock()
-                        .map(|mut r| r.add(p.rule))
+                        .map_err(|_| anyhow::anyhow!("rule store unavailable"))
+                        .and_then(|mut r| r.add(p.rule))
                         .map(Reply::RuleAdded)
-                        .unwrap_or_else(|_| Reply::Error("rule store unavailable".into())),
+                        .unwrap_or_else(|e| Reply::Error(e.to_string())),
                     Some(_) => Reply::Ok,
                     None => Reply::Error("no pending proposal with that id".into()),
                 };
@@ -401,7 +445,11 @@ async fn negotiate(
             )
             .await?;
             if protocol != PROTOCOL_VERSION {
-                tracing::warn!(client = protocol, ours = PROTOCOL_VERSION, "protocol mismatch");
+                tracing::warn!(
+                    client = protocol,
+                    ours = PROTOCOL_VERSION,
+                    "protocol mismatch"
+                );
             }
             Ok(protocol == PROTOCOL_VERSION)
         }
@@ -409,11 +457,7 @@ async fn negotiate(
     }
 }
 
-async fn reply(
-    send: &mut transport::SendHalf,
-    req: u64,
-    result: Reply,
-) -> io::Result<()> {
+async fn reply(send: &mut transport::SendHalf, req: u64, result: Reply) -> io::Result<()> {
     transport::write_frame(send, &ServerMessage::Reply { req, result }).await
 }
 

@@ -63,7 +63,10 @@ impl PluginLink {
     }
 
     fn sender(&self) -> Option<mpsc::Sender<ProxyRequest>> {
-        self.sender.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.sender
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// fetch the plugin's panel view-model. blocking (a pipe round-trip); run
@@ -75,7 +78,10 @@ impl PluginLink {
         }
         let sender = self.sender()?;
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        if sender.blocking_send(ProxyRequest::Panel { reply: reply_tx }).is_err() {
+        if sender
+            .blocking_send(ProxyRequest::Panel { reply: reply_tx })
+            .is_err()
+        {
             return None;
         }
         reply_rx.recv_timeout(REQUEST_TIMEOUT).ok().flatten()

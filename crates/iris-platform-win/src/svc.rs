@@ -41,7 +41,8 @@ impl Default for ServiceMap {
 
 fn enumerate() -> Option<HashMap<u32, Vec<String>>> {
     unsafe {
-        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ENUMERATE_SERVICE).ok()?;
+        let scm =
+            OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ENUMERATE_SERVICE).ok()?;
         let mut needed = 0u32;
         let mut count = 0u32;
         let mut resume = 0u32;

@@ -4,7 +4,7 @@
 //! their app, and each process carries its own online/offline lifecycle: one
 //! that stops connecting enters a grace window (shown red) before it is dropped.
 
-use iris_core::{AppId, Aggregator, AppSample, ByteCounts, Conn, Flushed, ProcSample, StatsTick};
+use iris_core::{Aggregator, AppId, AppSample, ByteCounts, Conn, Flushed, ProcSample, StatsTick};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -94,7 +94,8 @@ impl Tracker {
             hist.retain(|_, (_, seen)| now.saturating_sub(*seen) <= CONN_GRACE_MS);
         }
         self.conn_history.retain(|_, h| !h.is_empty());
-        self.pid_path.retain(|pid, _| self.conn_history.contains_key(pid));
+        self.pid_path
+            .retain(|pid, _| self.conn_history.contains_key(pid));
 
         self.conn_history
             .iter()
@@ -124,13 +125,19 @@ impl Tracker {
                 a.touch(*pid, path);
             }
         }
-        let Flushed { procs: pid_samples, adapters } = lock_agg(&self.agg).flush(now);
+        let Flushed {
+            procs: pid_samples,
+            adapters,
+        } = lock_agg(&self.agg).flush(now);
 
         let mut apps: HashMap<String, AppAcc> = HashMap::new();
         let mut expired: Vec<u32> = Vec::new();
 
         for ps in pid_samples {
-            let conns = conns_by_pid.get(&ps.pid).map(|(_, c)| c.clone()).unwrap_or_default();
+            let conns = conns_by_pid
+                .get(&ps.pid)
+                .map(|(_, c)| c.clone())
+                .unwrap_or_default();
             let active = !conns.is_empty() || ps.rate_sent > 0 || ps.rate_recv > 0;
 
             if active {

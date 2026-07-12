@@ -8,14 +8,14 @@
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
+use windows::core::PCWSTR;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
-use windows::core::PCWSTR;
 use windows::Win32::Security::{
-    CreateRestrictedToken, CreateWellKnownSid, GetLengthSid, SetTokenInformation, TokenIntegrityLevel,
-    DISABLE_MAX_PRIVILEGE, LUA_TOKEN, PSID, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT,
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-    WinBuiltinAdministratorsSid, WinLowLabelSid,
+    CreateRestrictedToken, CreateWellKnownSid, GetLengthSid, SetTokenInformation,
+    TokenIntegrityLevel, WinBuiltinAdministratorsSid, WinLowLabelSid, DISABLE_MAX_PRIVILEGE,
+    LUA_TOKEN, PSID, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows::Win32::System::SystemServices::{SE_GROUP_INTEGRITY, SE_GROUP_USE_FOR_DENY_ONLY};
 use windows::Win32::System::Threading::{
@@ -78,7 +78,9 @@ fn wide(s: &str) -> Vec<u16> {
 /// back to the service. falls back to an empty string only if the OS RNG fails,
 /// which the caller treats as a spawn failure.
 pub fn random_token() -> String {
-    use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+    use windows::Win32::Security::Cryptography::{
+        BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    };
     let mut bytes = [0u8; 32];
     let status = unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
     if status.0 != 0 {
@@ -96,10 +98,7 @@ pub fn random_token() -> String {
 /// spawn `exe` under a restricted low-integrity token, injecting `extra_env`
 /// (e.g. the plugin auth token) into the child environment. handles are not
 /// inherited: the child reaches iris only by connecting to the named pipe.
-pub fn spawn_restricted(
-    exe: &Path,
-    extra_env: &[(String, String)],
-) -> io::Result<RestrictedChild> {
+pub fn spawn_restricted(exe: &Path, extra_env: &[(String, String)]) -> io::Result<RestrictedChild> {
     unsafe {
         // start from the service's own primary token. the restricted token
         // inherits this handle's access, and lowering its integrity later needs
@@ -164,7 +163,12 @@ pub fn spawn_restricted(
         // run the child from its own directory so it finds sibling files
         let cwd: Vec<u16> = exe
             .parent()
-            .map(|p| p.as_os_str().encode_wide().chain(std::iter::once(0)).collect())
+            .map(|p| {
+                p.as_os_str()
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect()
+            })
             .unwrap_or_else(|| vec![0]);
 
         // a low-integrity token cannot open the process's window station and
@@ -214,9 +218,10 @@ unsafe fn allow_low_il_on_desktop() {
     use windows::Win32::System::StationsAndDesktops::{GetProcessWindowStation, GetThreadDesktop};
     use windows::Win32::System::Threading::GetCurrentThreadId;
 
-    let (Ok(station), Ok(desktop)) =
-        (GetProcessWindowStation(), GetThreadDesktop(GetCurrentThreadId()))
-    else {
+    let (Ok(station), Ok(desktop)) = (
+        GetProcessWindowStation(),
+        GetThreadDesktop(GetCurrentThreadId()),
+    ) else {
         tracing::warn!("no window station/desktop to label for the plugin child");
         return;
     };
@@ -258,8 +263,7 @@ unsafe fn set_low_integrity(token: HANDLE) -> io::Result<()> {
             Attributes: SE_GROUP_INTEGRITY as u32,
         },
     };
-    let size =
-        std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32 + GetLengthSid(low);
+    let size = std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32 + GetLengthSid(low);
     SetTokenInformation(
         token,
         TokenIntegrityLevel,

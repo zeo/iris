@@ -34,7 +34,9 @@ impl PinState {
 impl Pinner {
     pub fn open() -> Result<Pinner, String> {
         match PluginNet::open() {
-            Ok(net) => Ok(Pinner { net: Mutex::new(net) }),
+            Ok(net) => Ok(Pinner {
+                net: Mutex::new(net),
+            }),
             Err(e) => Err(e.to_string()),
         }
     }
@@ -53,7 +55,13 @@ impl Pinner {
             .unwrap_or_else(|e| e.into_inner())
             .pin(&exe, &allowed, allow_dns)
             .map_err(|e| e.to_string())?;
-        Ok(PinState { pin, exe, entries, addrs, allow_dns })
+        Ok(PinState {
+            pin,
+            exe,
+            entries,
+            addrs,
+            allow_dns,
+        })
     }
 
     /// re-resolve and swap the permits when the endpoint set moved; returns

@@ -9,8 +9,9 @@ use iris_core::{Conn, ConnState, Direction, Endpoint, Protocol};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use windows::Win32::NetworkManagement::IpHelper::{
-    GetExtendedTcpTable, SetTcpEntry, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_LH, MIB_TCPTABLE_OWNER_PID,
-    MIB_TCP_STATE_CLOSED, MIB_TCP_STATE_ESTAB, MIB_TCP_STATE_LISTEN, TCP_TABLE_OWNER_PID_ALL,
+    GetExtendedTcpTable, SetTcpEntry, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_LH,
+    MIB_TCPTABLE_OWNER_PID, MIB_TCP_STATE_CLOSED, MIB_TCP_STATE_ESTAB, MIB_TCP_STATE_LISTEN,
+    TCP_TABLE_OWNER_PID_ALL,
 };
 use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
@@ -195,7 +196,8 @@ unsafe fn tcp4(out: &mut Vec<RawConn>) {
     let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
     let rows = std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize);
     for r in rows {
-        if r.dwState == MIB_TCP_STATE_LISTEN.0 as u32 || r.dwState == MIB_TCP_STATE_CLOSED.0 as u32 {
+        if r.dwState == MIB_TCP_STATE_LISTEN.0 as u32 || r.dwState == MIB_TCP_STATE_CLOSED.0 as u32
+        {
             continue;
         }
         out.push(RawConn {
@@ -219,7 +221,8 @@ unsafe fn tcp6(out: &mut Vec<RawConn>) {
     let table = &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID);
     let rows = std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize);
     for r in rows {
-        if r.dwState == MIB_TCP_STATE_LISTEN.0 as u32 || r.dwState == MIB_TCP_STATE_CLOSED.0 as u32 {
+        if r.dwState == MIB_TCP_STATE_LISTEN.0 as u32 || r.dwState == MIB_TCP_STATE_CLOSED.0 as u32
+        {
             continue;
         }
         out.push(RawConn {
@@ -234,4 +237,3 @@ unsafe fn tcp6(out: &mut Vec<RawConn>) {
         });
     }
 }
-

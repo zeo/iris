@@ -110,9 +110,7 @@ fn enumerate() -> HashMap<IpAddr, AdapterKind> {
                 Some(ip) => ip,
                 None => continue,
             };
-            let kind = *kinds
-                .entry(name.clone())
-                .or_insert_with(|| classify(&name));
+            let kind = *kinds.entry(name.clone()).or_insert_with(|| classify(&name));
             map.insert(ip, kind);
         }
         libc::freeifaddrs(head);
@@ -124,7 +122,9 @@ unsafe fn sockaddr_ip(sa: *const libc::sockaddr) -> Option<IpAddr> {
     match (*sa).sa_family as i32 {
         libc::AF_INET => {
             let sin = &*(sa as *const libc::sockaddr_in);
-            Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))))
+            Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(
+                sin.sin_addr.s_addr,
+            ))))
         }
         libc::AF_INET6 => {
             let sin6 = &*(sa as *const libc::sockaddr_in6);

@@ -120,8 +120,7 @@ impl Aggregator {
     /// over the window since the last flush, then reset the window
     pub fn flush(&mut self, now_ms: u64) -> Flushed {
         let elapsed_ms = now_ms.saturating_sub(self.window_start_ms).max(1);
-        let per_sec =
-            |bytes: u64| -> u64 { ((bytes as u128 * 1000) / elapsed_ms as u128) as u64 };
+        let per_sec = |bytes: u64| -> u64 { ((bytes as u128 * 1000) / elapsed_ms as u128) as u64 };
 
         let mut procs = Vec::with_capacity(self.procs.len());
         for (pid, accum) in self.procs.iter_mut() {

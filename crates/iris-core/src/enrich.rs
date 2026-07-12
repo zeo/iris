@@ -209,7 +209,10 @@ mod tests {
         assert_eq!(ip_scope(&"::1".parse().unwrap()), "Loopback");
         assert_eq!(ip_scope(&"fe80::1".parse().unwrap()), "Link-local");
         assert_eq!(ip_scope(&"fc00::1".parse().unwrap()), "Private network");
-        assert_eq!(ip_scope(&"2606:4700:4700::1111".parse().unwrap()), "Public internet");
+        assert_eq!(
+            ip_scope(&"2606:4700:4700::1111".parse().unwrap()),
+            "Public internet"
+        );
     }
 
     #[test]
@@ -217,7 +220,10 @@ mod tests {
         let (set, rejected) = IpSet::parse(
             "# c2 ranges\n203.0.113.7\n198.51.100.0/24  # documentation net\n2001:db8::/32\n\nnot-an-ip\n10.0.0.1/40\n",
         );
-        assert_eq!(rejected, vec!["not-an-ip".to_string(), "10.0.0.1/40".to_string()]);
+        assert_eq!(
+            rejected,
+            vec!["not-an-ip".to_string(), "10.0.0.1/40".to_string()]
+        );
         assert_eq!(set.len(), 3);
         assert!(set.contains(&"203.0.113.7".parse().unwrap()));
         assert!(!set.contains(&"203.0.113.8".parse().unwrap()));

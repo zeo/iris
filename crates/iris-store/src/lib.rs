@@ -151,7 +151,9 @@ impl Store {
     /// upgraded install evolves the existing db in place rather than silently
     /// running against the old shape.
     fn migrate(&self) -> rusqlite::Result<()> {
-        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 1 {
             self.conn.execute_batch(SCHEMA)?;
         }
@@ -262,24 +264,25 @@ impl Store {
         let to = q.to_ms as i64;
 
         let mut out = Vec::new();
-        let run = |sql: &str, extra: &[&dyn rusqlite::ToSql]| -> rusqlite::Result<Vec<UsageBucket>> {
-            let mut stmt = self.conn.prepare(sql)?;
-            let rows = stmt.query_map(extra, |r| {
-                let path: String = r.get(0)?;
-                let bucket: i64 = r.get(1)?;
-                let sent: i64 = r.get(2)?;
-                let recv: i64 = r.get(3)?;
-                Ok(UsageBucket {
-                    app: AppId(path),
-                    bucket_start_ms: bucket as u64,
-                    bytes: iris_core::ByteCounts {
-                        sent: sent as u64,
-                        recv: recv as u64,
-                    },
-                })
-            })?;
-            rows.collect()
-        };
+        let run =
+            |sql: &str, extra: &[&dyn rusqlite::ToSql]| -> rusqlite::Result<Vec<UsageBucket>> {
+                let mut stmt = self.conn.prepare(sql)?;
+                let rows = stmt.query_map(extra, |r| {
+                    let path: String = r.get(0)?;
+                    let bucket: i64 = r.get(1)?;
+                    let sent: i64 = r.get(2)?;
+                    let recv: i64 = r.get(3)?;
+                    Ok(UsageBucket {
+                        app: AppId(path),
+                        bucket_start_ms: bucket as u64,
+                        bytes: iris_core::ByteCounts {
+                            sent: sent as u64,
+                            recv: recv as u64,
+                        },
+                    })
+                })?;
+                rows.collect()
+            };
 
         // cap the number of returned rows so a wide query cannot dump the whole
         // history into memory / the pipe at once
@@ -391,10 +394,10 @@ impl Store {
     }
 
     pub fn ack_alert(&self, id: i64) {
-        if let Err(e) = self
-            .conn
-            .execute("UPDATE alerts SET acknowledged = 1 WHERE id = ?1", params![id])
-        {
+        if let Err(e) = self.conn.execute(
+            "UPDATE alerts SET acknowledged = 1 WHERE id = ?1",
+            params![id],
+        ) {
             tracing::warn!("could not ack alert {id}: {e}");
         }
     }
@@ -501,7 +504,13 @@ impl Store {
                 "SELECT id, reason, at_ms FROM rule_proposals
                  WHERE source = ?1 AND rule = ?2 AND state = 'pending'",
                 params![source, rule_json],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()
             .ok()
@@ -577,7 +586,14 @@ impl Store {
                 ) else {
                     continue;
                 };
-                out.push(RuleProposal { id, source, rule, reason, at_ms: at_ms as u64, state });
+                out.push(RuleProposal {
+                    id,
+                    source,
+                    rule,
+                    reason,
+                    at_ms: at_ms as u64,
+                    state,
+                });
             }
         }
         out
@@ -587,7 +603,11 @@ impl Store {
     /// accepting caller has the rule to apply. None when it does not exist or
     /// was already settled, so a race between two reviewers resolves once.
     pub fn resolve_proposal(&self, id: i64, accept: bool) -> Option<RuleProposal> {
-        let state = if accept { ProposalState::Accepted } else { ProposalState::Rejected };
+        let state = if accept {
+            ProposalState::Accepted
+        } else {
+            ProposalState::Rejected
+        };
         let updated = self
             .conn
             .execute(
@@ -614,14 +634,16 @@ impl Store {
             .ok()
             .flatten()
             .and_then(|(source, rule_json, reason, at_ms)| {
-                serde_json::from_str::<Rule>(&rule_json).ok().map(|rule| RuleProposal {
-                    id,
-                    source,
-                    rule,
-                    reason,
-                    at_ms: at_ms as u64,
-                    state,
-                })
+                serde_json::from_str::<Rule>(&rule_json)
+                    .ok()
+                    .map(|rule| RuleProposal {
+                        id,
+                        source,
+                        rule,
+                        reason,
+                        at_ms: at_ms as u64,
+                        state,
+                    })
             })
     }
 
@@ -718,7 +740,9 @@ mod tests {
         assert!(s.resolve_proposal(p.id, false).is_none());
 
         // once settled, the same rule may be proposed afresh
-        let fresh = s.insert_proposal("Rep", &rule, "back again", 3_000).unwrap();
+        let fresh = s
+            .insert_proposal("Rep", &rule, "back again", 3_000)
+            .unwrap();
         assert_ne!(fresh.id, p.id);
         assert!(s.resolve_proposal(fresh.id, false).is_some());
 
@@ -738,7 +762,12 @@ mod tests {
     #[test]
     fn alerts_roundtrip_and_ack() {
         let s = Store::open_in_memory().unwrap();
-        let a = s.insert_alert(&AlertKind::NewApp { app: AppId("c:/x.exe".into()) }, 500);
+        let a = s.insert_alert(
+            &AlertKind::NewApp {
+                app: AppId("c:/x.exe".into()),
+            },
+            500,
+        );
         assert_eq!(s.list_alerts(true).len(), 1);
         s.ack_alert(a.id);
         assert_eq!(s.list_alerts(true).len(), 0);

@@ -45,7 +45,11 @@ fn build_op(args: &[String]) -> anyhow::Result<Op> {
         Some("--rule-enable") => {
             let id = parse_id(args.get(1))?;
             let enabled = matches!(args.get(2).map(String::as_str), Some("true") | Some("1"));
-            Ok(Op::Single(ClientMessage::SetRuleEnabled { req: 1, id, enabled }))
+            Ok(Op::Single(ClientMessage::SetRuleEnabled {
+                req: 1,
+                id,
+                enabled,
+            }))
         }
         Some("--rule-import") => {
             let path = args.get(1).context("rule-import: missing file path")?;
@@ -53,7 +57,11 @@ fn build_op(args: &[String]) -> anyhow::Result<Op> {
         }
         Some("--proposal-accept") => {
             let id = parse_id(args.get(1))?;
-            Ok(Op::Single(ClientMessage::ResolveProposal { req: 1, id, accept: true }))
+            Ok(Op::Single(ClientMessage::ResolveProposal {
+                req: 1,
+                id,
+                accept: true,
+            }))
         }
         _ => bail!("unknown rule command"),
     }
@@ -71,7 +79,8 @@ fn read_backup(path: &Path) -> anyhow::Result<Vec<BackupRule>> {
 }
 
 fn parse_id(s: Option<&String>) -> anyhow::Result<i64> {
-    s.and_then(|s| s.parse().ok()).context("expected a numeric rule id")
+    s.and_then(|s| s.parse().ok())
+        .context("expected a numeric rule id")
 }
 
 fn parse_direction(s: Option<&str>) -> anyhow::Result<Direction> {
@@ -96,7 +105,13 @@ async fn exec(op: Op) -> anyhow::Result<()> {
         .context("could not open the admin channel (is the engine running?)")?;
     let (mut recv, mut send) = transport::split(stream);
 
-    transport::write_frame(&mut send, &ClientMessage::Hello { protocol: PROTOCOL_VERSION }).await?;
+    transport::write_frame(
+        &mut send,
+        &ClientMessage::Hello {
+            protocol: PROTOCOL_VERSION,
+        },
+    )
+    .await?;
     match transport::read_frame::<_, ServerMessage>(&mut recv).await? {
         Some(ServerMessage::Welcome { protocol, .. }) if protocol == PROTOCOL_VERSION => {}
         _ => bail!("engine protocol mismatch"),
@@ -112,8 +127,12 @@ async fn exec(op: Op) -> anyhow::Result<()> {
             // so re-importing a backup converges instead of piling up duplicates
             for entry in entries {
                 let rule = entry.to_rule();
-                let added =
-                    request(&mut recv, &mut send, ClientMessage::AddRule { req: 1, rule }).await?;
+                let added = request(
+                    &mut recv,
+                    &mut send,
+                    ClientMessage::AddRule { req: 1, rule },
+                )
+                .await?;
                 let stored = match added {
                     Reply::RuleAdded(stored) => stored,
                     Reply::Error(e) => bail!("{}: {e}", entry.app),

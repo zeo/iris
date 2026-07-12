@@ -80,9 +80,18 @@ pub fn install() -> anyhow::Result<()> {
 /// failure here never blocks the install.
 unsafe fn configure_recovery(svc: SC_HANDLE) {
     let mut actions = [
-        SC_ACTION { Type: SC_ACTION_RESTART, Delay: 5_000 },
-        SC_ACTION { Type: SC_ACTION_RESTART, Delay: 10_000 },
-        SC_ACTION { Type: SC_ACTION_RESTART, Delay: 30_000 },
+        SC_ACTION {
+            Type: SC_ACTION_RESTART,
+            Delay: 5_000,
+        },
+        SC_ACTION {
+            Type: SC_ACTION_RESTART,
+            Delay: 10_000,
+        },
+        SC_ACTION {
+            Type: SC_ACTION_RESTART,
+            Delay: 30_000,
+        },
     ];
     let failure_actions = SERVICE_FAILURE_ACTIONSW {
         dwResetPeriod: 86_400,

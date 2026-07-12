@@ -74,7 +74,9 @@ impl Monitor {
             .named("iris-net".to_string())
             .enable(net_provider)
             .start_and_process()
-            .map_err(|e| anyhow::anyhow!("failed to start ETW network trace (admin required): {e:?}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!("failed to start ETW network trace (admin required): {e:?}")
+            })?;
         tracing::info!("ETW network trace running");
 
         // DNS names, best effort; the connection view still works on raw ip

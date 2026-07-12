@@ -165,6 +165,8 @@ mod tests {
         assert!(parse_backup("{\"app\":\"x\"}").is_err());
         assert!(parse_backup("[]").is_err());
         let blank = r#"[{"app":"  ","direction":"outbound","action":"block"}]"#;
-        assert!(parse_backup(blank).unwrap_err().contains("empty application path"));
+        assert!(parse_backup(blank)
+            .unwrap_err()
+            .contains("empty application path"));
     }
 }

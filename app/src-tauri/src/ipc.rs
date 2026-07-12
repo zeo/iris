@@ -62,7 +62,12 @@ pub struct Commander(pub mpsc::Sender<Command>);
 
 #[tauri::command]
 pub fn engine_status(state: tauri::State<'_, StatusState>) -> Status {
-    state.inner().0.lock().map(|s| s.clone()).unwrap_or_default()
+    state
+        .inner()
+        .0
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
 }
 
 async fn dispatch(app: &AppHandle, cmd: EngineCmd) -> Result<Reply, String> {
@@ -125,7 +130,12 @@ pub async fn kill_connection(
     remote_addr: String,
     remote_port: u16,
 ) -> Result<(), String> {
-    match dispatch(&app, EngineCmd::KillConnection(local_port, remote_addr, remote_port)).await? {
+    match dispatch(
+        &app,
+        EngineCmd::KillConnection(local_port, remote_addr, remote_port),
+    )
+    .await?
+    {
         Reply::Ok => Ok(()),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
@@ -169,7 +179,12 @@ pub async fn get_adapter_usage(
     from_ms: f64,
     to_ms: f64,
 ) -> Result<Vec<AdapterUsageRow>, String> {
-    match dispatch(&app, EngineCmd::GetAdapterUsage(from_ms as u64, to_ms as u64)).await? {
+    match dispatch(
+        &app,
+        EngineCmd::GetAdapterUsage(from_ms as u64, to_ms as u64),
+    )
+    .await?
+    {
         Reply::AdapterUsage(rows) => Ok(rows
             .into_iter()
             .map(|(kind, bytes)| AdapterUsageRow { kind, bytes })
@@ -239,15 +254,25 @@ pub async fn get_plugin_panel(app: AppHandle, id: String) -> Result<Panel, Strin
 }
 
 #[tauri::command]
-pub async fn get_enrichment(app: AppHandle, ips: Vec<String>) -> Result<Vec<EnrichmentEvent>, String> {
+pub async fn get_enrichment(
+    app: AppHandle,
+    ips: Vec<String>,
+) -> Result<Vec<EnrichmentEvent>, String> {
     let targets: Vec<EnrichTarget> = ips
         .iter()
-        .filter_map(|s| s.parse::<std::net::IpAddr>().ok().map(EnrichTarget::Endpoint))
+        .filter_map(|s| {
+            s.parse::<std::net::IpAddr>()
+                .ok()
+                .map(EnrichTarget::Endpoint)
+        })
         .collect();
     match dispatch(&app, EngineCmd::GetEnrichment(targets)).await? {
         Reply::Enrichment(list) => Ok(list
             .into_iter()
-            .map(|(target, annotations)| EnrichmentEvent { target, annotations })
+            .map(|(target, annotations)| EnrichmentEvent {
+                target,
+                annotations,
+            })
             .collect()),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
@@ -272,9 +297,18 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
     let stream = transport::connect().await?;
     let (mut recv, mut send) = transport::split(stream);
 
-    transport::write_frame(&mut send, &ClientMessage::Hello { protocol: PROTOCOL_VERSION }).await?;
+    transport::write_frame(
+        &mut send,
+        &ClientMessage::Hello {
+            protocol: PROTOCOL_VERSION,
+        },
+    )
+    .await?;
     match transport::read_frame::<_, ServerMessage>(&mut recv).await? {
-        Some(ServerMessage::Welcome { protocol, engine_version }) => {
+        Some(ServerMessage::Welcome {
+            protocol,
+            engine_version,
+        }) => {
             if protocol != PROTOCOL_VERSION {
                 anyhow::bail!("protocol mismatch: engine {protocol}, ui {PROTOCOL_VERSION}");
             }

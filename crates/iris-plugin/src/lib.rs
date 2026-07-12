@@ -71,28 +71,37 @@ impl PluginCtx {
     /// push annotations for a target the plugin resolved on its own (e.g. from
     /// watching the tick stream), rather than in response to an EnrichRequest
     pub fn push_enrichment(&self, target: EnrichTarget, annotations: Vec<Annotation>) {
-        let _ = self.tx.try_send(PluginMessage::Enrichment { target, annotations });
+        let _ = self.tx.try_send(PluginMessage::Enrichment {
+            target,
+            annotations,
+        });
     }
 
     /// raise a durable alert. the service stamps the source from this plugin's
     /// authenticated id, so `message` is the only field the plugin controls.
     pub fn raise_alert(&self, message: impl Into<String>) {
-        let _ = self.tx.try_send(PluginMessage::RaiseAlert { message: message.into() });
+        let _ = self.tx.try_send(PluginMessage::RaiseAlert {
+            message: message.into(),
+        });
     }
 
     /// suggest a firewall rule with a human-readable reason. needs the
     /// `emit:rule-proposals` capability. the suggestion only ever reaches the
     /// user's review list; the plugin learns nothing about its fate.
     pub fn propose_rule(&self, rule: iris_core::Rule, reason: impl Into<String>) {
-        let _ = self.tx.try_send(PluginMessage::ProposeRule { rule, reason: reason.into() });
+        let _ = self.tx.try_send(PluginMessage::ProposeRule {
+            rule,
+            reason: reason.into(),
+        });
     }
 }
 
 /// connect to the service, register, and run the message loop until the pipe
 /// closes. reads the spawn-time token from the environment.
 pub async fn run<P: Plugin>(plugin: P, registration: Registration) -> anyhow::Result<()> {
-    let token = std::env::var(TOKEN_ENV)
-        .map_err(|_| anyhow::anyhow!("{TOKEN_ENV} not set (plugins are launched by the service)"))?;
+    let token = std::env::var(TOKEN_ENV).map_err(|_| {
+        anyhow::anyhow!("{TOKEN_ENV} not set (plugins are launched by the service)")
+    })?;
     // clear it so it does not linger in the child's environment for anything
     // this process later spawns
     std::env::remove_var(TOKEN_ENV);
@@ -113,7 +122,10 @@ pub async fn run<P: Plugin>(plugin: P, registration: Registration) -> anyhow::Re
     .await?;
 
     match transport::read_frame::<_, HostMessage>(&mut recv).await? {
-        Some(HostMessage::Registered { engine_version, granted }) => {
+        Some(HostMessage::Registered {
+            engine_version,
+            granted,
+        }) => {
             tracing::info!(engine = %engine_version, ?granted, "plugin registered");
         }
         Some(HostMessage::Rejected { reason }) => anyhow::bail!("registration rejected: {reason}"),
@@ -123,7 +135,9 @@ pub async fn run<P: Plugin>(plugin: P, registration: Registration) -> anyhow::Re
     if !registration.streams.is_empty() {
         transport::write_frame(
             &mut send,
-            &PluginMessage::Subscribe { streams: registration.streams.clone() },
+            &PluginMessage::Subscribe {
+                streams: registration.streams.clone(),
+            },
         )
         .await?;
     }

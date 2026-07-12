@@ -58,7 +58,11 @@ impl Manifest {
         }
         // the id names the on-disk directory, so it must be a single safe path
         // segment; a traversal here would let a manifest point entry elsewhere
-        if !m.id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+        if !m
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        {
             return Err(format!("plugin id has unsafe characters: {}", m.id));
         }
         if m.entry.trim().is_empty() {
@@ -66,7 +70,10 @@ impl Manifest {
         }
         // the entry binary must stay inside the plugin directory
         if m.entry.contains('/') || m.entry.contains('\\') || m.entry.contains("..") {
-            return Err(format!("plugin entry must be a bare file name: {}", m.entry));
+            return Err(format!(
+                "plugin entry must be a bare file name: {}",
+                m.entry
+            ));
         }
         for cap in &m.capabilities {
             if !KNOWN_CAPS.contains(&cap.as_str()) {
@@ -150,9 +157,7 @@ mod tests {
     use super::*;
 
     fn manifest(extra: &str) -> String {
-        format!(
-            r#"{{"id":"com.example.rep","name":"Rep","entry":"rep.exe"{extra}}}"#
-        )
+        format!(r#"{{"id":"com.example.rep","name":"Rep","entry":"rep.exe"{extra}}}"#)
     }
 
     #[test]
@@ -168,7 +173,8 @@ mod tests {
 
     #[test]
     fn rejects_unknown_capability() {
-        let err = Manifest::parse(&manifest(r#","capabilities":["firewall:enforce"]"#)).unwrap_err();
+        let err =
+            Manifest::parse(&manifest(r#","capabilities":["firewall:enforce"]"#)).unwrap_err();
         assert!(err.contains("unknown capability"));
     }
 

@@ -15,10 +15,10 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterCreateEnumHandle0,
     FwpmFilterDeleteById0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0,
     FwpmGetAppIdFromFileName0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0,
-    FWPM_ACTION0, FWPM_DISPLAY_DATA0, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
-    FWPM_FILTER_ENUM_TEMPLATE0, FWPM_PROVIDER0, FWPM_SUBLAYER0, FWPM_CONDITION_ALE_APP_ID,
-    FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWP_ACTION_BLOCK,
+    FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID, FWPM_DISPLAY_DATA0, FWPM_FILTER0,
+    FWPM_FILTER_CONDITION0, FWPM_FILTER_ENUM_TEMPLATE0, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+    FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0, FWPM_SUBLAYER0, FWP_ACTION_BLOCK,
     FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0, FWP_EMPTY,
     FWP_FILTER_ENUM_OVERLAPPING, FWP_MATCH_EQUAL, FWP_VALUE0,
 };
@@ -61,13 +61,7 @@ impl Wfp {
     pub fn open() -> EngineResult<Wfp> {
         unsafe {
             let mut engine = HANDLE::default();
-            let rc = FwpmEngineOpen0(
-                None,
-                RPC_C_AUTHN_WINNT,
-                None,
-                None,
-                &mut engine,
-            );
+            let rc = FwpmEngineOpen0(None, RPC_C_AUTHN_WINNT, None, None, &mut engine);
             if !ok(rc) {
                 return Err(EngineError::Os(format!("FwpmEngineOpen0 failed: {rc:#x}")));
             }
@@ -190,9 +184,7 @@ impl Wfp {
             let mut app_id: *mut FWP_BYTE_BLOB = ptr::null_mut();
             let rc = FwpmGetAppIdFromFileName0(PCWSTR(file.as_ptr()), &mut app_id);
             if !ok(rc) || app_id.is_null() {
-                return Err(EngineError::NotFound(format!(
-                    "app id for {path}: {rc:#x}"
-                )));
+                return Err(EngineError::NotFound(format!("app id for {path}: {rc:#x}")));
             }
 
             let action_type = match action {

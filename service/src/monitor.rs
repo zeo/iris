@@ -73,7 +73,12 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentReg
                 let store = store.lock().unwrap_or_else(|e| e.into_inner());
                 let alerting = now > baseline_until;
                 for adapter in &tick.adapters {
-                    store.add_adapter_usage(adapter.kind, now, adapter.rate_sent, adapter.rate_recv);
+                    store.add_adapter_usage(
+                        adapter.kind,
+                        now,
+                        adapter.rate_sent,
+                        adapter.rate_recv,
+                    );
                 }
                 for app in &tick.apps {
                     // rate over a ~1s window is close enough to bytes this second
@@ -130,7 +135,10 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentReg
                         }
                         // a danger-severity annotation is alert-worthy: the first
                         // sighting persists and toasts, not just a drawer badge
-                        for a in annotations.iter().filter(|a| a.severity == Severity::Danger) {
+                        for a in annotations
+                            .iter()
+                            .filter(|a| a.severity == Severity::Danger)
+                        {
                             let kind = AlertKind::Plugin {
                                 source: a.label.clone(),
                                 message: format!("{} flagged {}", a.label, target_name(&target)),
@@ -141,7 +149,10 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentReg
                                 .insert_alert(&kind, now_ms());
                             engine.publish(ServerMessage::Alert(alert));
                         }
-                        engine.publish(ServerMessage::Enrichment { target, annotations });
+                        engine.publish(ServerMessage::Enrichment {
+                            target,
+                            annotations,
+                        });
                     }
                 });
             }

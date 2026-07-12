@@ -5,7 +5,11 @@
 use tauri::Manager;
 
 #[tauri::command]
-pub fn save_download(app: tauri::AppHandle, name: String, contents: String) -> Result<String, String> {
+pub fn save_download(
+    app: tauri::AppHandle,
+    name: String,
+    contents: String,
+) -> Result<String, String> {
     let dir = app
         .path()
         .download_dir()

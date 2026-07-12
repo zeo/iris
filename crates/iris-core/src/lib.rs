@@ -18,15 +18,15 @@ pub mod rule;
 pub mod usage;
 
 pub use aggregate::{Aggregator, Flushed, PidSample};
+pub use alert::{Alert, AlertKind};
+pub use engine::{FirewallController, MonitorSink, NetworkMonitor};
 pub use enrich::{
     Annotation, AnnotationValue, EnrichTarget, Enricher, IpSet, Observer, Severity, TargetKind,
 };
-pub use alert::{Alert, AlertKind};
-pub use engine::{FirewallController, MonitorSink, NetworkMonitor};
 pub use error::{EngineError, EngineResult};
 pub use model::{
-    AdapterKind, AdapterSample, AppId, AppSample, ByteCounts, Conn, ConnState, Direction,
-    Endpoint, LiveConnection, ProcSample, Protocol, StatsTick,
+    AdapterKind, AdapterSample, AppId, AppSample, ByteCounts, Conn, ConnState, Direction, Endpoint,
+    LiveConnection, ProcSample, Protocol, StatsTick,
 };
 pub use panel::{Panel, Widget};
 pub use rule::{

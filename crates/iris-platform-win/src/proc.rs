@@ -56,8 +56,12 @@ unsafe fn image_path_of(handle: HANDLE) -> Option<String> {
     for cap in [512usize, 32768] {
         let mut buf = vec![0u16; cap];
         let mut len = buf.len() as u32;
-        let res =
-            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
+        let res = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
         if res.is_ok() && len > 0 {
             return Some(String::from_utf16_lossy(&buf[..len as usize]));
         }

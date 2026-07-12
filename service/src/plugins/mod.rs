@@ -33,7 +33,8 @@ impl PanelHub {
             .links
             .get(id)
             .ok_or_else(|| "no panel for that plugin".to_string())?;
-        link.panel().ok_or_else(|| "the plugin has no panel right now".to_string())
+        link.panel()
+            .ok_or_else(|| "the plugin has no panel right now".to_string())
     }
 }
 

@@ -13,7 +13,11 @@ pub async fn rule_add(
     action: String,
 ) -> Result<(), String> {
     // map to a fixed vocabulary so only known tokens reach the elevated run
-    let dir = if direction == "inbound" { "inbound" } else { "outbound" };
+    let dir = if direction == "inbound" {
+        "inbound"
+    } else {
+        "outbound"
+    };
     let act = if action == "allow" { "allow" } else { "block" };
     let args = vec!["--rule-add".into(), path, dir.into(), act.into()];
     crate::elevate::run_engine(app, args).await
@@ -26,11 +30,7 @@ pub async fn rule_remove(app: tauri::AppHandle, id: i64) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn rule_set_enabled(app: tauri::AppHandle, id: i64, enabled: bool) -> Result<(), String> {
-    let args = vec![
-        "--rule-enable".into(),
-        id.to_string(),
-        enabled.to_string(),
-    ];
+    let args = vec!["--rule-enable".into(), id.to_string(), enabled.to_string()];
     crate::elevate::run_engine(app, args).await
 }
 

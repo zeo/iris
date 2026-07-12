@@ -34,19 +34,44 @@ pub struct PluginInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientMessage {
     /// first frame on connect; negotiates protocol version
-    Hello { protocol: u32 },
+    Hello {
+        protocol: u32,
+    },
     /// begin receiving [`ServerMessage::Tick`] pushes
     Subscribe,
     /// stop receiving ticks
     Unsubscribe,
-    ListConnections { req: u64 },
-    ListRules { req: u64 },
-    AddRule { req: u64, rule: Rule },
-    RemoveRule { req: u64, id: i64 },
-    SetRuleEnabled { req: u64, id: i64, enabled: bool },
-    GetUsage { req: u64, query: UsageQuery },
-    ListAlerts { req: u64, unacked_only: bool },
-    AckAlert { req: u64, id: i64 },
+    ListConnections {
+        req: u64,
+    },
+    ListRules {
+        req: u64,
+    },
+    AddRule {
+        req: u64,
+        rule: Rule,
+    },
+    RemoveRule {
+        req: u64,
+        id: i64,
+    },
+    SetRuleEnabled {
+        req: u64,
+        id: i64,
+        enabled: bool,
+    },
+    GetUsage {
+        req: u64,
+        query: UsageQuery,
+    },
+    ListAlerts {
+        req: u64,
+        unacked_only: bool,
+    },
+    AckAlert {
+        req: u64,
+        id: i64,
+    },
     /// terminate a single TCP connection (privileged)
     KillConnection {
         req: u64,
@@ -56,24 +81,53 @@ pub enum ClientMessage {
     },
     /// fetch any cached annotations for these targets, and enqueue a background
     /// resolve for the ones not cached yet (results arrive as pushes)
-    GetEnrichment { req: u64, targets: Vec<EnrichTarget> },
+    GetEnrichment {
+        req: u64,
+        targets: Vec<EnrichTarget>,
+    },
     /// keepalive; service replies with the same `req`
-    Ping { req: u64 },
+    Ping {
+        req: u64,
+    },
     /// per-adapter-kind traffic totals over a window
-    GetAdapterUsage { req: u64, from_ms: u64, to_ms: u64 },
+    GetAdapterUsage {
+        req: u64,
+        from_ms: u64,
+        to_ms: u64,
+    },
     /// enumerate installed plugins and their consent state
-    ListPlugins { req: u64 },
+    ListPlugins {
+        req: u64,
+    },
     /// record the user's consent for a plugin (the caps and egress they approved)
-    GrantPlugin { req: u64, id: String, caps: Vec<String>, egress: Vec<String> },
+    GrantPlugin {
+        req: u64,
+        id: String,
+        caps: Vec<String>,
+        egress: Vec<String>,
+    },
     /// switch a granted plugin on or off
-    SetPluginEnabled { req: u64, id: String, enabled: bool },
+    SetPluginEnabled {
+        req: u64,
+        id: String,
+        enabled: bool,
+    },
     /// recent plugin rule proposals, pending first
-    ListProposals { req: u64 },
+    ListProposals {
+        req: u64,
+    },
     /// settle a pending proposal. accepting enforces a rule, so it is only
     /// honored on the admin pipe; the telemetry pipe may only reject.
-    ResolveProposal { req: u64, id: i64, accept: bool },
+    ResolveProposal {
+        req: u64,
+        id: i64,
+        accept: bool,
+    },
     /// fetch a plugin's panel view-model for its tab
-    GetPluginPanel { req: u64, id: String },
+    GetPluginPanel {
+        req: u64,
+        id: String,
+    },
 }
 
 /// a service -> UI message: either an unsolicited push (`Tick`, `Alert`,

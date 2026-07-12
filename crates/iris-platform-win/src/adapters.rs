@@ -198,8 +198,15 @@ fn classify(if_type: u32, label: &str) -> AdapterKind {
 
 fn is_vpn_label(label: &str) -> bool {
     [
-        "vpn", "wintun", "wireguard", "tap-windows", "openvpn", "tailscale", "zerotier",
-        "hamachi", "warp",
+        "vpn",
+        "wintun",
+        "wireguard",
+        "tap-windows",
+        "openvpn",
+        "tailscale",
+        "zerotier",
+        "hamachi",
+        "warp",
     ]
     .iter()
     .any(|mark| label.contains(mark))
@@ -213,7 +220,10 @@ mod tests {
     fn classifies_interface_types() {
         assert_eq!(classify(IF_TYPE_IEEE80211, ""), AdapterKind::Wifi);
         assert_eq!(
-            classify(IF_TYPE_ETHERNET_CSMACD, "intel(r) ethernet connection i219-v"),
+            classify(
+                IF_TYPE_ETHERNET_CSMACD,
+                "intel(r) ethernet connection i219-v"
+            ),
             AdapterKind::Ethernet
         );
         assert_eq!(
@@ -224,8 +234,14 @@ mod tests {
             classify(IF_TYPE_PROP_VIRTUAL, "wintun userspace tunnel"),
             AdapterKind::Vpn
         );
-        assert_eq!(classify(IF_TYPE_PPP, "wan miniport (sstp)"), AdapterKind::Vpn);
-        assert_eq!(classify(IF_TYPE_SOFTWARE_LOOPBACK, ""), AdapterKind::Loopback);
+        assert_eq!(
+            classify(IF_TYPE_PPP, "wan miniport (sstp)"),
+            AdapterKind::Vpn
+        );
+        assert_eq!(
+            classify(IF_TYPE_SOFTWARE_LOOPBACK, ""),
+            AdapterKind::Loopback
+        );
         assert_eq!(classify(999, "some usb modem"), AdapterKind::Other);
     }
 

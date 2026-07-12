@@ -27,5 +27,8 @@ pub use model::{
     AdapterKind, AdapterSample, AppId, AppSample, ByteCounts, Conn, ConnState, Direction,
     Endpoint, LiveConnection, ProcSample, Protocol, StatsTick,
 };
-pub use rule::{parse_backup, BackupRule, Rule, RuleAction, StoredRule, BACKUP_MAX_BYTES};
+pub use rule::{
+    parse_backup, BackupRule, ProposalState, Rule, RuleAction, RuleProposal, StoredRule,
+    BACKUP_MAX_BYTES,
+};
 pub use usage::{Granularity, UsageBucket, UsageQuery};

@@ -33,6 +33,48 @@ impl Rule {
     }
 }
 
+/// how a plugin-proposed rule was disposed
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProposalState {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+impl ProposalState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProposalState::Pending => "pending",
+            ProposalState::Accepted => "accepted",
+            ProposalState::Rejected => "rejected",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ProposalState> {
+        match s {
+            "pending" => Some(ProposalState::Pending),
+            "accepted" => Some(ProposalState::Accepted),
+            "rejected" => Some(ProposalState::Rejected),
+            _ => None,
+        }
+    }
+}
+
+/// a rule a plugin suggested. a plugin never touches enforcement itself: the
+/// proposal sits pending until the user accepts it (an elevated action, the
+/// same as adding a rule by hand) or dismisses it. `source` is the proposing
+/// plugin's authenticated name, stamped by the service.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuleProposal {
+    pub id: i64,
+    pub source: String,
+    pub rule: Rule,
+    pub reason: String,
+    pub at_ms: u64,
+    pub state: ProposalState,
+}
+
 /// a rule as stored, carrying the platform-assigned filter identities so it can
 /// be re-applied on service restart and deleted by id
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -3,7 +3,10 @@
 //! alert log. one connection guarded by the service behind a mutex; the workload
 //! is a handful of writes per second and the occasional query.
 
-use iris_core::{AdapterKind, Alert, AlertKind, AppId, Granularity, UsageBucket, UsageQuery};
+use iris_core::{
+    AdapterKind, Alert, AlertKind, AppId, Granularity, ProposalState, Rule, RuleProposal,
+    UsageBucket, UsageQuery,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
@@ -53,8 +56,23 @@ CREATE TABLE IF NOT EXISTS plugin_grants (
 );
 ";
 
+/// v4: rules plugins have proposed, awaiting the user's verdict. `rule` is the
+/// JSON of the proposed [`iris_core::Rule`]; enforcement only ever happens when
+/// an elevated caller accepts.
+const SCHEMA_V4_RULE_PROPOSALS: &str = "
+CREATE TABLE IF NOT EXISTS rule_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    rule TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS rule_proposals_state ON rule_proposals(state);
+";
+
 /// bump when the schema changes; drives the migration ladder in [`Store::migrate`]
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub struct Store {
     conn: Connection,
@@ -142,6 +160,9 @@ impl Store {
         }
         if version < 3 {
             self.conn.execute_batch(SCHEMA_V3_PLUGIN_GRANTS)?;
+        }
+        if version < 4 {
+            self.conn.execute_batch(SCHEMA_V4_RULE_PROPOSALS)?;
         }
         if version < SCHEMA_VERSION {
             self.conn
@@ -461,6 +482,149 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// record a plugin's rule proposal. an identical pending proposal is
+    /// returned rather than duplicated, and each source is capped to a bounded
+    /// pending backlog, so a chatty plugin can neither flood the review UI nor
+    /// grow the db without limit. None when the cap refused it.
+    pub fn insert_proposal(
+        &self,
+        source: &str,
+        rule: &Rule,
+        reason: &str,
+        at_ms: u64,
+    ) -> Option<RuleProposal> {
+        const MAX_PENDING_PER_SOURCE: i64 = 50;
+        let rule_json = serde_json::to_string(rule).ok()?;
+        let existing = self
+            .conn
+            .query_row(
+                "SELECT id, reason, at_ms FROM rule_proposals
+                 WHERE source = ?1 AND rule = ?2 AND state = 'pending'",
+                params![source, rule_json],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        if let Some((id, reason, at_ms)) = existing {
+            return Some(RuleProposal {
+                id,
+                source: source.to_string(),
+                rule: rule.clone(),
+                reason,
+                at_ms: at_ms as u64,
+                state: ProposalState::Pending,
+            });
+        }
+        let pending: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM rule_proposals WHERE source = ?1 AND state = 'pending'",
+                params![source],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if pending >= MAX_PENDING_PER_SOURCE {
+            tracing::warn!("proposal backlog for {source} is full, refusing another");
+            return None;
+        }
+        match self.conn.execute(
+            "INSERT INTO rule_proposals(source, rule, reason, at_ms, state)
+             VALUES (?1, ?2, ?3, ?4, 'pending')",
+            params![source, rule_json, reason, at_ms as i64],
+        ) {
+            Ok(rows) if rows > 0 => Some(RuleProposal {
+                id: self.conn.last_insert_rowid(),
+                source: source.to_string(),
+                rule: rule.clone(),
+                reason: reason.to_string(),
+                at_ms,
+                state: ProposalState::Pending,
+            }),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!("could not persist proposal from {source}: {e}");
+                None
+            }
+        }
+    }
+
+    /// recent proposals, newest first, pending and resolved alike so the review
+    /// UI can show a short history
+    pub fn list_proposals(&self) -> Vec<RuleProposal> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, source, rule, reason, at_ms, state FROM rule_proposals
+             ORDER BY id DESC LIMIT 200",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |r| {
+            let id: i64 = r.get(0)?;
+            let source: String = r.get(1)?;
+            let rule_json: String = r.get(2)?;
+            let reason: String = r.get(3)?;
+            let at_ms: i64 = r.get(4)?;
+            let state: String = r.get(5)?;
+            Ok((id, source, rule_json, reason, at_ms, state))
+        });
+        let mut out = Vec::new();
+        if let Ok(rows) = rows {
+            for (id, source, rule_json, reason, at_ms, state) in rows.flatten() {
+                let (Ok(rule), Some(state)) = (
+                    serde_json::from_str::<Rule>(&rule_json),
+                    ProposalState::parse(&state),
+                ) else {
+                    continue;
+                };
+                out.push(RuleProposal { id, source, rule, reason, at_ms: at_ms as u64, state });
+            }
+        }
+        out
+    }
+
+    /// settle a pending proposal; returns it (with the new state) so an
+    /// accepting caller has the rule to apply. None when it does not exist or
+    /// was already settled, so a race between two reviewers resolves once.
+    pub fn resolve_proposal(&self, id: i64, accept: bool) -> Option<RuleProposal> {
+        let state = if accept { ProposalState::Accepted } else { ProposalState::Rejected };
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE rule_proposals SET state = ?2 WHERE id = ?1 AND state = 'pending'",
+                params![id, state.as_str()],
+            )
+            .unwrap_or(0);
+        if updated == 0 {
+            return None;
+        }
+        self.conn
+            .query_row(
+                "SELECT source, rule, reason, at_ms FROM rule_proposals WHERE id = ?1",
+                params![id],
+                |r| {
+                    let source: String = r.get(0)?;
+                    let rule_json: String = r.get(1)?;
+                    let reason: String = r.get(2)?;
+                    let at_ms: i64 = r.get(3)?;
+                    Ok((source, rule_json, reason, at_ms))
+                },
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .and_then(|(source, rule_json, reason, at_ms)| {
+                serde_json::from_str::<Rule>(&rule_json).ok().map(|rule| RuleProposal {
+                    id,
+                    source,
+                    rule,
+                    reason,
+                    at_ms: at_ms as u64,
+                    state,
+                })
+            })
+    }
+
     pub fn first_seen(&self, path: &str) -> Option<u64> {
         self.conn
             .query_row(
@@ -533,6 +697,42 @@ mod tests {
         assert!(s.set_plugin_enabled("com.example.rep", false));
         assert!(!s.plugin_grant("com.example.rep").unwrap().enabled);
         assert_eq!(s.list_plugin_grants().len(), 1);
+    }
+
+    #[test]
+    fn proposals_dedupe_cap_and_resolve_once() {
+        let s = Store::open_in_memory().unwrap();
+        let rule = iris_core::Rule::block_outbound(AppId("c:/evil.exe".into()));
+
+        let p = s.insert_proposal("Rep", &rule, "known bad", 1_000).unwrap();
+        assert_eq!(p.state, ProposalState::Pending);
+        // the identical pending proposal comes back instead of stacking
+        let again = s.insert_proposal("Rep", &rule, "still bad", 2_000).unwrap();
+        assert_eq!(again.id, p.id);
+        assert_eq!(s.list_proposals().len(), 1);
+
+        // resolving settles it exactly once and hands back the rule to apply
+        let accepted = s.resolve_proposal(p.id, true).unwrap();
+        assert_eq!(accepted.state, ProposalState::Accepted);
+        assert_eq!(accepted.rule, rule);
+        assert!(s.resolve_proposal(p.id, false).is_none());
+
+        // once settled, the same rule may be proposed afresh
+        let fresh = s.insert_proposal("Rep", &rule, "back again", 3_000).unwrap();
+        assert_ne!(fresh.id, p.id);
+        assert!(s.resolve_proposal(fresh.id, false).is_some());
+
+        // a source's pending backlog is bounded
+        for n in 0..60 {
+            let r = iris_core::Rule::block_outbound(AppId(format!("c:/{n}.exe")));
+            s.insert_proposal("Flood", &r, "x", 1);
+        }
+        let pending = s
+            .list_proposals()
+            .into_iter()
+            .filter(|p| p.source == "Flood" && p.state == ProposalState::Pending)
+            .count();
+        assert_eq!(pending, 50);
     }
 
     #[test]

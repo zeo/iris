@@ -1,180 +1,245 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
-import { engine } from "../lib/engine";
-import { addRule, refreshRules, removeRule, rules, setRuleEnabled } from "../lib/rules";
+import { Icon } from "../components/Icon";
+import { engine, type AppSample } from "../lib/engine";
+import { bytes, rate } from "../lib/format";
 import { acceptProposal, pendingProposals, refreshProposals, rejectProposal } from "../lib/proposals";
+import { addRule, refreshRules, removeRule, rules, type StoredRule } from "../lib/rules";
 
-function fileName(path: string): string {
-  const seg = path.split(/[\\/]/).pop();
-  return seg && seg.length ? seg : path;
+type Direction = "inbound" | "outbound";
+type Decision = "open" | "allow" | "block" | "paused";
+
+interface AppRow {
+  app: string;
+  sample?: AppSample;
+  rules: StoredRule[];
 }
 
-// per-app allow/block rules enforced at the Windows Filtering Platform.
-// blocking also works from the Activity tab.
+function fileName(path: string): string {
+  const segment = path.split(/[\\/]/).pop();
+  return segment?.length ? segment : path;
+}
+
+function pathKey(path: string): string {
+  return navigator.userAgent.includes("Windows") ? path.toLowerCase() : path;
+}
+
+function decisionFor(row: AppRow, direction: Direction): Decision {
+  const directional = row.rules.filter((stored) => stored.rule.direction === direction);
+  if (directional.some((stored) => stored.enabled && stored.rule.action === "block")) return "block";
+  if (directional.some((stored) => stored.enabled && stored.rule.action === "allow")) return "allow";
+  return directional.length ? "paused" : "open";
+}
+
+function hostsFor(sample?: AppSample): string {
+  if (!sample) return "no live endpoints";
+  const hosts = new Set(
+    sample.processes.flatMap((process) => process.conns.map((conn) => conn.host || conn.remote.addr)),
+  );
+  if (hosts.size === 0) return sample.online ? "waiting for connection" : "last seen this session";
+  const list = [...hosts];
+  return list.length > 2 ? `${list.slice(0, 2).join(", ")} +${list.length - 2}` : list.join(", ");
+}
+
 export function Protect() {
-  const [q, setQ] = createSignal("");
+  const [query, setQuery] = createSignal("");
+  const [filter, setFilter] = createSignal<"all" | "active" | "ruled">("all");
   const [adding, setAdding] = createSignal(false);
   const [action, setAction] = createSignal<"block" | "allow">("block");
-  const [direction, setDirection] = createSignal<"outbound" | "inbound">("outbound");
-  const add = (path: string) => addRule(path, direction(), action());
-  const [toolErr, setToolErr] = createSignal("");
+  const [direction, setDirection] = createSignal<Direction>("outbound");
+  const [toolError, setToolError] = createSignal("");
   const [toolNote, setToolNote] = createSignal("");
-  const exportRules = async () => {
-    setToolErr("");
-    setToolNote("");
-    const data = rules().map((r) => ({
-      app: r.rule.app,
-      direction: r.rule.direction,
-      action: r.rule.action,
-      enabled: r.enabled,
-    }));
-    try {
-      const path = await invoke<string>("save_download", {
-        name: "iris-rules.json",
-        contents: JSON.stringify(data, null, 2),
-      });
-      await revealItemInDir(path);
-    } catch (e) {
-      setToolErr(String(e));
-    }
-  };
-  const importRules = async () => {
-    setToolErr("");
-    setToolNote("");
-    try {
-      const n = await invoke<number | null>("rule_import");
-      if (n === null) return;
-      await refreshRules();
-      setToolNote(`imported ${n} rule${n === 1 ? "" : "s"}`);
-    } catch (e) {
-      setToolErr(String(e));
-    }
-  };
-  // (re)load rules whenever the engine is connected, so a view opened while the
-  // service is still starting fills in once it comes online instead of staying
-  // stuck on "No rules yet"
+  const [changing, setChanging] = createSignal("");
+
   createEffect(() => {
-    if (engine.online()) {
-      refreshRules();
-      refreshProposals();
-    }
+    if (!engine.online()) return;
+    refreshRules();
+    refreshProposals();
   });
-  const [proposalErr, setProposalErr] = createSignal("");
-  const accept = async (id: number) => {
-    setProposalErr("");
-    try {
-      await acceptProposal(id);
-    } catch (e) {
-      setProposalErr(String(e));
-    }
-  };
-  const dismiss = async (id: number) => {
-    setProposalErr("");
-    try {
-      await rejectProposal(id);
-    } catch (e) {
-      setProposalErr(String(e));
-    }
-  };
 
-  const list = createMemo(() => {
-    const needle = q().trim().toLowerCase();
-    const r = rules();
-    return needle ? r.filter((x) => x.rule.app.includes(needle)) : r;
+  const appRows = createMemo<AppRow[]>(() => {
+    const byPath = new Map<string, AppRow>();
+    for (const sample of engine.apps()) {
+      byPath.set(pathKey(sample.app), { app: sample.app, sample, rules: [] });
+    }
+    for (const stored of rules()) {
+      const key = pathKey(stored.rule.app);
+      const row = byPath.get(key) ?? { app: stored.rule.app, rules: [] };
+      row.rules.push(stored);
+      byPath.set(key, row);
+    }
+
+    const needle = query().trim().toLowerCase();
+    const mode = filter();
+    return [...byPath.values()]
+      .filter((row) => mode === "all" || (mode === "active" ? row.sample?.online : row.rules.length > 0))
+      .filter((row) => {
+        if (!needle) return true;
+        const name = row.sample?.name ?? fileName(row.app);
+        return name.toLowerCase().includes(needle) || row.app.toLowerCase().includes(needle) || hostsFor(row.sample).toLowerCase().includes(needle);
+      })
+      .sort((a, b) => {
+        if (!!a.sample?.online !== !!b.sample?.online) return a.sample?.online ? -1 : 1;
+        const aRate = (a.sample?.rate_recv ?? 0) + (a.sample?.rate_sent ?? 0);
+        const bRate = (b.sample?.rate_recv ?? 0) + (b.sample?.rate_sent ?? 0);
+        return bRate - aRate || (a.sample?.name ?? fileName(a.app)).localeCompare(b.sample?.name ?? fileName(b.app));
+      });
   });
-  const blockedCount = () => rules().filter((r) => r.enabled && r.rule.action === "block").length;
 
-  // apps without a rule for the currently-selected action+direction, offered in
-  // the add picker (a covered app can still get a rule for the other direction)
   const candidates = createMemo(() => {
     const covered = new Set(
       rules()
-        .filter((r) => r.rule.action === action() && r.rule.direction === direction())
-        .map((r) => r.rule.app),
+        .filter((stored) => stored.rule.direction === direction())
+        .map((stored) => pathKey(stored.rule.app)),
     );
-    return engine.apps().filter((a) => !covered.has(a.app));
+    return engine.apps().filter((sample) => !covered.has(pathKey(sample.app)));
   });
 
+  const blockedCount = () =>
+    new Set(rules().filter((stored) => stored.enabled && stored.rule.action === "block").map((stored) => pathKey(stored.rule.app))).size;
+  const activeCount = () => engine.apps().filter((sample) => sample.online).length;
+  const connectionCount = () => engine.apps().reduce((sum, sample) => sum + sample.connections, 0);
+
+  const chooseDecision = async (row: AppRow, direction: Direction, next: Decision) => {
+    const key = `${row.app}:${direction}`;
+    if (decisionFor(row, direction) === next || changing()) return;
+    setChanging(key);
+    setToolError("");
+    try {
+      for (const stored of row.rules.filter((rule) => rule.rule.direction === direction)) {
+        await removeRule(stored.id);
+      }
+      if (next === "allow" || next === "block") await addRule(row.app, direction, next);
+    } catch (error) {
+      setToolError(String(error));
+      await refreshRules();
+    } finally {
+      setChanging("");
+    }
+  };
+
+  const exportRules = async () => {
+    setToolError("");
+    setToolNote("");
+    try {
+      const contents = JSON.stringify(
+        rules().map((stored) => ({ ...stored.rule, enabled: stored.enabled })),
+        null,
+        2,
+      );
+      const path = await invoke<string>("save_download", { name: "iris-rules.json", contents });
+      await revealItemInDir(path);
+    } catch (error) {
+      setToolError(String(error));
+    }
+  };
+
+  const importRules = async () => {
+    setToolError("");
+    setToolNote("");
+    try {
+      const count = await invoke<number | null>("rule_import");
+      if (count === null) return;
+      await refreshRules();
+      setToolNote(`imported ${count} rule${count === 1 ? "" : "s"}`);
+    } catch (error) {
+      setToolError(String(error));
+    }
+  };
+
+  const accept = async (id: number) => {
+    setToolError("");
+    try {
+      await acceptProposal(id);
+    } catch (error) {
+      setToolError(String(error));
+    }
+  };
+
+  const dismiss = async (id: number) => {
+    setToolError("");
+    try {
+      await rejectProposal(id);
+    } catch (error) {
+      setToolError(String(error));
+    }
+  };
+
   return (
-    <section>
-      <div class="head">
-        <div class="titles">
-          <h2>Protect</h2>
-          <span class="sub">per-app allow and block rules</span>
-        </div>
-        <div class="actions">
-          <label class="field">
-            <Icon name="search" />
-            <input placeholder="find a rule…" value={q()} onInput={(e) => setQ(e.currentTarget.value)} />
-          </label>
-          <button class="btn" onClick={() => setAdding((v) => !v)}>
-            <Icon name="plus" />
-            Add rule
-          </button>
-          <button class="btn" onClick={exportRules} disabled={rules().length === 0} title="Back up rules to a JSON file in Downloads">
-            <Icon name="download" /> Export
-          </button>
-          <button class="btn" onClick={importRules} title="Restore rules from a JSON backup (one elevation prompt)">
-            <Icon name="upload" /> Import
-          </button>
-        </div>
-      </div>
-      <Show when={toolErr()}>
-        <div class="tool-err">{toolErr()}</div>
-      </Show>
-      <Show when={toolNote()}>
-        <div class="tool-note">{toolNote()}</div>
-      </Show>
-
-      <div class="tiles">
-        <div class="tile"><div class="k">rules</div><div class="v">{rules().length}</div></div>
-        <div class="tile"><div class="k">blocked apps</div><div class="v">{blockedCount()}</div></div>
-        <div class="tile"><div class="k">enforcement</div><div class="v" style={{ "font-size": "var(--fz-h)" }}>WFP</div></div>
-      </div>
-
-      <Show when={pendingProposals().length > 0}>
-        <div class="panel proposals">
-          <div class="picker-head">
-            <span class="label">
-              suggested by plugins · {pendingProposals().length} pending
-            </span>
+    <section class="protect-console">
+      <div class="protect-deck">
+        <div class="protect-gauge">
+          <span class="label">Enforcement</span>
+          <div class="protect-state">
+            <span class="lamp" classList={{ live: engine.online(), off: !engine.online() }} />
+            <strong>{engine.online() ? "ON LINE" : "OFF LINE"}</strong>
           </div>
-          <Show when={proposalErr()}>
-            <div class="tool-err">{proposalErr()}</div>
-          </Show>
-          <div class="rows">
-            <For each={pendingProposals()}>
-              {(p) => (
-                <div class="row">
-                  <AppIcon path={p.rule.app} />
-                  <div class="meta">
-                    <span class="name">{fileName(p.rule.app)}</span>
-                    <span class="path">{p.source} · {p.reason}</span>
-                  </div>
-                  <span class="grow" />
-                  <span class="tag" classList={{ block: p.rule.action === "block", allow: p.rule.action === "allow" }}>
-                    {p.rule.action} · {p.rule.direction === "outbound" ? "out" : "in"}
-                  </span>
-                  <button class="btn" onClick={() => accept(p.id)} title="Enforce this rule (asks for elevation)">
-                    <Icon name="shield" /> Accept
-                  </button>
-                  <button class="iconbtn" onClick={() => dismiss(p.id)} aria-label="dismiss proposal" title="Dismiss">
-                    <Icon name="x" />
-                  </button>
-                </div>
-              )}
+          <span class="protect-caption">engine {engine.version() ?? "unavailable"}</span>
+        </div>
+        <div class="protect-gauge">
+          <span class="label">Live field</span>
+          <div class="protect-readout"><b>{activeCount()}</b> apps <i>{connectionCount()} links</i></div>
+          <span class="protect-caption">{rate(engine.down())} down · {rate(engine.up())} up</span>
+        </div>
+        <div class="protect-gauge">
+          <span class="label">Rule bank</span>
+          <div class="protect-readout"><b>{rules().length}</b> rules <i>{blockedCount()} blocked</i></div>
+          <span class="protect-caption">inbound and outbound decisions</span>
+        </div>
+        <div class="protect-tools">
+          <label class="field protect-search">
+            <Icon name="search" />
+            <input
+              placeholder="search app, path, or endpoint"
+              value={query()}
+              onInput={(event) => setQuery(event.currentTarget.value)}
+            />
+          </label>
+          <div class="seg" role="group" aria-label="application filter">
+            <For each={["all", "active", "ruled"] as const}>
+              {(mode) => <button classList={{ on: filter() === mode }} onClick={() => setFilter(mode)}>{mode}</button>}
             </For>
           </div>
+        </div>
+      </div>
+
+      <div class="protect-command">
+        <span class="label">Application control</span>
+        <span class="protect-legend"><i class="open" /> open <i class="allow" /> allow rule <i class="block" /> blocked</span>
+        <span class="grow" />
+        <Show when={pendingProposals().length > 0}>
+          <button class="btn proposal-count" onClick={() => setAdding(false)}>{pendingProposals().length} proposed</button>
+        </Show>
+        <button class="btn" onClick={() => setAdding((open) => !open)}><Icon name="plus" /> Add rule</button>
+        <button class="btn icon" onClick={exportRules} disabled={rules().length === 0} title="Export rules"><Icon name="download" /></button>
+        <button class="btn icon" onClick={importRules} title="Import rules"><Icon name="upload" /></button>
+      </div>
+
+      <Show when={toolError()}><div class="tool-err">{toolError()}</div></Show>
+      <Show when={toolNote()}><div class="tool-note">{toolNote()}</div></Show>
+
+      <Show when={pendingProposals().length > 0}>
+        <div class="proposal-strip">
+          <For each={pendingProposals()}>
+            {(proposal) => (
+              <div class="proposal-entry">
+                <AppIcon path={proposal.rule.app} />
+                <span><b>{fileName(proposal.rule.app)}</b><small>{proposal.source} · {proposal.reason}</small></span>
+                <span class={`decision-mark ${proposal.rule.action}`}>{proposal.rule.action} {proposal.rule.direction === "outbound" ? "out" : "in"}</span>
+                <button class="btn" onClick={() => accept(proposal.id)}>Accept</button>
+                <button class="iconbtn" onClick={() => dismiss(proposal.id)} aria-label="dismiss proposal"><Icon name="x" /></button>
+              </div>
+            )}
+          </For>
         </div>
       </Show>
 
       <Show when={adding()}>
-        <div class="panel picker">
+        <div class="panel picker protect-picker">
           <div class="picker-head">
-            <span class="label">add a rule for an active app</span>
+            <span class="label">new rule from a live application</span>
             <div class="picker-opts">
               <div class="seg" role="group" aria-label="action">
                 <button classList={{ on: action() === "block" }} onClick={() => setAction("block")}>block</button>
@@ -188,15 +253,23 @@ export function Protect() {
             <button class="iconbtn" onClick={() => setAdding(false)} aria-label="close"><Icon name="x" /></button>
           </div>
           <div class="picker-list">
-            <For each={candidates()} fallback={<div class="picker-empty">no other active apps</div>}>
-              {(a) => (
-                <button class="picker-row" onClick={() => add(a.app)}>
-                  <AppIcon path={a.app} />
-                  <span class="name">{a.name ?? fileName(a.app)}</span>
+            <For each={candidates()} fallback={<div class="picker-empty">no uncovered live applications</div>}>
+              {(sample) => (
+                <button
+                  class="picker-row"
+                  onClick={async () => {
+                    setToolError("");
+                    try {
+                      await addRule(sample.app, direction(), action());
+                    } catch (error) {
+                      setToolError(String(error));
+                    }
+                  }}
+                >
+                  <AppIcon path={sample.app} />
+                  <span class="name">{sample.name ?? fileName(sample.app)}</span>
                   <span class="grow" />
-                  <span class="block-tag" classList={{ allow: action() === "allow" }}>
-                    <Icon name={action() === "allow" ? "shield" : "block"} size={13} /> {action()} {direction() === "outbound" ? "out" : "in"}
-                  </span>
+                  <span class={`decision-mark ${action()}`}>{action()} {direction() === "outbound" ? "out" : "in"}</span>
                 </button>
               )}
             </For>
@@ -205,48 +278,85 @@ export function Protect() {
       </Show>
 
       <Show
-        when={list().length > 0}
+        when={appRows().length > 0}
         fallback={
-          <div class="empty">
+          <div class="empty protect-empty">
             <Icon name="shield" class="glyph" size={44} />
-            <h3>No rules yet</h3>
-            <p>
-              Block an app here or from Activity and Iris stops it at the Windows filtering layer.
-              The rule holds even while this window is closed.
-            </p>
+            <h3>{engine.online() ? "No applications match" : "Waiting for the engine"}</h3>
+            <p>Live applications and saved rules appear here as soon as the engine reports them.</p>
           </div>
         }
       >
-        <div class="rows">
-          <For each={list()}>
-            {(r) => (
-              <div class="row" classList={{ dim: !r.enabled }}>
-                <AppIcon path={r.rule.app} />
-                <div class="meta">
-                  <span class="name">{fileName(r.rule.app)}</span>
-                  <span class="path">{r.rule.app}</span>
-                </div>
-                <span class="grow" />
-                <span class="tag" classList={{ block: r.rule.action === "block", allow: r.rule.action === "allow" }}>
-                  {r.rule.action} · {r.rule.direction === "outbound" ? "out" : "in"}
-                </span>
-                <button
-                  class="rocker"
-                  role="switch"
-                  aria-checked={r.enabled}
-                  onClick={() => setRuleEnabled(r.id, !r.enabled)}
-                  title={r.enabled ? "enforcing" : "paused"}
-                >
-                  <span class="knob" />
-                </button>
-                <button class="iconbtn danger" onClick={() => removeRule(r.id)} aria-label="remove rule">
-                  <Icon name="x" />
-                </button>
-              </div>
-            )}
-          </For>
+        <div class="panel protect-table-wrap">
+          <table class="tbl protect-table">
+            <thead>
+              <tr>
+                <th>Application</th>
+                <th>Inbound</th>
+                <th>Outbound</th>
+                <th>Remote field</th>
+                <th class="num">↓ rate</th>
+                <th class="num">↑ rate</th>
+                <th class="num">session</th>
+              </tr>
+            </thead>
+            <tbody>
+              <For each={appRows()}>
+                {(row) => (
+                  <tr classList={{ dormant: !row.sample?.online, blocked: decisionFor(row, "inbound") === "block" || decisionFor(row, "outbound") === "block" }}>
+                    <td>
+                      <div class="protect-app-cell">
+                        <span class="app-live" classList={{ on: !!row.sample?.online }} />
+                        <AppIcon path={row.app} />
+                        <span class="protect-app-meta">
+                          <b>{row.sample?.name ?? fileName(row.app)}</b>
+                          <small>{row.app}</small>
+                        </span>
+                      </div>
+                    </td>
+                    <td><DecisionSelect row={row} direction="inbound" changing={changing()} choose={chooseDecision} /></td>
+                    <td><DecisionSelect row={row} direction="outbound" changing={changing()} choose={chooseDecision} /></td>
+                    <td><span class="remote-field">{hostsFor(row.sample)}</span></td>
+                    <td class="num">{rate(row.sample?.rate_recv ?? 0)}</td>
+                    <td class="num">{rate(row.sample?.rate_sent ?? 0)}</td>
+                    <td class="num">{bytes((row.sample?.total.recv ?? 0) + (row.sample?.total.sent ?? 0))}</td>
+                  </tr>
+                )}
+              </For>
+            </tbody>
+          </table>
         </div>
       </Show>
     </section>
+  );
+}
+
+function DecisionSelect(props: {
+  row: AppRow;
+  direction: Direction;
+  changing: string;
+  choose: (row: AppRow, direction: Direction, decision: Decision) => Promise<void>;
+}) {
+  const value = () => decisionFor(props.row, props.direction);
+  const busy = () => props.changing === `${props.row.app}:${props.direction}`;
+  return (
+    <label
+      class="decision-select"
+      classList={{ busy: busy(), block: value() === "block", allow: value() === "allow", paused: value() === "paused" }}
+    >
+      <span class="decision-light" />
+      <select
+        value={value()}
+        disabled={!!props.changing}
+        aria-label={`${props.direction} rule for ${fileName(props.row.app)}`}
+        onChange={(event) => props.choose(props.row, props.direction, event.currentTarget.value as Decision)}
+      >
+        <option value="open">open</option>
+        <Show when={value() === "paused"}><option value="paused" disabled>paused</option></Show>
+        <option value="allow">allow</option>
+        <option value="block">block</option>
+      </select>
+      <Icon name="chevron" size={11} />
+    </label>
   );
 }

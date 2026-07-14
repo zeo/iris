@@ -36,7 +36,7 @@ const TABS: Tab[] = [
 
 export function App() {
   const theme = createTheme();
-  const [tab, setTab] = createSignal("activity");
+  const [tab, setTab] = createSignal("protect");
 
   // enabled plugins with a panel grant appear as their own tabs, between the
   // built-ins and Settings

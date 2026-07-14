@@ -34,10 +34,7 @@ export function isBlocked(path: string): boolean {
   return rules().some((r) => r.enabled && r.rule.action === "block" && r.rule.app === p);
 }
 
-// rule mutations are privileged: they install SYSTEM-enforced WFP filters, so
-// each one launches the engine elevated (a UAC prompt) and the service only
-// accepts the change over its admin-only pipe. these reject if the prompt is
-// declined.
+// rule mutations are privileged and only accepted over the admin endpoint
 export async function addRule(
   path: string,
   direction: "inbound" | "outbound",

@@ -59,21 +59,11 @@ impl NlSocket {
         Ok(NlSocket { fd })
     }
 
-    pub fn set_recv_timeout(&self, timeout: std::time::Duration) -> io::Result<()> {
-        let value = libc::timeval {
-            tv_sec: timeout.as_secs() as libc::time_t,
-            tv_usec: timeout.subsec_micros() as libc::suseconds_t,
-        };
-        let rc = unsafe {
-            libc::setsockopt(
-                self.raw(),
-                libc::SOL_SOCKET,
-                libc::SO_RCVTIMEO,
-                (&value as *const libc::timeval).cast(),
-                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-            )
-        };
-        if rc < 0 {
+    pub fn set_nonblocking(&self) -> io::Result<()> {
+        let flags = unsafe { libc::fcntl(self.raw(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(self.raw(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+        {
             return Err(io::Error::last_os_error());
         }
         Ok(())

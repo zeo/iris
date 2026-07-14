@@ -31,6 +31,8 @@ mod sockets;
 mod spawn;
 #[cfg(target_os = "linux")]
 mod svc;
+#[cfg(target_os = "linux")]
+mod trace;
 
 #[cfg(target_os = "linux")]
 pub use adapters::AdapterMap;

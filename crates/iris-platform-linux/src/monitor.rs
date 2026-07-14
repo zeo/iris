@@ -8,6 +8,8 @@
 //!   [`Aggregator`], so the service is unchanged
 //! - a sock_diag destroy subscription records the final counter delta when an
 //!   observed TCP socket closes between accounting snapshots
+//! - a perf tracepoint records the process and tuple for connections whose full
+//!   lifetime falls between snapshots, so the destroy record remains attributable
 //! - the DNS sniffer reads DNS responses off a packet socket and records each
 //!   answered address under the host name that produced it.
 
@@ -16,6 +18,7 @@ use crate::ct;
 use crate::dns::{self, DnsMap};
 use crate::proc::{self, PidCache};
 use crate::sockets::{self, SockInfo};
+use crate::trace::{FlowKey, FlowOwner, OwnerListener};
 use iris_core::Aggregator;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -39,18 +42,21 @@ impl Monitor {
         ct::enable_acct();
 
         let mut threads = Vec::new();
-        let (destroyed_tx, destroyed_rx) = std::sync::mpsc::channel();
+        let (tcp_tx, tcp_rx) = std::sync::mpsc::channel();
 
-        match sockets::DestroyListener::open() {
-            Ok(listener) => {
-                let stop = stop.clone();
-                threads.push(
-                    std::thread::Builder::new()
-                        .name("iris-tcp-close".into())
-                        .spawn(move || destroy_loop(stop, listener, destroyed_tx))?,
-                );
-            }
-            Err(error) => tracing::warn!("TCP close accounting unavailable: {error}"),
+        let close_listener = sockets::DestroyListener::open()
+            .inspect_err(|error| tracing::warn!("TCP close accounting unavailable: {error}"))
+            .ok();
+        let owner_listener = OwnerListener::open()
+            .inspect_err(|error| tracing::warn!("short TCP attribution unavailable: {error}"))
+            .ok();
+        if close_listener.is_some() || owner_listener.is_some() {
+            let stop = stop.clone();
+            threads.push(
+                std::thread::Builder::new()
+                    .name("iris-tcp-events".into())
+                    .spawn(move || tcp_event_loop(stop, owner_listener, close_listener, tcp_tx))?,
+            );
         }
 
         let acct = {
@@ -60,9 +66,7 @@ impl Monitor {
             let snapshots = dns_map.clone();
             std::thread::Builder::new()
                 .name("iris-acct".into())
-                .spawn(move || {
-                    accounting_loop(stop, agg, cache, adapters, snapshots, destroyed_rx)
-                })?
+                .spawn(move || accounting_loop(stop, agg, cache, adapters, snapshots, tcp_rx))?
         };
         threads.push(acct);
 
@@ -130,10 +134,12 @@ fn accounting_loop(
     cache: Arc<Mutex<PidCache>>,
     adapters: Arc<AdapterMap>,
     snapshots: DnsMap,
-    destroyed: std::sync::mpsc::Receiver<SockInfo>,
+    tcp_events: std::sync::mpsc::Receiver<TcpEvent>,
 ) {
     let mut tcp_seen: HashMap<u64, Baseline> = HashMap::new();
     let mut tcp_owners: HashMap<u64, TcpOwner> = HashMap::new();
+    let mut flow_owners: HashMap<FlowKey, (TcpOwner, std::time::Instant)> = HashMap::new();
+    let mut pending_closed: HashMap<FlowKey, (SockInfo, std::time::Instant)> = HashMap::new();
     let mut udp_seen: HashMap<UdpKey, Baseline> = HashMap::new();
     let mut primed = false;
 
@@ -143,9 +149,39 @@ fn accounting_loop(
         let socks = sockets::dump();
         dns::record_sockets(&snapshots, &socks, &owners);
 
-        for socket in destroyed.try_iter() {
-            account_closed_tcp(&socket, &tcp_seen, &tcp_owners, &agg);
+        for event in tcp_events.try_iter() {
+            match event {
+                TcpEvent::Owner(owner) => {
+                    flow_owners.insert(
+                        owner.key,
+                        (
+                            TcpOwner {
+                                pid: owner.pid,
+                                path: owner.path,
+                                kind: adapters.kind_for(owner.key.local.0, owner.key.remote.0),
+                            },
+                            std::time::Instant::now(),
+                        ),
+                    );
+                }
+                TcpEvent::Closed(socket) => {
+                    if !account_closed_tcp(&socket, &tcp_seen, &tcp_owners, &flow_owners, &agg) {
+                        pending_closed.insert(
+                            FlowKey {
+                                local: socket.local,
+                                remote: socket.remote,
+                            },
+                            (socket, std::time::Instant::now()),
+                        );
+                    }
+                }
+            }
         }
+        pending_closed.retain(|_, (socket, queued)| {
+            !account_closed_tcp(socket, &tcp_seen, &tcp_owners, &flow_owners, &agg)
+                && queued.elapsed() < Duration::from_secs(5)
+        });
+        flow_owners.retain(|_, (_, seen)| seen.elapsed() < Duration::from_secs(30));
         account_tcp(
             &socks,
             &owners,
@@ -207,51 +243,95 @@ fn account_closed_tcp(
     socket: &SockInfo,
     seen: &HashMap<u64, Baseline>,
     owners: &HashMap<u64, TcpOwner>,
+    flow_owners: &HashMap<FlowKey, (TcpOwner, std::time::Instant)>,
     agg: &Mutex<Aggregator>,
-) {
+) -> bool {
     let Some((sent, recv)) = socket.bytes else {
-        return;
+        return true;
     };
-    let Some(base) = seen.get(&socket.cookie) else {
-        return;
+    let (sent, recv, owner) = match seen.get(&socket.cookie) {
+        Some(base) => {
+            let Some(owner) = owners.get(&socket.cookie) else {
+                return false;
+            };
+            (
+                sent.saturating_sub(base.sent),
+                recv.saturating_sub(base.recv),
+                owner,
+            )
+        }
+        None => {
+            let key = FlowKey {
+                local: socket.local,
+                remote: socket.remote,
+            };
+            let Some((owner, _)) = flow_owners.get(&key) else {
+                return false;
+            };
+            (sent, recv, owner)
+        }
     };
-    let Some(owner) = owners.get(&socket.cookie) else {
-        return;
-    };
-    let sent = sent.saturating_sub(base.sent);
-    let recv = recv.saturating_sub(base.recv);
     if sent == 0 && recv == 0 {
-        return;
+        return true;
     }
-    if let Ok(mut aggregator) = agg.lock() {
-        aggregator.record(owner.pid, &owner.path, None, owner.kind, sent, recv);
-    }
+    agg.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .record(owner.pid, &owner.path, None, owner.kind, sent, recv);
+    true
 }
 
-fn destroy_loop(
+enum TcpEvent {
+    Owner(FlowOwner),
+    Closed(SockInfo),
+}
+
+fn tcp_event_loop(
     stop: Arc<AtomicBool>,
-    mut listener: sockets::DestroyListener,
-    sender: std::sync::mpsc::Sender<SockInfo>,
+    mut owners: Option<OwnerListener>,
+    mut closes: Option<sockets::DestroyListener>,
+    sender: std::sync::mpsc::Sender<TcpEvent>,
 ) {
+    let mut found_owners = Vec::new();
     let mut closed = Vec::new();
     while !stop.load(Ordering::Relaxed) {
-        match listener.receive(&mut closed) {
-            Ok(()) => {
-                for socket in closed.drain(..) {
-                    if sender.send(socket).is_err() {
-                        return;
-                    }
+        if let Some(listener) = owners.as_mut() {
+            match listener.receive(200, &mut found_owners) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    tracing::warn!("short TCP attribution stopped: {error}");
+                    owners = None;
                 }
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Err(error) => {
-                tracing::warn!("TCP close accounting stopped: {error}");
+        } else {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        for owner in found_owners.drain(..) {
+            if sender.send(TcpEvent::Owner(owner)).is_err() {
                 return;
             }
+        }
+
+        while let Some(listener) = closes.as_mut() {
+            match listener.receive(&mut closed) {
+                Ok(()) => {
+                    for socket in closed.drain(..) {
+                        if sender.send(TcpEvent::Closed(socket)).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    tracing::warn!("TCP close accounting stopped: {error}");
+                    closes = None;
+                    break;
+                }
+            }
+        }
+        if owners.is_none() && closes.is_none() {
+            return;
         }
     }
 }
@@ -620,11 +700,52 @@ mod tests {
         };
         let aggregator = Mutex::new(Aggregator::new(0));
 
-        account_closed_tcp(&socket, &seen, &owners, &aggregator);
+        account_closed_tcp(&socket, &seen, &owners, &HashMap::new(), &aggregator);
         let sample = aggregator.lock().unwrap().flush(1000).procs.pop().unwrap();
         assert_eq!(sample.pid, 42);
         assert_eq!(sample.total.sent, 250);
         assert_eq!(sample.total.recv, 400);
+    }
+
+    #[test]
+    fn short_socket_uses_tracepoint_owner_and_full_counters() {
+        let socket = SockInfo {
+            protocol: Protocol::Tcp,
+            state: 7,
+            local: (IpAddr::from([192, 0, 2, 2]), 40000),
+            remote: (IpAddr::from([198, 51, 100, 4]), 443),
+            uid: 1000,
+            inode: 0,
+            cookie: 9,
+            bytes: Some((350, 600)),
+        };
+        let mut flow_owners = HashMap::new();
+        flow_owners.insert(
+            FlowKey {
+                local: socket.local,
+                remote: socket.remote,
+            },
+            (
+                TcpOwner {
+                    pid: 42,
+                    path: "/usr/bin/browser".into(),
+                    kind: AdapterKind::Wifi,
+                },
+                std::time::Instant::now(),
+            ),
+        );
+        let aggregator = Mutex::new(Aggregator::new(0));
+
+        account_closed_tcp(
+            &socket,
+            &HashMap::new(),
+            &HashMap::new(),
+            &flow_owners,
+            &aggregator,
+        );
+        let sample = aggregator.lock().unwrap().flush(1000).procs.pop().unwrap();
+        assert_eq!(sample.total.sent, 350);
+        assert_eq!(sample.total.recv, 600);
     }
 
     #[test]

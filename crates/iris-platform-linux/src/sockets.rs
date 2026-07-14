@@ -180,7 +180,7 @@ impl DestroyListener {
         const INET6_TCP_DESTROY: u32 = 1 << 2;
         let socket =
             NlSocket::open_groups(NETLINK_INET_DIAG, INET_TCP_DESTROY | INET6_TCP_DESTROY)?;
-        socket.set_recv_timeout(std::time::Duration::from_secs(1))?;
+        socket.set_nonblocking()?;
         Ok(Self {
             socket,
             buffer: vec![0; 64 * 1024],

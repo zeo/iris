@@ -7,6 +7,7 @@
 //! account, and authenticates with a spawn-time token.
 
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -83,6 +84,11 @@ pub fn random_token() -> String {
 pub fn spawn_restricted(exe: &Path, extra_env: &[(String, String)]) -> io::Result<RestrictedChild> {
     let (uid, gid) = plugin_ids()?;
     let cwd = exe.parent().map(Path::to_path_buf);
+    let cgroup = crate::egress::cgroup_for(exe).map_err(io::Error::other)?;
+    let cgroup_procs = std::fs::OpenOptions::new()
+        .write(true)
+        .open(cgroup.join("cgroup.procs"))?;
+    let cgroup_fd = cgroup_procs.as_raw_fd();
 
     let mut cmd = Command::new(exe);
     cmd.stdin(Stdio::null())
@@ -103,7 +109,7 @@ pub fn spawn_restricted(exe: &Path, extra_env: &[(String, String)]) -> io::Resul
     // stay async-signal-safe (no allocation, no locks), so all values are
     // captured by copy and only raw libc calls are made
     unsafe {
-        cmd.pre_exec(move || drop_privileges(uid, gid));
+        cmd.pre_exec(move || drop_privileges(uid, gid, cgroup_fd));
     }
 
     let child = cmd.spawn()?;
@@ -134,8 +140,9 @@ fn plugin_ids() -> io::Result<(u32, u32)> {
 }
 
 /// drop to the plugin account and lock the child down. runs in the forked child.
-fn drop_privileges(uid: u32, gid: u32) -> io::Result<()> {
+fn drop_privileges(uid: u32, gid: u32, cgroup_fd: std::os::fd::RawFd) -> io::Result<()> {
     unsafe {
+        enter_cgroup(cgroup_fd)?;
         // never gain privilege through a setuid/setgid binary after this point
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
             return Err(io::Error::last_os_error());
@@ -170,6 +177,32 @@ fn drop_privileges(uid: u32, gid: u32) -> io::Result<()> {
         if libc::getppid() == 1 {
             return Err(io::Error::other("engine exited during plugin startup"));
         }
+    }
+    Ok(())
+}
+
+fn enter_cgroup(fd: std::os::fd::RawFd) -> io::Result<()> {
+    let mut digits = [0u8; 20];
+    let mut pid = unsafe { libc::getpid() as u32 };
+    let mut start = digits.len();
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (pid % 10) as u8;
+        pid /= 10;
+        if pid == 0 {
+            break;
+        }
+    }
+    let bytes = &digits[start..];
+    let written = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+    if written < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if written != bytes.len() as isize {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "short write to cgroup.procs",
+        ));
     }
     Ok(())
 }

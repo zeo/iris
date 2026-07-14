@@ -60,9 +60,9 @@ The sandbox is enforced by the service, not trusted to the plugin. On Windows
 each child runs under a restricted low-integrity token with every privilege
 stripped; on Linux it runs as a dedicated unprivileged account with no new
 privileges and capped resources. Its network access is pinned to consented
-endpoints through the Filtering Platform on Windows and nftables on Linux. Linux
-plugins currently share one sandbox account, so their active endpoint grants are
-combined; an empty combined egress list means no network at all.
+endpoints through the Filtering Platform on Windows and a private cgroup-v2
+nftables boundary on Linux. Linux plugins share one sandbox account while
+retaining separate network grants; an empty egress list means no network at all.
 A plugin cannot change firewall rules. The strongest thing it can do is file a
 rule proposal, which sits in Protect until the user accepts it through the same
 elevation gate as a manual rule. Panels are declarative: a plugin returns data

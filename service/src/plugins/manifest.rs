@@ -30,7 +30,7 @@ pub struct Manifest {
     #[serde(default)]
     pub capabilities: Vec<String>,
     /// declared egress, `host:port` per entry. the service pins the child to
-    /// exactly these with WFP; an empty list means no network.
+    /// exactly these with the platform firewall; an empty list means no network.
     #[serde(default)]
     pub egress: Vec<String>,
 }
@@ -139,7 +139,7 @@ pub fn discover() -> Vec<(PathBuf, Manifest)> {
 }
 
 /// a declared egress entry must be `host:port` with a real port and a non-empty
-/// host, so the WFP pin has something concrete to permit
+/// host, so the firewall pin has something concrete to permit
 fn validate_egress(entry: &str) -> Result<(), String> {
     let (host, port) = entry
         .rsplit_once(':')

@@ -86,8 +86,7 @@ fn unit_of(pid: u32) -> Option<String> {
 /// a system service
 fn service_component(path: &str) -> Option<String> {
     path.split('/')
-        .filter(|c| c.ends_with(".service"))
-        .next_back()
+        .rfind(|c| c.ends_with(".service"))
         .map(|c| c.to_string())
 }
 

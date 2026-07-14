@@ -24,7 +24,7 @@ pub fn run() -> anyhow::Result<()> {
     }
     paths::ensure_runtime_dirs()?;
     tracing::info!("iris-engine starting (systemd)");
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = crate::engine_runtime()?;
     rt.block_on(async {
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = signal(SignalKind::terminate())?;
@@ -80,7 +80,7 @@ RestartSec=5
 RuntimeDirectory=iris
 RuntimeDirectoryMode=0755
 StateDirectory=iris
-StateDirectoryMode=0700
+StateDirectoryMode=0711
 UMask=0077
 # the engine drops privilege only for plugin children; it needs root itself for
 # netlink, NFQUEUE, nftables, and reading other processes' executables
@@ -92,7 +92,7 @@ WantedBy=multi-user.target
         exe = exe.display()
     );
     std::fs::write(UNIT_PATH, unit)?;
-    std::fs::write(POLKIT_POLICY, polkit_policy(&exe))?;
+    std::fs::write(POLKIT_POLICY, polkit_policy(exe))?;
 
     run_ok(Command::new("systemctl").arg("daemon-reload"))?;
     run_ok(Command::new("systemctl").args(["enable", UNIT_NAME]))?;

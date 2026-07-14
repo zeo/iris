@@ -450,33 +450,6 @@ fn ipv6_transport(pkt: &[u8], mut next: u8, mut offset: usize) -> Option<(u8, us
     }
 }
 
-#[cfg(test)]
-mod packet_tests {
-    use super::parse_tuple;
-
-    #[test]
-    fn parses_ports_after_an_ipv6_extension_header() {
-        let mut packet = vec![0u8; 52];
-        packet[0] = 0x60;
-        packet[6] = 0;
-        packet[40] = libc::IPPROTO_TCP as u8;
-        packet[41] = 0;
-        packet[48..50].copy_from_slice(&1234u16.to_be_bytes());
-        packet[50..52].copy_from_slice(&443u16.to_be_bytes());
-        let (_, _, source, destination) = parse_tuple(&packet).unwrap();
-        assert_eq!((source, destination), (1234, 443));
-    }
-
-    #[test]
-    fn rejects_noninitial_ipv4_fragments() {
-        let mut packet = vec![0u8; 24];
-        packet[0] = 0x45;
-        packet[6..8].copy_from_slice(&1u16.to_be_bytes());
-        packet[9] = libc::IPPROTO_TCP as u8;
-        assert!(parse_tuple(&packet).is_none());
-    }
-}
-
 fn is_l4(proto: u8) -> bool {
     proto == libc::IPPROTO_TCP as u8 || proto == libc::IPPROTO_UDP as u8
 }
@@ -507,7 +480,7 @@ impl Resolver {
         for s in sockets::dump_for_attribution() {
             self.by_local
                 .entry((s.local.0, s.local.1))
-                .or_insert(s.inode as u32);
+                .or_insert(s.inode);
         }
         // periodically drop the pid->path cache so a reused pid cannot keep a
         // stale executable path
@@ -543,5 +516,32 @@ impl Resolver {
             .copied()?;
         let pid = *self.owners.get(&(inode as u64))?;
         crate::proc::image_path_of(pid).or_else(|| self.cache.resolve(pid))
+    }
+}
+
+#[cfg(test)]
+mod packet_tests {
+    use super::parse_tuple;
+
+    #[test]
+    fn parses_ports_after_an_ipv6_extension_header() {
+        let mut packet = vec![0u8; 52];
+        packet[0] = 0x60;
+        packet[6] = 0;
+        packet[40] = libc::IPPROTO_TCP as u8;
+        packet[41] = 0;
+        packet[48..50].copy_from_slice(&1234u16.to_be_bytes());
+        packet[50..52].copy_from_slice(&443u16.to_be_bytes());
+        let (_, _, source, destination) = parse_tuple(&packet).unwrap();
+        assert_eq!((source, destination), (1234, 443));
+    }
+
+    #[test]
+    fn rejects_noninitial_ipv4_fragments() {
+        let mut packet = vec![0u8; 24];
+        packet[0] = 0x45;
+        packet[6..8].copy_from_slice(&1u16.to_be_bytes());
+        packet[9] = libc::IPPROTO_TCP as u8;
+        assert!(parse_tuple(&packet).is_none());
     }
 }

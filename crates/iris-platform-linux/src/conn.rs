@@ -61,10 +61,14 @@ impl ConnCounter {
 
     /// current connections grouped by owning pid, each with the process path
     pub fn by_pid(&mut self) -> HashMap<u32, (String, Vec<Conn>)> {
-        let owners = proc::socket_inode_owners();
+        let snapshot = dns::sockets(&self.dns);
+        let (socks, owners) = match snapshot {
+            Some(snapshot) => (snapshot.socks, snapshot.owners),
+            None => (sockets::dump(), proc::socket_inode_owners()),
+        };
         let mut out: HashMap<u32, (String, Vec<Conn>)> = HashMap::new();
 
-        for s in sockets::dump() {
+        for s in socks {
             // only TCP has a real peer to show; a UDP socket usually has no
             // connected remote, matching the Windows view which lists TCP only
             if !s.is_tcp() {

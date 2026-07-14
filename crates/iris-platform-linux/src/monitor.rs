@@ -42,9 +42,10 @@ impl Monitor {
             let stop = stop.clone();
             let cache = cache.clone();
             let adapters = adapters.clone();
+            let snapshots = dns_map.clone();
             std::thread::Builder::new()
                 .name("iris-acct".into())
-                .spawn(move || accounting_loop(stop, agg, cache, adapters))?
+                .spawn(move || accounting_loop(stop, agg, cache, adapters, snapshots))?
         };
         threads.push(acct);
 
@@ -110,6 +111,7 @@ fn accounting_loop(
     agg: Arc<Mutex<Aggregator>>,
     cache: Arc<Mutex<PidCache>>,
     adapters: Arc<AdapterMap>,
+    snapshots: DnsMap,
 ) {
     let mut tcp_seen: HashMap<u64, Baseline> = HashMap::new();
     let mut udp_seen: HashMap<UdpKey, Baseline> = HashMap::new();
@@ -118,6 +120,7 @@ fn accounting_loop(
         std::thread::sleep(Duration::from_secs(1));
         let owners = proc::socket_inode_owners();
         let socks = sockets::dump();
+        dns::record_sockets(&snapshots, &socks, &owners);
 
         account_tcp(&socks, &owners, &mut tcp_seen, &agg, &cache, &adapters);
         account_udp(&socks, &owners, &mut udp_seen, &agg, &cache, &adapters);

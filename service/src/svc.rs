@@ -64,7 +64,7 @@ fn run_service() -> anyhow::Result<()> {
         ServiceExitCode::Win32(0),
     ))?;
 
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = crate::engine_runtime()?;
     let rules = std::sync::Arc::new(std::sync::Mutex::new(crate::rules::RuleStore::new()?));
     let failed = rt.block_on(async {
         let engine = Engine::new();

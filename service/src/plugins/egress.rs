@@ -1,6 +1,6 @@
 //! resolves a plugin's granted egress into concrete endpoints and keeps the
-//! child pinned to them with WFP. names re-resolve on a slow cadence so a
-//! rotated DNS record does not strand a healthy plugin, while the pin itself
+//! child pinned to them with the platform firewall. names re-resolve on a slow
+//! cadence so a rotated DNS record does not strand a healthy plugin. the pin
 //! stays fail-closed: no pin, no child.
 
 use crate::platform::{AppPin, PluginNet};
@@ -10,7 +10,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-/// one shared dynamic WFP session pinning every plugin child
+/// one platform firewall session pinning every plugin child
 pub struct Pinner {
     net: Mutex<PluginNet>,
 }

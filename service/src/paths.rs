@@ -67,7 +67,15 @@ pub fn record_desktop_uid(uid: u32) -> std::io::Result<()> {
 pub fn secure_state() -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    std::fs::set_permissions(data_dir(), std::fs::Permissions::from_mode(0o700))?;
+    // no account may list the state root, but plugin children need to traverse
+    // it to reach their root-owned executable below `plugins`
+    std::fs::set_permissions(data_dir(), std::fs::Permissions::from_mode(0o711))?;
+    let plugins = plugins_dir();
+    let gid = plugin_gid().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "iris-plugin account missing")
+    })?;
+    chown(&plugins, 0, gid)?;
+    std::fs::set_permissions(&plugins, std::fs::Permissions::from_mode(0o750))?;
     for path in [
         store_file(),
         data_dir().join("iris.db-wal"),

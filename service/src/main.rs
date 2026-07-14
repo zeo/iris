@@ -134,8 +134,15 @@ fn init_logging(to_file: bool) {
 
 fn run_console() -> anyhow::Result<()> {
     tracing::info!("iris-engine starting (console mode)");
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = engine_runtime()?;
     rt.block_on(run_engine())
+}
+
+pub(crate) fn engine_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
 }
 
 /// the engine's async main: monitor, plugin host, and both IPC servers, run to

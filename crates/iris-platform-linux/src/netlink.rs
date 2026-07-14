@@ -26,6 +26,10 @@ pub struct NlSocket {
 
 impl NlSocket {
     pub fn open(protocol: libc::c_int) -> io::Result<NlSocket> {
+        Self::open_groups(protocol, 0)
+    }
+
+    pub fn open_groups(protocol: libc::c_int, groups: u32) -> io::Result<NlSocket> {
         let raw: RawFd = unsafe {
             libc::socket(
                 libc::AF_NETLINK,
@@ -41,6 +45,7 @@ impl NlSocket {
 
         let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         addr.nl_family = libc::AF_NETLINK as u16;
+        addr.nl_groups = groups;
         let rc = unsafe {
             libc::bind(
                 raw,
@@ -52,6 +57,26 @@ impl NlSocket {
             return Err(io::Error::last_os_error());
         }
         Ok(NlSocket { fd })
+    }
+
+    pub fn set_recv_timeout(&self, timeout: std::time::Duration) -> io::Result<()> {
+        let value = libc::timeval {
+            tv_sec: timeout.as_secs() as libc::time_t,
+            tv_usec: timeout.subsec_micros() as libc::suseconds_t,
+        };
+        let rc = unsafe {
+            libc::setsockopt(
+                self.raw(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                (&value as *const libc::timeval).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub fn send(&self, buf: &[u8]) -> io::Result<()> {
@@ -125,6 +150,27 @@ impl NlSocket {
                 off += align4(msg_len);
             }
         }
+    }
+
+    pub fn recv_messages<F: FnMut(u16, &[u8])>(
+        &self,
+        buf: &mut [u8],
+        mut visit: F,
+    ) -> io::Result<()> {
+        let len = self.recv(buf)?;
+        let mut off = 0;
+        while off + 16 <= len {
+            let msg_len = u32::from_ne_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+            if msg_len < 16 || off + msg_len > len {
+                break;
+            }
+            let msg_type = u16::from_ne_bytes(buf[off + 4..off + 6].try_into().unwrap());
+            if !matches!(msg_type, NLMSG_NOOP | NLMSG_DONE | NLMSG_ERROR) {
+                visit(msg_type, &buf[off + 16..off + msg_len]);
+            }
+            off += align4(msg_len);
+        }
+        Ok(())
     }
 }
 

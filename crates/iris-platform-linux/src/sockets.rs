@@ -15,6 +15,7 @@ const SOCK_DESTROY: u16 = 21;
 // the tcp_info extension carries the byte counters; extensions are 1-indexed in
 // the request bitmask, so INET_DIAG_INFO (2) is bit 1
 const INET_DIAG_INFO: u16 = 2;
+const INET_DIAG_PROTOCOL: u16 = 10;
 const EXT_INFO_BIT: u8 = 1 << (INET_DIAG_INFO - 1);
 
 // tcp states we care about: everything an active or closing connection passes
@@ -166,6 +167,50 @@ fn parse_msg(family: u8, proto: Protocol, payload: &[u8]) -> Option<SockInfo> {
     })
 }
 
+pub struct DestroyListener {
+    socket: NlSocket,
+    buffer: Vec<u8>,
+}
+
+impl DestroyListener {
+    pub fn open() -> std::io::Result<Self> {
+        // netlink multicast group numbers are one-based bits; subscribe only to
+        // IPv4 and IPv6 TCP destruction because UDP has no tcp_info counters
+        const INET_TCP_DESTROY: u32 = 1 << 0;
+        const INET6_TCP_DESTROY: u32 = 1 << 2;
+        let socket =
+            NlSocket::open_groups(NETLINK_INET_DIAG, INET_TCP_DESTROY | INET6_TCP_DESTROY)?;
+        socket.set_recv_timeout(std::time::Duration::from_secs(1))?;
+        Ok(Self {
+            socket,
+            buffer: vec![0; 64 * 1024],
+        })
+    }
+
+    pub fn receive(&mut self, out: &mut Vec<SockInfo>) -> std::io::Result<()> {
+        self.socket
+            .recv_messages(&mut self.buffer, |msg_type, payload| {
+                if msg_type == SOCK_DIAG_BY_FAMILY {
+                    if let Some(socket) = parse_destroy_msg(payload) {
+                        out.push(socket)
+                    }
+                }
+            })
+    }
+}
+
+fn parse_destroy_msg(payload: &[u8]) -> Option<SockInfo> {
+    let family = *payload.first()?;
+    let mut protocol = None;
+    netlink::for_each_attr(payload.get(72..)?, |kind, value| {
+        if kind == INET_DIAG_PROTOCOL {
+            protocol = value.first().copied();
+        }
+    });
+    (protocol == Some(libc::IPPROTO_TCP as u8))
+        .then(|| parse_msg(family, Protocol::Tcp, payload))?
+}
+
 fn read_addr(family: u8, raw: &[u8]) -> IpAddr {
     if family == libc::AF_INET as u8 {
         IpAddr::V4(Ipv4Addr::new(raw[0], raw[1], raw[2], raw[3]))
@@ -273,5 +318,41 @@ mod tests {
     #[test]
     fn attribution_dump_requests_listeners() {
         assert_ne!(STATES_ALL & (1 << TCP_LISTEN), 0);
+    }
+
+    #[test]
+    fn parses_tcp_destroy_counter_record() {
+        let mut payload = vec![0u8; 72];
+        payload[0] = libc::AF_INET as u8;
+        payload[4..6].copy_from_slice(&1234u16.to_be_bytes());
+        payload[6..8].copy_from_slice(&443u16.to_be_bytes());
+        payload[8..12].copy_from_slice(&[192, 0, 2, 2]);
+        payload[24..28].copy_from_slice(&[198, 51, 100, 4]);
+        payload[44..48].copy_from_slice(&7u32.to_ne_bytes());
+
+        let protocol_attr = [
+            5,
+            0,
+            INET_DIAG_PROTOCOL as u8,
+            0,
+            libc::IPPROTO_TCP as u8,
+            0,
+            0,
+            0,
+        ];
+        payload.extend_from_slice(&protocol_attr);
+        let mut info = vec![0u8; TCPI_BYTES_RECEIVED + 8];
+        info[TCPI_BYTES_ACKED..TCPI_BYTES_ACKED + 8].copy_from_slice(&900u64.to_ne_bytes());
+        info[TCPI_BYTES_RECEIVED..TCPI_BYTES_RECEIVED + 8].copy_from_slice(&1200u64.to_ne_bytes());
+        let attr_len = (info.len() + 4) as u16;
+        payload.extend_from_slice(&attr_len.to_ne_bytes());
+        payload.extend_from_slice(&INET_DIAG_INFO.to_ne_bytes());
+        payload.extend_from_slice(&info);
+
+        let socket = parse_destroy_msg(&payload).unwrap();
+        assert_eq!(socket.cookie, 7);
+        assert_eq!(socket.local.1, 1234);
+        assert_eq!(socket.remote.1, 443);
+        assert_eq!(socket.bytes, Some((900, 1200)));
     }
 }

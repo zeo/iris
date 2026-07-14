@@ -1,11 +1,13 @@
 //! the Linux byte monitor, the counterpart to the Windows ETW monitor. it fills
 //! the shared aggregator with per-process throughput and captures the DNS names
-//! processes resolve, from two background threads:
+//! processes resolve, from three background threads:
 //!
 //! - accounting polls sock_diag once a second and diffs each TCP socket's
 //!   tcp_info byte counters, attributing the delta to the owning pid; UDP bytes
-//!   come from conntrack where it is available. this is a poll where ETW is a
-//!   push, but it feeds the identical [`Aggregator`], so the service is unchanged.
+//!   come from conntrack where it is available. this feeds the identical
+//!   [`Aggregator`], so the service is unchanged
+//! - a sock_diag destroy subscription records the final counter delta when an
+//!   observed TCP socket closes between accounting snapshots
 //! - the DNS sniffer reads DNS responses off a packet socket and records each
 //!   answered address under the host name that produced it.
 
@@ -37,6 +39,19 @@ impl Monitor {
         ct::enable_acct();
 
         let mut threads = Vec::new();
+        let (destroyed_tx, destroyed_rx) = std::sync::mpsc::channel();
+
+        match sockets::DestroyListener::open() {
+            Ok(listener) => {
+                let stop = stop.clone();
+                threads.push(
+                    std::thread::Builder::new()
+                        .name("iris-tcp-close".into())
+                        .spawn(move || destroy_loop(stop, listener, destroyed_tx))?,
+                );
+            }
+            Err(error) => tracing::warn!("TCP close accounting unavailable: {error}"),
+        }
 
         let acct = {
             let stop = stop.clone();
@@ -45,7 +60,9 @@ impl Monitor {
             let snapshots = dns_map.clone();
             std::thread::Builder::new()
                 .name("iris-acct".into())
-                .spawn(move || accounting_loop(stop, agg, cache, adapters, snapshots))?
+                .spawn(move || {
+                    accounting_loop(stop, agg, cache, adapters, snapshots, destroyed_rx)
+                })?
         };
         threads.push(acct);
 
@@ -104,6 +121,7 @@ impl Drop for Monitor {
 struct Baseline {
     sent: u64,
     recv: u64,
+    missed: u8,
 }
 
 fn accounting_loop(
@@ -112,9 +130,12 @@ fn accounting_loop(
     cache: Arc<Mutex<PidCache>>,
     adapters: Arc<AdapterMap>,
     snapshots: DnsMap,
+    destroyed: std::sync::mpsc::Receiver<SockInfo>,
 ) {
     let mut tcp_seen: HashMap<u64, Baseline> = HashMap::new();
+    let mut tcp_owners: HashMap<u64, TcpOwner> = HashMap::new();
     let mut udp_seen: HashMap<UdpKey, Baseline> = HashMap::new();
+    let mut primed = false;
 
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_secs(1));
@@ -122,8 +143,116 @@ fn accounting_loop(
         let socks = sockets::dump();
         dns::record_sockets(&snapshots, &socks, &owners);
 
-        account_tcp(&socks, &owners, &mut tcp_seen, &agg, &cache, &adapters);
-        account_udp(&socks, &owners, &mut udp_seen, &agg, &cache, &adapters);
+        for socket in destroyed.try_iter() {
+            account_closed_tcp(&socket, &tcp_seen, &tcp_owners, &agg);
+        }
+        account_tcp(
+            &socks,
+            &owners,
+            &mut tcp_seen,
+            &agg,
+            &cache,
+            &adapters,
+            primed,
+        );
+        tcp_owners.retain(|cookie, _| tcp_seen.contains_key(cookie));
+        tcp_owners.extend(tcp_owner_map(&socks, &owners, &cache, &adapters));
+        account_udp(
+            &socks,
+            &owners,
+            &mut udp_seen,
+            &agg,
+            &cache,
+            &adapters,
+            primed,
+        );
+        primed = true;
+    }
+}
+
+#[derive(Clone)]
+struct TcpOwner {
+    pid: u32,
+    path: String,
+    kind: iris_core::AdapterKind,
+}
+
+fn tcp_owner_map(
+    socks: &[SockInfo],
+    owners: &HashMap<u64, u32>,
+    cache: &Mutex<PidCache>,
+    adapters: &AdapterMap,
+) -> HashMap<u64, TcpOwner> {
+    let mut tracked = HashMap::new();
+    for socket in socks.iter().filter(|socket| socket.is_tcp()) {
+        let Some(&pid) = owners.get(&(socket.inode as u64)) else {
+            continue;
+        };
+        let Some(path) = resolve_path(cache, pid) else {
+            continue;
+        };
+        tracked.insert(
+            socket.cookie,
+            TcpOwner {
+                pid,
+                path,
+                kind: adapters.kind_for(socket.local.0, socket.remote.0),
+            },
+        );
+    }
+    tracked
+}
+
+fn account_closed_tcp(
+    socket: &SockInfo,
+    seen: &HashMap<u64, Baseline>,
+    owners: &HashMap<u64, TcpOwner>,
+    agg: &Mutex<Aggregator>,
+) {
+    let Some((sent, recv)) = socket.bytes else {
+        return;
+    };
+    let Some(base) = seen.get(&socket.cookie) else {
+        return;
+    };
+    let Some(owner) = owners.get(&socket.cookie) else {
+        return;
+    };
+    let sent = sent.saturating_sub(base.sent);
+    let recv = recv.saturating_sub(base.recv);
+    if sent == 0 && recv == 0 {
+        return;
+    }
+    if let Ok(mut aggregator) = agg.lock() {
+        aggregator.record(owner.pid, &owner.path, None, owner.kind, sent, recv);
+    }
+}
+
+fn destroy_loop(
+    stop: Arc<AtomicBool>,
+    mut listener: sockets::DestroyListener,
+    sender: std::sync::mpsc::Sender<SockInfo>,
+) {
+    let mut closed = Vec::new();
+    while !stop.load(Ordering::Relaxed) {
+        match listener.receive(&mut closed) {
+            Ok(()) => {
+                for socket in closed.drain(..) {
+                    if sender.send(socket).is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => {
+                tracing::warn!("TCP close accounting stopped: {error}");
+                return;
+            }
+        }
     }
 }
 
@@ -138,8 +267,23 @@ fn account_tcp(
     agg: &Mutex<Aggregator>,
     cache: &Mutex<PidCache>,
     adapters: &AdapterMap,
+    count_new: bool,
 ) {
-    let mut live = HashMap::new();
+    // keep a vanished socket briefly so its asynchronous destroy event can
+    // still match the last owner and baseline if userspace scheduling lags
+    let mut live: HashMap<u64, Baseline> = seen
+        .iter()
+        .filter_map(|(cookie, baseline)| {
+            let missed = baseline.missed.saturating_add(1);
+            (missed <= 2).then_some((
+                *cookie,
+                Baseline {
+                    missed,
+                    ..*baseline
+                },
+            ))
+        })
+        .collect();
     for s in socks {
         let Some((cur_sent, cur_recv)) = s.bytes else {
             continue;
@@ -147,25 +291,13 @@ fn account_tcp(
         if !s.is_tcp() {
             continue;
         }
-        // a socket we have not seen this session contributes no history: record
-        // its current counters as the baseline and no delta
-        let Some(base) = seen.get(&s.cookie).copied() else {
-            live.insert(
-                s.cookie,
-                Baseline {
-                    sent: cur_sent,
-                    recv: cur_recv,
-                },
-            );
-            continue;
-        };
-        let d_sent = cur_sent.saturating_sub(base.sent);
-        let d_recv = cur_recv.saturating_sub(base.recv);
+        let (d_sent, d_recv) = byte_delta(cur_sent, cur_recv, seen.get(&s.cookie), count_new);
         live.insert(
             s.cookie,
             Baseline {
                 sent: cur_sent,
                 recv: cur_recv,
+                missed: 0,
             },
         );
         if d_sent == 0 && d_recv == 0 {
@@ -185,6 +317,17 @@ fn account_tcp(
     *seen = live;
 }
 
+fn byte_delta(sent: u64, recv: u64, base: Option<&Baseline>, count_new: bool) -> (u64, u64) {
+    match base {
+        Some(base) => (
+            sent.saturating_sub(base.sent),
+            recv.saturating_sub(base.recv),
+        ),
+        None if count_new => (sent, recv),
+        None => (0, 0),
+    }
+}
+
 /// key a udp conntrack flow by its original tuple so its counters diff across polls
 #[derive(PartialEq, Eq, Hash, Clone)]
 struct UdpKey {
@@ -201,6 +344,7 @@ fn account_udp(
     agg: &Mutex<Aggregator>,
     cache: &Mutex<PidCache>,
     adapters: &AdapterMap,
+    count_new: bool,
 ) {
     // index udp sockets by local port so a conntrack flow can find its owner
     let mut by_local_port: HashMap<u16, u32> = HashMap::new();
@@ -224,23 +368,14 @@ fn account_udp(
             sport: flow.sport,
             dport: flow.dport,
         };
-        let Some(base) = seen.get(&key).copied() else {
-            live.insert(
-                key,
-                Baseline {
-                    sent: flow.orig_bytes,
-                    recv: flow.reply_bytes,
-                },
-            );
-            continue;
-        };
-        let d_orig = flow.orig_bytes.saturating_sub(base.sent);
-        let d_reply = flow.reply_bytes.saturating_sub(base.recv);
+        let (d_orig, d_reply) =
+            byte_delta(flow.orig_bytes, flow.reply_bytes, seen.get(&key), count_new);
         live.insert(
             key,
             Baseline {
                 sent: flow.orig_bytes,
                 recv: flow.reply_bytes,
+                missed: 0,
             },
         );
         if d_orig == 0 && d_reply == 0 {
@@ -446,4 +581,61 @@ fn read_name(msg: &[u8], mut off: usize) -> (Option<String>, usize) {
         return (None, stream_end);
     }
     (Some(labels.join(".")), stream_end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iris_core::{AdapterKind, Protocol};
+
+    #[test]
+    fn closed_socket_adds_bytes_after_the_last_poll() {
+        let mut seen = HashMap::new();
+        seen.insert(
+            9,
+            Baseline {
+                sent: 100,
+                recv: 200,
+                missed: 0,
+            },
+        );
+        let mut owners = HashMap::new();
+        owners.insert(
+            9,
+            TcpOwner {
+                pid: 42,
+                path: "/usr/bin/browser".into(),
+                kind: AdapterKind::Wifi,
+            },
+        );
+        let socket = SockInfo {
+            protocol: Protocol::Tcp,
+            state: 7,
+            local: (IpAddr::from([192, 0, 2, 2]), 40000),
+            remote: (IpAddr::from([198, 51, 100, 4]), 443),
+            uid: 1000,
+            inode: 0,
+            cookie: 9,
+            bytes: Some((350, 600)),
+        };
+        let aggregator = Mutex::new(Aggregator::new(0));
+
+        account_closed_tcp(&socket, &seen, &owners, &aggregator);
+        let sample = aggregator.lock().unwrap().flush(1000).procs.pop().unwrap();
+        assert_eq!(sample.pid, 42);
+        assert_eq!(sample.total.sent, 250);
+        assert_eq!(sample.total.recv, 400);
+    }
+
+    #[test]
+    fn new_socket_counts_from_zero_after_the_initial_baseline() {
+        assert_eq!(byte_delta(400, 700, None, false), (0, 0));
+        assert_eq!(byte_delta(400, 700, None, true), (400, 700));
+        let base = Baseline {
+            sent: 300,
+            recv: 500,
+            missed: 0,
+        };
+        assert_eq!(byte_delta(400, 700, Some(&base), true), (100, 200));
+    }
 }

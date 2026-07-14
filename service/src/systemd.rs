@@ -13,6 +13,7 @@ const UNIT_PATH: &str = "/etc/systemd/system/iris-engine.service";
 const PLUGIN_USER: &str = "iris-plugin";
 const POLKIT_POLICY: &str = "/usr/share/polkit-1/actions/com.iris.engine.policy";
 const INSTALLED_ENGINE: &str = "/usr/libexec/iris/iris-engine";
+const INSTALLED_GEO_DB: &str = "/usr/share/iris/geo/dbip-country.mmdb";
 
 /// run the engine under systemd until SIGTERM/SIGINT, then return so the Drop
 /// paths clean up. must run as root: netlink sock_diag/conntrack, NFQUEUE,
@@ -61,6 +62,7 @@ pub fn install() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("PKEXEC_UID is invalid"))?;
     paths::record_desktop_uid(desktop_uid)?;
     paths::secure_state()?;
+    install_geo_db(&source_exe)?;
     install_engine(&source_exe)?;
     let exe = std::path::Path::new(INSTALLED_ENGINE);
 
@@ -108,8 +110,38 @@ pub fn uninstall() -> anyhow::Result<()> {
     remove_if_present(UNIT_PATH)?;
     remove_if_present(POLKIT_POLICY)?;
     remove_if_present(INSTALLED_ENGINE)?;
+    remove_if_present(INSTALLED_GEO_DB)?;
     run_ok(Command::new("systemctl").arg("daemon-reload"))?;
     tracing::info!("iris-engine uninstalled");
+    Ok(())
+}
+
+fn install_geo_db(source_exe: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source_dir = source_exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("engine path has no parent"))?;
+    let source = [
+        source_dir.join("resources/geo/dbip-country.mmdb"),
+        source_dir.join("../resources/geo/dbip-country.mmdb"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file());
+    let Some(source) = source else {
+        tracing::warn!("country database is absent from the application resources");
+        return Ok(());
+    };
+
+    let destination = std::path::Path::new(INSTALLED_GEO_DB);
+    let directory = destination
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("country database path has no parent"))?;
+    std::fs::create_dir_all(directory)?;
+    let temporary = destination.with_extension("new");
+    std::fs::copy(source, &temporary)?;
+    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(temporary, destination)?;
     Ok(())
 }
 

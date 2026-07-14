@@ -73,6 +73,8 @@ impl Geo {
                     .join("dbip-country.mmdb"),
             );
         }
+        #[cfg(target_os = "linux")]
+        candidates.push(PathBuf::from("/usr/share/iris/geo/dbip-country.mmdb"));
         if let Some(dir) = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))

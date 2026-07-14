@@ -17,6 +17,8 @@ use tauri::Manager;
 
 /// build and run the Tauri application
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

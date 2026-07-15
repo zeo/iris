@@ -69,7 +69,7 @@ pub fn install() -> anyhow::Result<()> {
     let unit = format!(
         "[Unit]
 Description=Iris network engine
-Documentation=https://github.com/lintowe/iris
+Documentation=https://github.com/zeo/iris
 After=network.target nftables.service
 
 [Service]

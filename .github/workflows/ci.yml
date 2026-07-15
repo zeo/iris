@@ -27,7 +27,7 @@ jobs:
   # frontend and validates the bundled engine binary, so the frontend is built and
   # the release engine produced before the cargo steps.
   windows:
-    if: github.actor == 'lintowe'
+    if: github.actor == 'zeo'
     runs-on: [self-hosted, windows-vm]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -58,7 +58,7 @@ jobs:
   # nftables, NFQUEUE, the sandboxed spawn) is actually compiled and linted, since
   # it is empty on Windows.
   linux:
-    if: github.actor == 'lintowe'
+    if: github.actor == 'zeo'
     runs-on: [self-hosted, linux-vm]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -98,7 +98,7 @@ jobs:
 
   # security advisory scan of the dependency tree (RUSTSEC database)
   audit:
-    if: github.actor == 'lintowe'
+    if: github.actor == 'zeo'
     runs-on: [self-hosted, linux-vm]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

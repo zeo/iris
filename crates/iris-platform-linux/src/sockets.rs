@@ -45,6 +45,10 @@ impl SockInfo {
     pub fn is_tcp(&self) -> bool {
         matches!(self.protocol, Protocol::Tcp)
     }
+
+    pub fn is_listener(&self) -> bool {
+        self.is_tcp() && self.state == TCP_LISTEN as u8
+    }
 }
 
 /// dump every TCP and UDP socket (v4 and v6). a family/proto whose dump fails is

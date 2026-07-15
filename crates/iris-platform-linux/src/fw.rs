@@ -17,12 +17,41 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 const TABLE: &str = "iris";
 const QUEUE_OUT: u16 = 17410;
 const QUEUE_IN: u16 = 17411;
 const WORKER_COUNT: u8 = 2;
+
+#[derive(Default)]
+struct AttributionSnapshot {
+    generation: u64,
+    published_at: Option<std::time::Instant>,
+    by_local: HashMap<(IpAddr, u16), u32>,
+    owners: HashMap<u64, u32>,
+}
+
+fn attribution() -> &'static RwLock<AttributionSnapshot> {
+    static ATTRIBUTION: OnceLock<RwLock<AttributionSnapshot>> = OnceLock::new();
+    ATTRIBUTION.get_or_init(|| RwLock::new(AttributionSnapshot::default()))
+}
+
+pub(crate) fn publish_attribution(owners: &HashMap<u64, u32>, sockets: &[sockets::SockInfo]) {
+    let mut snapshot = attribution()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    snapshot.generation = snapshot.generation.wrapping_add(1).max(1);
+    snapshot.published_at = Some(std::time::Instant::now());
+    snapshot.owners.clone_from(owners);
+    snapshot.by_local.clear();
+    for socket in sockets {
+        snapshot
+            .by_local
+            .entry(socket.local)
+            .or_insert(socket.inode);
+    }
+}
 
 #[derive(Clone)]
 struct VerdictShared {
@@ -718,6 +747,7 @@ struct Resolver {
     owners: HashMap<u64, u32>,
     refreshed_at: std::time::Instant,
     cache_cleared_at: std::time::Instant,
+    generation: u64,
 }
 
 impl Resolver {
@@ -731,11 +761,25 @@ impl Resolver {
             owners: HashMap::new(),
             refreshed_at: stale,
             cache_cleared_at: stale,
+            generation: 0,
         }
     }
 
     fn refresh_if_stale(&mut self, max_age: std::time::Duration) {
-        if self.refreshed_at.elapsed() < max_age {
+        let snapshot = attribution()
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot_fresh = snapshot
+            .published_at
+            .is_some_and(|published| published.elapsed() < std::time::Duration::from_secs(3));
+        if snapshot_fresh && snapshot.generation != self.generation {
+            self.by_local.clone_from(&snapshot.by_local);
+            self.owners.clone_from(&snapshot.owners);
+            self.generation = snapshot.generation;
+            self.refreshed_at = std::time::Instant::now();
+        }
+        drop(snapshot);
+        if snapshot_fresh || self.refreshed_at.elapsed() < max_age {
             return;
         }
         self.owners = crate::proc::socket_inode_owners();
@@ -774,8 +818,12 @@ impl Resolver {
 
 #[cfg(test)]
 mod packet_tests {
-    use super::parse_tuple;
+    use super::{parse_tuple, publish_attribution, Resolver};
+    use crate::sockets::SockInfo;
     use iris_core::Protocol;
+    use std::collections::HashMap;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
 
     #[test]
     fn parses_ports_after_an_ipv6_extension_header() {
@@ -798,5 +846,37 @@ mod packet_tests {
         packet[6..8].copy_from_slice(&1u16.to_be_bytes());
         packet[9] = libc::IPPROTO_TCP as u8;
         assert!(parse_tuple(&packet).is_none());
+    }
+
+    #[test]
+    fn resolver_consumes_the_accounting_snapshot() {
+        let local = (IpAddr::V4(Ipv4Addr::LOCALHOST), 41_337);
+        let inode = 987_654;
+        let pid = std::process::id();
+        let owners = HashMap::from([(inode as u64, pid)]);
+        publish_attribution(
+            &owners,
+            &[SockInfo {
+                protocol: Protocol::Tcp,
+                state: 1,
+                local,
+                remote: (IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+                uid: 0,
+                inode,
+                cookie: 1,
+                bytes: None,
+            }],
+        );
+
+        let mut resolver = Resolver::new();
+        resolver.refresh_if_stale(Duration::from_secs(1));
+        let expected = std::fs::read_link(format!("/proc/{pid}/exe"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            resolver.cached_exe(local).as_deref(),
+            Some(expected.as_str())
+        );
     }
 }

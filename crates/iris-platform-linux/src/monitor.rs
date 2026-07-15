@@ -197,7 +197,9 @@ fn accounting_loop(
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_secs(1));
         let owners = proc::socket_inode_owners();
-        let socks = sockets::dump();
+        let mut socks = sockets::dump_for_attribution();
+        crate::fw::publish_attribution(&owners, &socks);
+        socks.retain(|socket| !socket.is_listener());
         dns::record_sockets(&snapshots, &socks, &owners);
 
         for event in network_events.try_iter() {

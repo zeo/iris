@@ -43,9 +43,9 @@ pub use dns::{new_map, DnsMap};
 #[cfg(target_os = "linux")]
 pub use egress::{AppPin, PluginNet};
 #[cfg(target_os = "linux")]
-pub use fw::Wfp;
+pub use fw::{PendingConnection, Wfp};
 #[cfg(target_os = "linux")]
-pub use monitor::Monitor;
+pub use monitor::{Monitor, RecentFlow};
 #[cfg(target_os = "linux")]
 pub use spawn::{random_token, spawn_restricted, RestrictedChild};
 #[cfg(target_os = "linux")]

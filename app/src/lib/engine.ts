@@ -35,6 +35,7 @@ export interface AppSample {
   total: { sent: number; recv: number };
   connections: number;
   online: boolean;
+  hosts: string[];
   processes: ProcSample[];
 }
 export type AdapterKind = "ethernet" | "wifi" | "vpn" | "loopback" | "other";
@@ -100,6 +101,13 @@ const [ring, setRing] = createSignal<Sample[]>([]);
 const [enrichment, setEnrichment] = createSignal<Map<string, Annotation[]>>(new Map());
 
 let started = false;
+let tickCadenceMs = 1000;
+let lastVisibleTick = 0;
+
+export function setTickCadence(milliseconds: number) {
+  tickCadenceMs = milliseconds;
+  lastVisibleTick = 0;
+}
 
 function mergeEnrichment(target: EnrichTarget, annotations: Annotation[]) {
   const ip = endpointIp(target);
@@ -128,7 +136,10 @@ export function initEngine() {
 
   listen<StatsTick>("engine-tick", (e) => {
     const t = e.payload;
-    setTick(t);
+    if (t.at_ms - lastVisibleTick >= tickCadenceMs) {
+      setTick(t);
+      lastVisibleTick = t.at_ms;
+    }
     setRing((r) => {
       const next = [...r, { sent: t.total_rate_sent, recv: t.total_rate_recv }];
       return next.length > RING ? next.slice(-RING) : next;

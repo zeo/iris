@@ -154,8 +154,16 @@ pub(crate) async fn run_engine() -> anyhow::Result<()> {
     let engine = Engine::new();
     let store = Arc::new(Mutex::new(open_store()));
     let (enrich, panels, supervisor) = plugins::build(store.clone(), engine.clone());
-    monitor::spawn(engine.clone(), store.clone(), enrich.clone());
-    let rules = Arc::new(Mutex::new(RuleStore::new()?));
+    let rules = RuleStore::new()?;
+    #[cfg(target_os = "linux")]
+    rules.trust_apps(
+        &store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .trusted_apps(),
+    );
+    let rules = Arc::new(Mutex::new(rules));
+    monitor::spawn(engine.clone(), rules.clone(), store.clone(), enrich.clone());
     tokio::select! {
         r = server::serve(engine, rules.clone(), store.clone(), enrich, panels) => r,
         r = server::serve_admin(rules.clone(), store) => r,

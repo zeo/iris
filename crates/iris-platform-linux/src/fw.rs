@@ -5,15 +5,15 @@
 //! verdict thread resolves that packet to the owning process, matches it against
 //! the rule set, and returns accept or drop.
 //!
-//! queues are fail-closed while rules are active, and worker loss terminates the
-//! engine so systemd can restart it. the rules are installed only while at least
-//! one rule exists, so a stock install with no rules adds zero per-packet overhead.
+//! queues are fail-closed, and worker loss terminates the engine so systemd can
+//! restart it. known applications pass immediately; a new application's first
+//! packet stays queued until the user allows or blocks it.
 //! this type is named `Wfp` to match the Windows firewall seam the service calls.
 
 use crate::proc::PidCache;
 use crate::sockets;
-use iris_core::{AppId, Direction, EngineError, EngineResult, RuleAction};
-use std::collections::HashMap;
+use iris_core::{AppId, Direction, Endpoint, EngineError, EngineResult, Protocol, RuleAction};
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -40,14 +40,16 @@ struct RuleMap {
     out: HashMap<String, Enforce>,
     inbound: HashMap<String, Enforce>,
     by_id: HashMap<u64, (String, Direction)>,
+    trusted: HashSet<String>,
 }
 
 impl RuleMap {
     fn lookup(&self, dir: Direction, key: &str) -> Option<Enforce> {
-        match dir {
+        let explicit = match dir {
             Direction::Outbound => self.out.get(key).copied(),
             Direction::Inbound => self.inbound.get(key).copied(),
-        }
+        };
+        explicit.or_else(|| self.trusted.contains(key).then_some(Enforce::Allow))
     }
 
     fn insert(&mut self, id: u64, key: String, dir: Direction, action: Enforce) {
@@ -74,9 +76,21 @@ impl RuleMap {
         }
     }
 
-    fn is_empty(&self) -> bool {
-        self.out.is_empty() && self.inbound.is_empty()
+    fn trust(&mut self, paths: &[String]) {
+        self.trusted
+            .extend(paths.iter().map(|path| AppId::from_path(path).0));
     }
+
+    fn forget(&mut self, path: &str) {
+        self.trusted.remove(&AppId::from_path(path).0);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingConnection {
+    pub app: AppId,
+    pub remote: Endpoint,
+    pub direction: Direction,
 }
 
 pub struct Wfp {
@@ -85,6 +99,7 @@ pub struct Wfp {
     ready_workers: Arc<AtomicU8>,
     threads: Vec<std::thread::JoinHandle<()>>,
     next_id: AtomicU64,
+    pending: std::sync::mpsc::Receiver<PendingConnection>,
     /// whether the nftables queue hook is currently installed
     hooked: bool,
 }
@@ -94,8 +109,7 @@ pub struct Wfp {
 unsafe impl Send for Wfp {}
 
 impl Wfp {
-    /// start the verdict threads and provision (empty) enforcement state. the
-    /// nftables hook is not installed until the first rule is added.
+    /// start the verdict threads and provision empty enforcement state
     pub fn open() -> EngineResult<Wfp> {
         ensure_modules();
         let rules = Arc::new(Mutex::new(RuleMap::default()));
@@ -103,6 +117,7 @@ impl Wfp {
         let ready_workers = Arc::new(AtomicU8::new(0));
         let mut threads = Vec::new();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (pending_tx, pending) = std::sync::mpsc::channel();
         for (queue, dir) in [
             (QUEUE_OUT, Direction::Outbound),
             (QUEUE_IN, Direction::Inbound),
@@ -111,9 +126,12 @@ impl Wfp {
             let stop = stop.clone();
             let ready_workers = ready_workers.clone();
             let ready_tx = ready_tx.clone();
+            let pending_tx = pending_tx.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("iris-verdict-{queue}"))
-                .spawn(move || verdict_loop(queue, dir, rules, stop, ready_workers, ready_tx))
+                .spawn(move || {
+                    verdict_loop(queue, dir, rules, stop, ready_workers, ready_tx, pending_tx)
+                })
                 .map_err(|e| EngineError::Os(format!("cannot start verdict thread: {e}")))?;
             threads.push(handle);
         }
@@ -139,6 +157,7 @@ impl Wfp {
             ready_workers,
             threads,
             next_id: AtomicU64::new(1),
+            pending,
             hooked: false,
         })
     }
@@ -149,7 +168,8 @@ impl Wfp {
     pub fn reset(&mut self) -> EngineResult<()> {
         *self.rules.lock().unwrap_or_else(|e| e.into_inner()) = RuleMap::default();
         remove_table();
-        self.hooked = false;
+        install_table()?;
+        self.hooked = true;
         Ok(())
     }
 
@@ -197,19 +217,11 @@ impl Wfp {
         self.sync_hook()
     }
 
-    /// install the nftables queue hook when at least one rule exists, remove it
-    /// when none do, so idle installs pay nothing per packet
+    /// keep the queue hook installed so an undecided application cannot send its
+    /// first packet before the user answers the connection prompt
     fn sync_hook(&mut self) -> EngineResult<()> {
         self.ensure_healthy()?;
-        let empty = self
-            .rules
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty();
-        if empty && self.hooked {
-            remove_table();
-            self.hooked = false;
-        } else if !empty && !self.hooked {
+        if !self.hooked {
             install_table()?;
             self.hooked = true;
         }
@@ -227,6 +239,24 @@ impl Wfp {
 
     pub fn is_healthy(&self) -> bool {
         self.ready_workers.load(Ordering::Acquire) == WORKER_COUNT
+    }
+
+    pub fn take_pending(&self) -> Vec<PendingConnection> {
+        self.pending.try_iter().collect()
+    }
+
+    pub fn trust_apps(&self, paths: &[String]) {
+        self.rules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .trust(paths);
+    }
+
+    pub fn forget_app(&self, path: &str) {
+        self.rules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .forget(path);
     }
 }
 
@@ -248,10 +278,9 @@ fn ensure_modules() {
     }
 }
 
-/// the ruleset installed while rules exist: queue the first packet of every new
-/// flow to userspace in each direction. a priority just before the standard
-/// filter hook lets iris decide before
-/// a distro firewall.
+/// queue the first packet of every new flow to userspace in each direction. a
+/// priority just before the standard filter hook lets iris decide before a
+/// distro firewall.
 fn install_table() -> EngineResult<()> {
     let ruleset = format!(
         "table inet {TABLE} {{
@@ -312,6 +341,7 @@ fn verdict_loop(
     stop: Arc<AtomicBool>,
     ready_workers: Arc<AtomicU8>,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
+    pending_tx: std::sync::mpsc::Sender<PendingConnection>,
 ) {
     let mut nfq = match nfq::Queue::open() {
         Ok(q) => q,
@@ -324,26 +354,93 @@ fn verdict_loop(
         let _ = ready.send(Err(format!("cannot bind NFQUEUE {queue}: {e}")));
         return;
     }
+    nfq.set_nonblocking(true);
     ready_workers.fetch_add(1, Ordering::Release);
     let _ = ready.send(Ok(()));
     let mut resolver = Resolver::new();
+    let mut held: Vec<HeldPacket> = Vec::new();
+    let mut notified: HashSet<String> = HashSet::new();
     tracing::info!("firewall verdict thread on queue {queue} ready");
     while !stop.load(Ordering::Relaxed) {
-        let mut msg = match nfq.recv() {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::debug!("NFQUEUE {queue} recv ended: {e}");
+        let now = std::time::Instant::now();
+        let mut waiting = Vec::with_capacity(held.len());
+        for mut packet in held.drain(..) {
+            let action = rules
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .lookup(dir, &packet.app);
+            let verdict = match action {
+                Some(Enforce::Allow) => Some(nfq::Verdict::Accept),
+                Some(Enforce::Block) => Some(nfq::Verdict::Drop),
+                None if now.duration_since(packet.since) >= std::time::Duration::from_secs(120) => {
+                    Some(nfq::Verdict::Drop)
+                }
+                None => None,
+            };
+            if let Some(verdict) = verdict {
+                packet.message.set_verdict(verdict);
+                if let Err(error) = nfq.verdict(packet.message) {
+                    tracing::debug!("NFQUEUE {queue} delayed verdict failed: {error}");
+                }
+            } else {
+                waiting.push(packet);
+            }
+        }
+        held = waiting;
+        notified.retain(|app| held.iter().any(|packet| &packet.app == app));
+
+        match nfq.recv() {
+            Ok(mut message) => match decide(message.get_payload(), dir, &rules, &mut resolver) {
+                PacketDecision::Verdict(verdict) => {
+                    message.set_verdict(verdict);
+                    if let Err(error) = nfq.verdict(message) {
+                        tracing::debug!("NFQUEUE {queue} verdict failed: {error}");
+                        break;
+                    }
+                }
+                PacketDecision::Pending(connection) => {
+                    let app = connection.app.0.clone();
+                    if notified.insert(app.clone()) {
+                        let _ = pending_tx.send(connection);
+                    }
+                    if held.len() < 512 {
+                        held.push(HeldPacket {
+                            message,
+                            app,
+                            since: now,
+                        });
+                    } else {
+                        message.set_verdict(nfq::Verdict::Drop);
+                        let _ = nfq.verdict(message);
+                    }
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                tracing::debug!("NFQUEUE {queue} recv ended: {error}");
                 break;
             }
-        };
-        let verdict = decide(msg.get_payload(), dir, &rules, &mut resolver);
-        msg.set_verdict(verdict);
-        if let Err(e) = nfq.verdict(msg) {
-            tracing::debug!("NFQUEUE {queue} verdict failed: {e}");
-            break;
         }
     }
+    for mut packet in held {
+        packet.message.set_verdict(nfq::Verdict::Drop);
+        let _ = nfq.verdict(packet.message);
+    }
     ready_workers.fetch_sub(1, Ordering::Release);
+}
+
+struct HeldPacket {
+    message: nfq::Message,
+    app: String,
+    since: std::time::Instant,
+}
+
+enum PacketDecision {
+    Verdict(nfq::Verdict),
+    Pending(PendingConnection),
 }
 
 fn decide(
@@ -351,33 +448,43 @@ fn decide(
     dir: Direction,
     rules: &Arc<Mutex<RuleMap>>,
     resolver: &mut Resolver,
-) -> nfq::Verdict {
-    let Some(local) = local_endpoint(packet, dir) else {
-        return nfq::Verdict::Accept;
+) -> PacketDecision {
+    let Some((source, destination, source_port, destination_port, protocol)) = parse_tuple(packet)
+    else {
+        return PacketDecision::Verdict(nfq::Verdict::Accept);
+    };
+    let local = match dir {
+        Direction::Outbound => (source, source_port),
+        Direction::Inbound => (destination, destination_port),
     };
     let Some(exe) = resolver.exe_for(local) else {
-        return nfq::Verdict::Accept;
+        return PacketDecision::Verdict(nfq::Verdict::Accept);
     };
     let key = AppId::from_path(&exe).0;
     let map = rules.lock().unwrap_or_else(|e| e.into_inner());
     match map.lookup(dir, &key) {
-        Some(Enforce::Block) => nfq::Verdict::Drop,
-        _ => nfq::Verdict::Accept,
+        Some(Enforce::Block) => PacketDecision::Verdict(nfq::Verdict::Drop),
+        Some(Enforce::Allow) => PacketDecision::Verdict(nfq::Verdict::Accept),
+        None => PacketDecision::Pending(PendingConnection {
+            app: AppId(key),
+            remote: Endpoint {
+                addr: match dir {
+                    Direction::Outbound => destination,
+                    Direction::Inbound => source,
+                },
+                port: match dir {
+                    Direction::Outbound => destination_port,
+                    Direction::Inbound => source_port,
+                },
+                protocol,
+            },
+            direction: dir,
+        }),
     }
 }
 
-/// the local (this-host) address+port of a queued packet: the source for an
-/// outbound packet, the destination for an inbound one
-fn local_endpoint(packet: &[u8], dir: Direction) -> Option<(IpAddr, u16)> {
-    let (src, dst, sport, dport) = parse_tuple(packet)?;
-    Some(match dir {
-        Direction::Outbound => (src, sport),
-        Direction::Inbound => (dst, dport),
-    })
-}
-
 /// parse an IPv4 or IPv6 packet enough to get the addresses and ports
-fn parse_tuple(pkt: &[u8]) -> Option<(IpAddr, IpAddr, u16, u16)> {
+fn parse_tuple(pkt: &[u8]) -> Option<(IpAddr, IpAddr, u16, u16, Protocol)> {
     if pkt.is_empty() {
         return None;
     }
@@ -399,13 +506,13 @@ fn parse_tuple(pkt: &[u8]) -> Option<(IpAddr, IpAddr, u16, u16)> {
             let l4 = &pkt[ihl..];
             let sport = u16::from_be_bytes([l4[0], l4[1]]);
             let dport = u16::from_be_bytes([l4[2], l4[3]]);
-            Some((src, dst, sport, dport))
+            Some((src, dst, sport, dport, protocol(proto)?))
         }
         6 => {
             if pkt.len() < 40 {
                 return None;
             }
-            let (_, offset) = ipv6_transport(pkt, pkt[6], 40)?;
+            let (next, offset) = ipv6_transport(pkt, pkt[6], 40)?;
             let mut s = [0u8; 16];
             let mut d = [0u8; 16];
             s.copy_from_slice(&pkt[8..24]);
@@ -413,8 +520,22 @@ fn parse_tuple(pkt: &[u8]) -> Option<(IpAddr, IpAddr, u16, u16)> {
             let l4 = pkt.get(offset..offset + 4)?;
             let sport = u16::from_be_bytes([l4[0], l4[1]]);
             let dport = u16::from_be_bytes([l4[2], l4[3]]);
-            Some((IpAddr::from(s), IpAddr::from(d), sport, dport))
+            Some((
+                IpAddr::from(s),
+                IpAddr::from(d),
+                sport,
+                dport,
+                protocol(next)?,
+            ))
         }
+        _ => None,
+    }
+}
+
+fn protocol(value: u8) -> Option<Protocol> {
+    match value {
+        value if value == libc::IPPROTO_TCP as u8 => Some(Protocol::Tcp),
+        value if value == libc::IPPROTO_UDP as u8 => Some(Protocol::Udp),
         _ => None,
     }
 }
@@ -522,6 +643,7 @@ impl Resolver {
 #[cfg(test)]
 mod packet_tests {
     use super::parse_tuple;
+    use iris_core::Protocol;
 
     #[test]
     fn parses_ports_after_an_ipv6_extension_header() {
@@ -532,8 +654,9 @@ mod packet_tests {
         packet[41] = 0;
         packet[48..50].copy_from_slice(&1234u16.to_be_bytes());
         packet[50..52].copy_from_slice(&443u16.to_be_bytes());
-        let (_, _, source, destination) = parse_tuple(&packet).unwrap();
+        let (_, _, source, destination, protocol) = parse_tuple(&packet).unwrap();
         assert_eq!((source, destination), (1234, 443));
+        assert_eq!(protocol, Protocol::Tcp);
     }
 
     #[test]

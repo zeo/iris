@@ -4,8 +4,8 @@
 //! is a handful of writes per second and the occasional query.
 
 use iris_core::{
-    AdapterKind, Alert, AlertKind, AppId, Granularity, ProposalState, Rule, RuleProposal,
-    UsageBucket, UsageQuery,
+    AdapterKind, Alert, AlertKind, AppId, Granularity, KnownApp, ProposalState, Rule, RuleAction,
+    RuleProposal, UsageBucket, UsageQuery,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -71,8 +71,18 @@ CREATE TABLE IF NOT EXISTS rule_proposals (
 CREATE INDEX IF NOT EXISTS rule_proposals_state ON rule_proposals(state);
 ";
 
+const SCHEMA_V5_APP_LAST_SEEN: &str = "
+ALTER TABLE apps ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0;
+UPDATE apps SET last_seen = first_seen WHERE last_seen = 0;
+";
+
+const SCHEMA_V6_APP_DECISION: &str = "
+ALTER TABLE apps ADD COLUMN decision TEXT;
+UPDATE apps SET decision = 'allow';
+";
+
 /// bump when the schema changes; drives the migration ladder in [`Store::migrate`]
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 6;
 
 pub struct Store {
     conn: Connection,
@@ -166,6 +176,12 @@ impl Store {
         if version < 4 {
             self.conn.execute_batch(SCHEMA_V4_RULE_PROPOSALS)?;
         }
+        if version < 5 {
+            self.conn.execute_batch(SCHEMA_V5_APP_LAST_SEEN)?;
+        }
+        if version < 6 {
+            self.conn.execute_batch(SCHEMA_V6_APP_DECISION)?;
+        }
         if version < SCHEMA_VERSION {
             self.conn
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -176,7 +192,7 @@ impl Store {
     /// record an app in the first-seen registry; returns true the first time an
     /// app is ever seen, which drives the "new app connected" alert
     pub fn ensure_app(&self, path: &str, name: Option<&str>, at_ms: u64) -> bool {
-        match self.conn.execute(
+        let inserted = match self.conn.execute(
             "INSERT OR IGNORE INTO apps(path, first_seen, name) VALUES (?1, ?2, ?3)",
             params![path, at_ms as i64, name],
         ) {
@@ -185,7 +201,67 @@ impl Store {
                 tracing::warn!("could not register app {path}: {e}");
                 false
             }
-        }
+        };
+        let _ = self.conn.execute(
+            "UPDATE apps SET last_seen = ?2, name = COALESCE(?3, name) WHERE path = ?1",
+            params![path, at_ms as i64, name],
+        );
+        inserted
+    }
+
+    pub fn list_apps(&self) -> Vec<KnownApp> {
+        let mut statement = match self
+            .conn
+            .prepare("SELECT path, name, last_seen FROM apps ORDER BY last_seen DESC")
+        {
+            Ok(statement) => statement,
+            Err(_) => return Vec::new(),
+        };
+        statement
+            .query_map([], |row| {
+                Ok(KnownApp {
+                    app: AppId::from_path(&row.get::<_, String>(0)?),
+                    name: row.get(1)?,
+                    last_seen: row.get::<_, i64>(2)? as u64,
+                })
+            })
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn forget_app(&self, path: &str) -> bool {
+        self.conn
+            .execute("DELETE FROM apps WHERE path = ?1", [path])
+            .map(|count| count > 0)
+            .unwrap_or(false)
+    }
+
+    pub fn trusted_apps(&self) -> Vec<String> {
+        let mut statement = match self
+            .conn
+            .prepare("SELECT path FROM apps WHERE decision = 'allow'")
+        {
+            Ok(statement) => statement,
+            Err(_) => return Vec::new(),
+        };
+        statement
+            .query_map([], |row| row.get(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn set_app_decision(&self, path: &str, action: RuleAction) -> bool {
+        let decision = match action {
+            RuleAction::Allow => "allow",
+            RuleAction::Block => "block",
+        };
+        self.conn
+            .execute(
+                "UPDATE apps SET decision = ?2 WHERE path = ?1",
+                params![path, decision],
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false)
     }
 
     /// add bytes to an app's current-minute usage bucket
@@ -674,6 +750,17 @@ mod tests {
     }
 
     #[test]
+    fn new_apps_are_pending_until_a_decision_is_saved() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.ensure_app("/usr/bin/new-app", None, 100));
+        assert!(s.trusted_apps().is_empty());
+        assert!(s.set_app_decision("/usr/bin/new-app", RuleAction::Allow));
+        assert_eq!(s.trusted_apps(), vec!["/usr/bin/new-app".to_string()]);
+        assert!(s.set_app_decision("/usr/bin/new-app", RuleAction::Block));
+        assert!(s.trusted_apps().is_empty());
+    }
+
+    #[test]
     fn usage_accumulates_into_minute_buckets() {
         let s = Store::open_in_memory().unwrap();
         s.add_usage("c:/x.exe", 1_000, 100, 200);
@@ -765,6 +852,8 @@ mod tests {
         let a = s.insert_alert(
             &AlertKind::NewApp {
                 app: AppId("c:/x.exe".into()),
+                remote: None,
+                direction: None,
             },
             500,
         );

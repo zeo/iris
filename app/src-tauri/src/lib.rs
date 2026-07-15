@@ -6,6 +6,7 @@ mod elevate;
 mod icon;
 mod ipc;
 mod net;
+mod prompt;
 mod report;
 mod rulectl;
 mod startup;
@@ -17,8 +18,6 @@ use tauri::Manager;
 
 /// build and run the Tauri application
 pub fn run() {
-    #[cfg(target_os = "linux")]
-    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -35,12 +34,17 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(ipc::StatusState::default())
+        .manage(ipc::TickDetailState::default())
         .manage(ipc::Commander(cmd_tx))
         .invoke_handler(tauri::generate_handler![
             ipc::engine_status,
+            ipc::set_tick_details,
             ipc::list_rules,
+            ipc::list_apps,
+            ipc::forget_app,
             ipc::list_alerts,
             ipc::ack_alert,
+            ipc::decide_alert,
             ipc::get_usage,
             ipc::get_adapter_usage,
             ipc::kill_connection,
@@ -78,9 +82,11 @@ pub fn run() {
         .on_window_event(|window, event| {
             // close to tray: hide the window and keep the app (and its tray
             // icon and pipe client) alive. real exit is the tray "Quit" item.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .run(tauri::generate_context!())

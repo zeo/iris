@@ -36,7 +36,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time", "sync", "signal"] }
 interprocess = { version = "2.2", features = ["tokio"] }
 windows-service = "0.8"
-maxminddb = "0.24"
+maxminddb = "0.27"
 
 [profile.release]
 lto = true

@@ -61,7 +61,8 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<Option<T>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{ClientMessage, PROTOCOL_VERSION};
+    use crate::message::{ClientMessage, ServerMessage, PROTOCOL_VERSION};
+    use iris_core::{Alert, AlertKind, AppId, Direction, Endpoint, Protocol};
     use std::io::Cursor;
 
     #[test]
@@ -93,6 +94,29 @@ mod tests {
         let rb: ClientMessage = read_frame(&mut cur).unwrap().unwrap();
         assert_eq!(ra, a);
         assert_eq!(rb, b);
+    }
+
+    #[test]
+    fn alert_roundtrips_through_a_binary_frame() {
+        let msg = ServerMessage::Alert(Alert {
+            id: 9,
+            at_ms: 42,
+            kind: AlertKind::NewApp {
+                app: AppId::from_path("/usr/bin/browser"),
+                remote: Some(Endpoint {
+                    addr: "203.0.113.7".parse().unwrap(),
+                    port: 443,
+                    protocol: Protocol::Tcp,
+                }),
+                direction: Some(Direction::Outbound),
+            },
+            acknowledged: false,
+        });
+        let mut buffer = Vec::new();
+        write_frame(&mut buffer, &msg).unwrap();
+
+        let decoded: ServerMessage = read_frame(&mut Cursor::new(buffer)).unwrap().unwrap();
+        assert_eq!(decoded, msg);
     }
 
     #[test]

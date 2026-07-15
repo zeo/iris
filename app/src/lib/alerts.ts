@@ -9,7 +9,12 @@ import {
 import { showNotifications } from "./settings";
 
 export type AlertKind =
-  | { kind: "new_app"; app: string }
+  | {
+      kind: "new_app";
+      app: string;
+      remote: { addr: string; port: number; protocol: "tcp" | "udp" } | null;
+      direction: "inbound" | "outbound" | null;
+    }
   | { kind: "blocked"; app: string; remote: { addr: string; port: number } }
   | { kind: "plugin"; source: string; message: string };
 

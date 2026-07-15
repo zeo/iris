@@ -13,6 +13,7 @@
         "depends": [
           "nftables",
           "libnetfilter-queue1",
+          "libgtk-layer-shell0",
           "pkexec",
           "polkit-1-auth-agent | policykit-1"
         ]
@@ -21,7 +22,7 @@
         "files": {
           "/usr/libexec/iris/iris-engine": "../../target/release/iris-engine"
         },
-        "depends": ["nftables", "libnetfilter_queue", "polkit"]
+        "depends": ["nftables", "libnetfilter_queue", "gtk-layer-shell", "polkit"]
       }
     }
   }

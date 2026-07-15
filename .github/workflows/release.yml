@@ -1,13 +1,12 @@
 name: release
 
-# build and attach the installers when a version tag is pushed. Windows gets the
-# WiX MSI; Linux gets the .deb, .rpm, and AppImage. both jobs target the same tag,
-# so tauri-action creates the release once and the second job attaches to it, and
-# each emits the updater artifacts the in-app updater reads from latest.json.
+# build and attach the installers when a version tag is pushed. Windows gets
+# nsis setup.exe and wix MSI; Linux gets .deb, .rpm, and AppImage. both jobs target the same tag,
+# so tauri-action creates the release once and the second job attaches to it.
+# the jobs run in order so their updater metadata is merged without a race.
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -38,7 +37,7 @@ jobs:
         working-directory: app
         run: pnpm install --frozen-lockfile
       - name: build and release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -49,10 +48,12 @@ jobs:
           releaseName: 'iris ${{ github.ref_name }}'
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
 
   build-linux:
     if: github.actor == 'zeo'
+    needs: build-windows
     runs-on: [self-hosted, linux-vm]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -69,7 +70,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq pkg-config libwebkit2gtk-4.1-dev \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
-            rpm file
+            libgtk-layer-shell-dev libnetfilter-queue-dev nftables patchelf rpm file
       - uses: pnpm/action-setup@v4
         with:
           version: 9
@@ -80,7 +81,7 @@ jobs:
         working-directory: app
         run: pnpm install --frozen-lockfile
       - name: build and release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -91,4 +92,4 @@ jobs:
           releaseName: 'iris ${{ github.ref_name }}'
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true

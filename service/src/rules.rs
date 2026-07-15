@@ -149,6 +149,28 @@ impl RuleStore {
             .is_some_and(crate::platform::Wfp::is_healthy)
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn take_pending_connections(&self) -> Vec<crate::platform::PendingConnection> {
+        self.wfp
+            .as_ref()
+            .map(crate::platform::Wfp::take_pending)
+            .unwrap_or_default()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn trust_apps(&self, paths: &[String]) {
+        if let Some(wfp) = &self.wfp {
+            wfp.trust_apps(paths);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn forget_trusted_app(&self, path: &str) {
+        if let Some(wfp) = &self.wfp {
+            wfp.forget_app(path);
+        }
+    }
+
     /// add (or replace) a rule for an app+direction and enforce it now
     pub fn add(&mut self, rule: Rule) -> anyhow::Result<StoredRule> {
         // replace any existing rule for the same app + direction

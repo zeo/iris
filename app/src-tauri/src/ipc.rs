@@ -6,13 +6,14 @@
 //! admin pipe (see `rulectl`). it reconnects on its own.
 
 use iris_core::{
-    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, Granularity, Panel, RuleProposal,
-    StoredRule, UsageBucket, UsageQuery,
+    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, Granularity, KnownApp, Panel,
+    RuleAction, RuleProposal, StoredRule, UsageBucket, UsageQuery,
 };
 use iris_ipc::message::{ClientMessage, PluginInfo, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -34,13 +35,19 @@ pub struct EnrichmentEvent {
 #[derive(Default)]
 pub struct StatusState(pub Mutex<Status>);
 
+#[derive(Default)]
+pub struct TickDetailState(pub AtomicBool);
+
 /// what the UI asks the engine to do; the session task assigns the wire id
 pub enum EngineCmd {
     ListRules,
+    ListApps,
+    ForgetApp(String),
     GetUsage(UsageQuery),
     GetAdapterUsage(u64, u64),
     ListAlerts(bool),
     AckAlert(i64),
+    DecideAlert(i64, RuleAction),
     KillConnection(u16, String, u16),
     GetEnrichment(Vec<EnrichTarget>),
     ListPlugins,
@@ -68,6 +75,11 @@ pub fn engine_status(state: tauri::State<'_, StatusState>) -> Status {
         .lock()
         .map(|s| s.clone())
         .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn set_tick_details(state: tauri::State<'_, TickDetailState>, enabled: bool) {
+    state.0.store(enabled, Ordering::Release);
 }
 
 async fn dispatch(app: &AppHandle, cmd: EngineCmd) -> Result<Reply, String> {
@@ -106,6 +118,24 @@ pub async fn list_rules(app: AppHandle) -> Result<Vec<StoredRule>, String> {
 }
 
 #[tauri::command]
+pub async fn list_apps(app: AppHandle) -> Result<Vec<KnownApp>, String> {
+    match dispatch(&app, EngineCmd::ListApps).await? {
+        Reply::Apps(apps) => Ok(apps),
+        Reply::Error(error) => Err(error),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn forget_app(app: AppHandle, path: String) -> Result<(), String> {
+    match dispatch(&app, EngineCmd::ForgetApp(path)).await? {
+        Reply::Ok => Ok(()),
+        Reply::Error(error) => Err(error),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
 pub async fn list_alerts(app: AppHandle, unacked_only: bool) -> Result<Vec<Alert>, String> {
     match dispatch(&app, EngineCmd::ListAlerts(unacked_only)).await? {
         Reply::Alerts(a) => Ok(a),
@@ -119,6 +149,20 @@ pub async fn ack_alert(app: AppHandle, id: i64) -> Result<(), String> {
     match dispatch(&app, EngineCmd::AckAlert(id)).await? {
         Reply::Ok => Ok(()),
         Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn decide_alert(app: AppHandle, id: i64, action: String) -> Result<(), String> {
+    let action = if action == "allow" {
+        RuleAction::Allow
+    } else {
+        RuleAction::Block
+    };
+    match dispatch(&app, EngineCmd::DecideAlert(id, action)).await? {
+        Reply::Ok => Ok(()),
+        Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
@@ -326,8 +370,21 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
             frame = transport::read_frame::<_, ServerMessage>(&mut recv) => {
                 let Some(msg) = frame? else { break };
                 match msg {
-                    ServerMessage::Tick(tick) => { let _ = app.emit("engine-tick", tick); }
-                    ServerMessage::Alert(alert) => { let _ = app.emit("engine-alert", alert); }
+                    ServerMessage::Tick(mut tick) => {
+                        let detailed = app
+                            .try_state::<TickDetailState>()
+                            .is_some_and(|state| state.0.load(Ordering::Acquire));
+                        if !detailed {
+                            for sample in &mut tick.apps {
+                                sample.processes.clear();
+                            }
+                        }
+                        let _ = app.emit("engine-tick", tick);
+                    }
+                    ServerMessage::Alert(alert) => {
+                        crate::prompt::show(app, &alert);
+                        let _ = app.emit("engine-alert", alert);
+                    }
                     ServerMessage::Enrichment { target, annotations } => {
                         let _ = app.emit("engine-enrichment", EnrichmentEvent { target, annotations });
                     }
@@ -348,11 +405,15 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                 next_id += 1;
                 let msg = match command.cmd {
                     EngineCmd::ListRules => ClientMessage::ListRules { req },
+                    EngineCmd::ListApps => ClientMessage::ListApps { req },
+                    EngineCmd::ForgetApp(path) => ClientMessage::ForgetApp { req, path },
                     EngineCmd::GetUsage(query) => ClientMessage::GetUsage { req, query },
                     EngineCmd::GetAdapterUsage(from_ms, to_ms) =>
                         ClientMessage::GetAdapterUsage { req, from_ms, to_ms },
                     EngineCmd::ListAlerts(unacked_only) => ClientMessage::ListAlerts { req, unacked_only },
                     EngineCmd::AckAlert(id) => ClientMessage::AckAlert { req, id },
+                    EngineCmd::DecideAlert(id, action) =>
+                        ClientMessage::DecideAlert { req, id, action },
                     EngineCmd::KillConnection(local_port, remote_addr, remote_port) =>
                         ClientMessage::KillConnection { req, local_port, remote_addr, remote_port },
                     EngineCmd::GetEnrichment(targets) => ClientMessage::GetEnrichment { req, targets },

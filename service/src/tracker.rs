@@ -191,6 +191,17 @@ impl Tracker {
             .map(|(path, acc)| {
                 let mut procs = acc.procs;
                 procs.sort_by_key(|p| std::cmp::Reverse(p.rate_sent + p.rate_recv));
+                let hosts = procs
+                    .iter()
+                    .flat_map(|process| &process.conns)
+                    .map(|conn| {
+                        conn.host
+                            .clone()
+                            .unwrap_or_else(|| conn.remote.addr.to_string())
+                    })
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
                 AppSample {
                     app: AppId::from_path(&path),
                     name: acc.name,
@@ -199,6 +210,7 @@ impl Tracker {
                     total: acc.total,
                     connections: acc.connections,
                     online: acc.online,
+                    hosts,
                     processes: procs,
                 }
             })

@@ -1,6 +1,6 @@
 use iris_core::{
-    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, LiveConnection, Panel, Rule,
-    RuleProposal, StatsTick, StoredRule, UsageBucket, UsageQuery,
+    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, KnownApp, LiveConnection, Panel,
+    Rule, RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket, UsageQuery,
 };
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 /// v2 added the enrichment channel (annotations for endpoints/apps); v3 added
 /// the per-adapter breakdown carried in every tick; v4 added plugin management;
 /// v5 added rule proposals and plugin panels.
-pub const PROTOCOL_VERSION: u32 = 5;
+/// v6 added durable app inventory and compact host summaries.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// what the UI shows for one installed plugin: its declared identity and
 /// capabilities, plus whether the user has consented and enabled it
@@ -47,6 +48,13 @@ pub enum ClientMessage {
     ListRules {
         req: u64,
     },
+    ListApps {
+        req: u64,
+    },
+    ForgetApp {
+        req: u64,
+        path: String,
+    },
     AddRule {
         req: u64,
         rule: Rule,
@@ -71,6 +79,11 @@ pub enum ClientMessage {
     AckAlert {
         req: u64,
         id: i64,
+    },
+    DecideAlert {
+        req: u64,
+        id: i64,
+        action: RuleAction,
     },
     /// terminate a single TCP connection (privileged)
     KillConnection {
@@ -162,6 +175,7 @@ pub enum Reply {
     Pong,
     Connections(Vec<LiveConnection>),
     Rules(Vec<StoredRule>),
+    Apps(Vec<KnownApp>),
     RuleAdded(StoredRule),
     Alerts(Vec<Alert>),
     Usage(Vec<UsageBucket>),

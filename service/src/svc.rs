@@ -70,7 +70,7 @@ fn run_service() -> anyhow::Result<()> {
         let engine = Engine::new();
         let store = std::sync::Arc::new(std::sync::Mutex::new(crate::open_store()));
         let (enrich, panels, supervisor) = crate::plugins::build(store.clone(), engine.clone());
-        crate::monitor::spawn(engine.clone(), store.clone(), enrich.clone());
+        crate::monitor::spawn(engine.clone(), rules.clone(), store.clone(), enrich.clone());
         tokio::select! {
             r = supervisor.serve() => {
                 tracing::error!("plugin host ended: {r:?}");

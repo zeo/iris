@@ -2,6 +2,7 @@ use crate::engine::Engine;
 use crate::plugins::registry::EnrichmentRegistry;
 use crate::plugins::PanelHub;
 use crate::rules::RuleStore;
+use iris_core::{AlertKind, Direction, Rule};
 use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
 use iris_store::Store;
@@ -134,6 +135,33 @@ async fn handle(
                         let list = rules.lock().map(|r| r.list()).unwrap_or_default();
                         reply(&mut send, req, Reply::Rules(list)).await?;
                     }
+                    ClientMessage::ListApps { req } => {
+                        let store = store.clone();
+                        let list = tokio::task::spawn_blocking(move || {
+                            store.lock().unwrap_or_else(|e| e.into_inner()).list_apps()
+                        })
+                        .await
+                        .unwrap_or_default();
+                        reply(&mut send, req, Reply::Apps(list)).await?;
+                    }
+                    ClientMessage::ForgetApp { req, path } => {
+                        let removed = store
+                            .lock()
+                            .map(|store| store.forget_app(&path))
+                            .unwrap_or(false);
+                        #[cfg(target_os = "linux")]
+                        if removed {
+                            if let Ok(rules) = rules.lock() {
+                                rules.forget_trusted_app(&path);
+                            }
+                        }
+                        reply(
+                            &mut send,
+                            req,
+                            if removed { Reply::Ok } else { Reply::Error("application not found".into()) },
+                        )
+                        .await?;
+                    }
                     // rule mutations are privileged: they run WFP changes as
                     // LocalSystem, so they are only accepted on the admin pipe
                     // (which the OS lets only an elevated caller open). reject
@@ -179,6 +207,38 @@ async fn handle(
                             s.ack_alert(id);
                         }
                         reply(&mut send, req, Reply::Ok).await?;
+                    }
+                    ClientMessage::DecideAlert { req, id, action } => {
+                        let alert = store
+                            .lock()
+                            .ok()
+                            .and_then(|store| store.list_alerts(true).into_iter().find(|alert| alert.id == id));
+                        let result = match alert.map(|alert| alert.kind) {
+                            Some(AlertKind::NewApp { app, direction, .. }) => {
+                                let path = app.0.clone();
+                                let rule = Rule {
+                                    app,
+                                    direction: direction.unwrap_or(Direction::Outbound),
+                                    action,
+                                    label: None,
+                                };
+                                match rules.lock() {
+                                    Ok(mut rules) => match rules.add(rule) {
+                                        Ok(_) => {
+                                            if let Ok(store) = store.lock() {
+                                                store.set_app_decision(&path, action);
+                                                store.ack_alert(id);
+                                            }
+                                            Reply::Ok
+                                        }
+                                        Err(error) => Reply::Error(format!("could not apply decision: {error}")),
+                                    },
+                                    Err(_) => Reply::Error("rule store unavailable".into()),
+                                }
+                            }
+                            _ => Reply::Error("connection decision is no longer pending".into()),
+                        };
+                        reply(&mut send, req, result).await?;
                     }
                     ClientMessage::KillConnection { req, local_port, remote_addr, remote_port } => {
                         let killed = kill_conn(local_port, &remote_addr, remote_port);
@@ -465,12 +525,15 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
     match m {
         ClientMessage::ListConnections { req }
         | ClientMessage::ListRules { req }
+        | ClientMessage::ListApps { req }
+        | ClientMessage::ForgetApp { req, .. }
         | ClientMessage::AddRule { req, .. }
         | ClientMessage::RemoveRule { req, .. }
         | ClientMessage::SetRuleEnabled { req, .. }
         | ClientMessage::GetUsage { req, .. }
         | ClientMessage::ListAlerts { req, .. }
         | ClientMessage::AckAlert { req, .. }
+        | ClientMessage::DecideAlert { req, .. }
         | ClientMessage::KillConnection { req, .. }
         | ClientMessage::GetEnrichment { req, .. }
         | ClientMessage::GetAdapterUsage { req, .. }

@@ -1,8 +1,10 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { Key } from "@solid-primitives/keyed";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
+import { forgetKnownApp, knownApps, refreshKnownApps } from "../lib/apps";
 import { engine, type AppSample } from "../lib/engine";
 import { bytes, rate } from "../lib/format";
 import { acceptProposal, pendingProposals, refreshProposals, rejectProposal } from "../lib/proposals";
@@ -10,9 +12,12 @@ import { addRule, refreshRules, removeRule, rules, type StoredRule } from "../li
 
 type Direction = "inbound" | "outbound";
 type Decision = "open" | "allow" | "block" | "paused";
+type SortKey = "app" | "down" | "up" | "session";
+type SortDirection = "asc" | "desc";
 
 interface AppRow {
   app: string;
+  name?: string;
   sample?: AppSample;
   rules: StoredRule[];
 }
@@ -35,11 +40,8 @@ function decisionFor(row: AppRow, direction: Direction): Decision {
 
 function hostsFor(sample?: AppSample): string {
   if (!sample) return "no live endpoints";
-  const hosts = new Set(
-    sample.processes.flatMap((process) => process.conns.map((conn) => conn.host || conn.remote.addr)),
-  );
-  if (hosts.size === 0) return sample.online ? "waiting for connection" : "last seen this session";
-  const list = [...hosts];
+  const list = sample.hosts;
+  if (list.length === 0) return sample.online ? "waiting for connection" : "last seen this session";
   return list.length > 2 ? `${list.slice(0, 2).join(", ")} +${list.length - 2}` : list.join(", ");
 }
 
@@ -52,17 +54,36 @@ export function Protect() {
   const [toolError, setToolError] = createSignal("");
   const [toolNote, setToolNote] = createSignal("");
   const [changing, setChanging] = createSignal("");
+  const [sort, setSort] = createSignal<SortKey>("app");
+  const [sortDirection, setSortDirection] = createSignal<SortDirection>("asc");
 
   createEffect(() => {
     if (!engine.online()) return;
     refreshRules();
     refreshProposals();
+    refreshKnownApps();
   });
 
   const appRows = createMemo<AppRow[]>(() => {
     const byPath = new Map<string, AppRow>();
+    for (const known of knownApps()) {
+      byPath.set(pathKey(known.app), {
+        app: known.app,
+        name: known.name ?? undefined,
+        rules: [],
+      });
+    }
     for (const sample of engine.apps()) {
-      byPath.set(pathKey(sample.app), { app: sample.app, sample, rules: [] });
+      const key = pathKey(sample.app);
+      const row = byPath.get(key);
+      if (sample.online || row) {
+        byPath.set(key, {
+          app: sample.app,
+          name: sample.name ?? row?.name,
+          sample,
+          rules: row?.rules ?? [],
+        });
+      }
     }
     for (const stored of rules()) {
       const key = pathKey(stored.rule.app);
@@ -77,16 +98,39 @@ export function Protect() {
       .filter((row) => mode === "all" || (mode === "active" ? row.sample?.online : row.rules.length > 0))
       .filter((row) => {
         if (!needle) return true;
-        const name = row.sample?.name ?? fileName(row.app);
+        const name = row.sample?.name ?? row.name ?? fileName(row.app);
         return name.toLowerCase().includes(needle) || row.app.toLowerCase().includes(needle) || hostsFor(row.sample).toLowerCase().includes(needle);
       })
       .sort((a, b) => {
-        if (!!a.sample?.online !== !!b.sample?.online) return a.sample?.online ? -1 : 1;
-        const aRate = (a.sample?.rate_recv ?? 0) + (a.sample?.rate_sent ?? 0);
-        const bRate = (b.sample?.rate_recv ?? 0) + (b.sample?.rate_sent ?? 0);
-        return bRate - aRate || (a.sample?.name ?? fileName(a.app)).localeCompare(b.sample?.name ?? fileName(b.app));
+        const name = (row: AppRow) => row.sample?.name ?? row.name ?? fileName(row.app);
+        const total = (row: AppRow) => (row.sample?.total.recv ?? 0) + (row.sample?.total.sent ?? 0);
+        let order = 0;
+        switch (sort()) {
+          case "down":
+            order = (a.sample?.rate_recv ?? 0) - (b.sample?.rate_recv ?? 0);
+            break;
+          case "up":
+            order = (a.sample?.rate_sent ?? 0) - (b.sample?.rate_sent ?? 0);
+            break;
+          case "session":
+            order = total(a) - total(b);
+            break;
+          default:
+            order = name(a).localeCompare(name(b));
+        }
+        if (sortDirection() === "desc") order *= -1;
+        return order || name(a).localeCompare(name(b));
       });
   });
+
+  const chooseSort = (next: SortKey) => {
+    if (sort() === next) {
+      setSortDirection((current) => (current === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSort(next);
+    setSortDirection(next === "app" ? "asc" : "desc");
+  };
 
   const candidates = createMemo(() => {
     const covered = new Set(
@@ -291,43 +335,72 @@ export function Protect() {
           <table class="tbl protect-table">
             <thead>
               <tr>
-                <th>Application</th>
+                <SortHeader label="Application" value="app" sort={sort()} direction={sortDirection()} choose={chooseSort} />
                 <th>Inbound</th>
                 <th>Outbound</th>
                 <th>Remote field</th>
-                <th class="num">↓ rate</th>
-                <th class="num">↑ rate</th>
-                <th class="num">session</th>
+                <SortHeader label="↓ rate" value="down" numeric sort={sort()} direction={sortDirection()} choose={chooseSort} />
+                <SortHeader label="↑ rate" value="up" numeric sort={sort()} direction={sortDirection()} choose={chooseSort} />
+                <SortHeader label="session" value="session" numeric sort={sort()} direction={sortDirection()} choose={chooseSort} />
               </tr>
             </thead>
             <tbody>
-              <For each={appRows()}>
+              <Key each={appRows()} by={(row) => pathKey(row.app)}>
                 {(row) => (
-                  <tr classList={{ dormant: !row.sample?.online, blocked: decisionFor(row, "inbound") === "block" || decisionFor(row, "outbound") === "block" }}>
+                  <tr classList={{ dormant: !row().sample?.online, blocked: decisionFor(row(), "inbound") === "block" || decisionFor(row(), "outbound") === "block" }}>
                     <td>
                       <div class="protect-app-cell">
-                        <span class="app-live" classList={{ on: !!row.sample?.online }} />
-                        <AppIcon path={row.app} />
+                        <span class="app-live" classList={{ on: !!row().sample?.online }} />
+                        <AppIcon path={row().app} />
                         <span class="protect-app-meta">
-                          <b>{row.sample?.name ?? fileName(row.app)}</b>
-                          <small>{row.app}</small>
+                          <b>{row().sample?.name ?? row().name ?? fileName(row().app)}</b>
+                          <small>{row().app}</small>
                         </span>
+                        <Show when={!row().sample?.online}>
+                          <button
+                            class="protect-forget"
+                            aria-label={`remove ${fileName(row().app)} from Protect`}
+                            title="Remove from Protect"
+                            onClick={() => void forgetKnownApp(row().app)}
+                          >
+                            <Icon name="x" size={10} />
+                          </button>
+                        </Show>
                       </div>
                     </td>
-                    <td><DecisionSelect row={row} direction="inbound" changing={changing()} choose={chooseDecision} /></td>
-                    <td><DecisionSelect row={row} direction="outbound" changing={changing()} choose={chooseDecision} /></td>
-                    <td><span class="remote-field">{hostsFor(row.sample)}</span></td>
-                    <td class="num">{rate(row.sample?.rate_recv ?? 0)}</td>
-                    <td class="num">{rate(row.sample?.rate_sent ?? 0)}</td>
-                    <td class="num">{bytes((row.sample?.total.recv ?? 0) + (row.sample?.total.sent ?? 0))}</td>
+                    <td><DecisionSelect row={row()} direction="inbound" changing={changing()} choose={chooseDecision} /></td>
+                    <td><DecisionSelect row={row()} direction="outbound" changing={changing()} choose={chooseDecision} /></td>
+                    <td><span class="remote-field">{hostsFor(row().sample)}</span></td>
+                    <td class="num">{rate(row().sample?.rate_recv ?? 0)}</td>
+                    <td class="num">{rate(row().sample?.rate_sent ?? 0)}</td>
+                    <td class="num">{bytes((row().sample?.total.recv ?? 0) + (row().sample?.total.sent ?? 0))}</td>
                   </tr>
                 )}
-              </For>
+              </Key>
             </tbody>
           </table>
         </div>
       </Show>
     </section>
+  );
+}
+
+function SortHeader(props: {
+  label: string;
+  value: SortKey;
+  numeric?: boolean;
+  sort: SortKey;
+  direction: SortDirection;
+  choose: (sort: SortKey) => void;
+}) {
+  const selected = () => props.sort === props.value;
+  return (
+    <th classList={{ num: !!props.numeric }} aria-sort={selected() ? (props.direction === "asc" ? "ascending" : "descending") : "none"}>
+      <button class="protect-sort" classList={{ on: selected() }} onClick={() => props.choose(props.value)}>
+        <span>{props.label}</span>
+        <span class="protect-sort-mark">{selected() ? (props.direction === "asc" ? "↑" : "↓") : "↕"}</span>
+      </button>
+    </th>
   );
 }
 

@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Titlebar } from "./components/Titlebar";
 import { Icon } from "./components/Icon";
 import { createTheme } from "./lib/theme";
-import { engine, initEngine } from "./lib/engine";
+import { engine, initEngine, setTickCadence } from "./lib/engine";
 import { initAlerts, unackedCount } from "./lib/alerts";
 import { initQuota } from "./lib/quota";
 import { autoUpdate } from "./lib/updater";
@@ -51,6 +51,12 @@ export function App() {
     return [...base, ...dynamic, TABS[TABS.length - 1]];
   };
   const current = () => allTabs().find((t) => t.id === tab()) ?? TABS[1];
+
+  createEffect(() => {
+    const liveView = tab() === "activity" || tab() === "graph";
+    setTickCadence(liveView ? 1000 : 4000);
+    void invoke("set_tick_details", { enabled: tab() === "activity" });
+  });
 
   onMount(() => {
     initEngine();

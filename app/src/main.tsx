@@ -7,10 +7,16 @@ import "@fontsource/geist-mono/400.css";
 import "@fontsource/geist-mono/500.css";
 import "@fontsource/newsreader/400-italic.css";
 import { App } from "./App";
+import { ConnectionPrompt } from "./components/ConnectionPrompt";
 import "./styles.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("root element missing");
+
+const promptId = Number(new URLSearchParams(location.search).get("connection-prompt"));
+if (Number.isSafeInteger(promptId) && promptId > 0) {
+  document.documentElement.classList.add("prompt-window");
+}
 
 render(
   () => (
@@ -25,7 +31,7 @@ render(
         </div>
       )}
     >
-      <App />
+      {Number.isSafeInteger(promptId) && promptId > 0 ? <ConnectionPrompt alertId={promptId} /> : <App />}
     </ErrorBoundary>
   ),
   root,

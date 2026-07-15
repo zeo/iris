@@ -26,7 +26,7 @@ pub use enrich::{
 pub use error::{EngineError, EngineResult};
 pub use model::{
     AdapterKind, AdapterSample, AppId, AppSample, ByteCounts, Conn, ConnState, Direction, Endpoint,
-    LiveConnection, ProcSample, Protocol, StatsTick,
+    KnownApp, LiveConnection, ProcSample, Protocol, StatsTick,
 };
 pub use panel::{Panel, Widget};
 pub use rule::{

@@ -2,11 +2,13 @@
 //! `sock:inet_sock_set_state` tracepoint
 
 use crate::proc;
+use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::atomic::{fence, Ordering};
+use std::time::{Duration, Instant};
 
 const PERF_TYPE_TRACEPOINT: u32 = 2;
 const PERF_RECORD_SAMPLE: u32 = 9;
@@ -25,6 +27,13 @@ pub struct FlowOwner {
     pub key: FlowKey,
     pub pid: u32,
     pub path: String,
+}
+
+pub struct DatagramBytes {
+    pub pid: u32,
+    pub path: String,
+    pub sent: u64,
+    pub recv: u64,
 }
 
 pub struct OwnerListener {
@@ -100,6 +109,144 @@ impl OwnerListener {
         }
         Ok(())
     }
+}
+
+pub struct DatagramListener {
+    rings: Vec<DatagramRing>,
+    exec_rings: Vec<PerfRing>,
+    exec_fields: ExecFields,
+    exec_paths: HashMap<u32, (String, Instant)>,
+    polls: Vec<libc::pollfd>,
+}
+
+impl DatagramListener {
+    pub fn open() -> io::Result<Self> {
+        let mut rings = open_datagram_rings("sock_send_length", true)?;
+        rings.extend(open_datagram_rings("sock_recv_length", false)?);
+        let root = trace_root().ok_or_else(|| io::Error::other("tracefs is unavailable"))?;
+        let exec = root.join("events/sched/sched_process_exec");
+        let exec_id = read_event_id(&exec)?;
+        let exec_fields = ExecFields::parse(&std::fs::read_to_string(exec.join("format"))?)?;
+        let exec_rings = open_event_rings(exec_id)?;
+        let polls = rings
+            .iter()
+            .map(|source| source.ring.fd.as_raw_fd())
+            .chain(exec_rings.iter().map(|ring| ring.fd.as_raw_fd()))
+            .map(|fd| libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        Ok(Self {
+            rings,
+            exec_rings,
+            exec_fields,
+            exec_paths: HashMap::new(),
+            polls,
+        })
+    }
+
+    pub fn receive(&mut self, timeout_ms: i32, bytes: &mut Vec<DatagramBytes>) -> io::Result<()> {
+        let result = unsafe {
+            libc::poll(
+                self.polls.as_mut_ptr(),
+                self.polls.len() as libc::nfds_t,
+                timeout_ms,
+            )
+        };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if result == 0 {
+            return Ok(());
+        }
+
+        for ring in &mut self.exec_rings {
+            ring.drain(|sample| {
+                if let Some((pid, path)) = self.exec_fields.path(sample) {
+                    self.exec_paths.insert(pid, (path, Instant::now()));
+                }
+            });
+        }
+        self.exec_paths
+            .retain(|_, (_, seen)| seen.elapsed() < Duration::from_secs(30));
+
+        let mut totals: HashMap<u32, (String, u64, u64)> = HashMap::new();
+        for source in &mut self.rings {
+            source.ring.drain(|sample| {
+                let Some((pid, raw)) = parse_sample(sample) else {
+                    return;
+                };
+                let Some(count) = source.fields.bytes(raw) else {
+                    return;
+                };
+                let Some(path) = proc::image_path_of(pid).or_else(|| {
+                    self.exec_paths
+                        .get(&pid)
+                        .filter(|(_, seen)| seen.elapsed() < Duration::from_secs(30))
+                        .map(|(path, _)| path.to_owned())
+                }) else {
+                    return;
+                };
+                let total = totals.entry(pid).or_insert((path, 0, 0));
+                if source.sent {
+                    total.1 = total.1.saturating_add(count);
+                } else {
+                    total.2 = total.2.saturating_add(count);
+                }
+            });
+        }
+        bytes.extend(
+            totals
+                .into_iter()
+                .map(|(pid, (path, sent, recv))| DatagramBytes {
+                    pid,
+                    path,
+                    sent,
+                    recv,
+                }),
+        );
+        Ok(())
+    }
+}
+
+struct DatagramRing {
+    ring: PerfRing,
+    fields: LengthFields,
+    sent: bool,
+}
+
+fn open_datagram_rings(name: &str, sent: bool) -> io::Result<Vec<DatagramRing>> {
+    let root = trace_root().ok_or_else(|| io::Error::other("tracefs is unavailable"))?;
+    let event = root.join("events/sock").join(name);
+    let id = read_event_id(&event)?;
+    let fields = LengthFields::parse(&std::fs::read_to_string(event.join("format"))?)?;
+    Ok(open_event_rings(id)?
+        .into_iter()
+        .map(|ring| DatagramRing { ring, fields, sent })
+        .collect())
+}
+
+fn read_event_id(event: &Path) -> io::Result<u64> {
+    std::fs::read_to_string(event.join("id"))?
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn open_event_rings(id: u64) -> io::Result<Vec<PerfRing>> {
+    let cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) }.max(1) as i32;
+    let rings = (0..cpus)
+        .filter_map(|cpu| PerfRing::open(id, cpu).ok())
+        .collect::<Vec<_>>();
+    if rings.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "cannot open tracepoint on any CPU",
+        ));
+    }
+    Ok(rings)
 }
 
 fn trace_root() -> Option<&'static Path> {
@@ -288,6 +435,85 @@ struct Fields {
     daddr_v6: Field,
 }
 
+#[derive(Clone, Copy)]
+struct LengthFields {
+    family: Field,
+    protocol: Field,
+    returned: Field,
+    flags: Field,
+}
+
+#[derive(Clone, Copy)]
+struct ExecFields {
+    filename: Field,
+    pid: Field,
+}
+
+impl ExecFields {
+    fn parse(format: &str) -> io::Result<Self> {
+        let find = |name| {
+            format
+                .lines()
+                .find_map(|line| parse_field(line, name))
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("tracepoint field {name} is missing"),
+                    )
+                })
+        };
+        Ok(Self {
+            filename: find("filename")?,
+            pid: find("pid")?,
+        })
+    }
+
+    fn path(self, sample: &[u8]) -> Option<(u32, String)> {
+        let (_, raw) = parse_sample(sample)?;
+        let pid = u32::try_from(read_i32(raw, self.pid)?).ok()?;
+        let location = read_u32(raw, self.filename)?;
+        let offset = (location & 0xffff) as usize;
+        let length = (location >> 16) as usize;
+        let filename = raw.get(offset..offset.checked_add(length)?)?;
+        let filename = filename.strip_suffix(&[0]).unwrap_or(filename);
+        let path = std::str::from_utf8(filename).ok()?.to_owned();
+        (!path.is_empty()).then_some((pid, path))
+    }
+}
+
+impl LengthFields {
+    fn parse(format: &str) -> io::Result<Self> {
+        let find = |name| {
+            format
+                .lines()
+                .find_map(|line| parse_field(line, name))
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("tracepoint field {name} is missing"),
+                    )
+                })
+        };
+        Ok(Self {
+            family: find("family")?,
+            protocol: find("protocol")?,
+            returned: find("ret")?,
+            flags: find("flags")?,
+        })
+    }
+
+    fn bytes(self, raw: &[u8]) -> Option<u64> {
+        let family = read_u16(raw, self.family)? as i32;
+        if !matches!(family, libc::AF_INET | libc::AF_INET6)
+            || read_u16(raw, self.protocol)? as i32 != libc::IPPROTO_UDP
+            || read_i32(raw, self.flags)? & libc::MSG_PEEK != 0
+        {
+            return None;
+        }
+        u64::try_from(read_i32(raw, self.returned)?).ok()
+    }
+}
+
 impl Fields {
     fn parse(format: &str) -> io::Result<Self> {
         let find = |name| {
@@ -370,6 +596,18 @@ fn read_u16(raw: &[u8], field: Field) -> Option<u16> {
     ))
 }
 
+fn read_i32(raw: &[u8], field: Field) -> Option<i32> {
+    (field.size == 4).then_some(i32::from_ne_bytes(
+        raw.get(field.offset..field.offset + 4)?.try_into().ok()?,
+    ))
+}
+
+fn read_u32(raw: &[u8], field: Field) -> Option<u32> {
+    (field.size == 4).then_some(u32::from_ne_bytes(
+        raw.get(field.offset..field.offset + 4)?.try_into().ok()?,
+    ))
+}
+
 fn read_array<const N: usize>(raw: &[u8], field: Field) -> Option<[u8; N]> {
     (field.size == N).then_some(raw.get(field.offset..field.offset + N)?.try_into().ok()?)
 }
@@ -401,5 +639,51 @@ field:__u8 daddr_v6[16]; offset:56; size:16; signed:0;";
         let flow = fields.flow(&raw).unwrap();
         assert_eq!(flow.local, (IpAddr::from([192, 0, 2, 3]), 40000));
         assert_eq!(flow.remote, (IpAddr::from([198, 51, 100, 8]), 443));
+    }
+
+    #[test]
+    fn filters_datagram_lengths_and_peeked_reads() {
+        let format = "\
+field:__u16 family; offset:16; size:2; signed:0;\n\
+field:__u16 protocol; offset:18; size:2; signed:0;\n\
+field:int ret; offset:20; size:4; signed:1;\n\
+field:int flags; offset:24; size:4; signed:1;";
+        let fields = LengthFields::parse(format).unwrap();
+        let mut raw = [0u8; 28];
+        raw[16..18].copy_from_slice(&(libc::AF_INET as u16).to_ne_bytes());
+        raw[18..20].copy_from_slice(&(libc::IPPROTO_UDP as u16).to_ne_bytes());
+        raw[20..24].copy_from_slice(&512i32.to_ne_bytes());
+        assert_eq!(fields.bytes(&raw), Some(512));
+        raw[24..28].copy_from_slice(&libc::MSG_PEEK.to_ne_bytes());
+        assert_eq!(fields.bytes(&raw), None);
+        raw[24..28].fill(0);
+        raw[18..20].copy_from_slice(&(libc::IPPROTO_TCP as u16).to_ne_bytes());
+        assert_eq!(fields.bytes(&raw), None);
+        raw[18..20].copy_from_slice(&(libc::IPPROTO_UDP as u16).to_ne_bytes());
+        raw[20..24].copy_from_slice(&(-libc::EAGAIN).to_ne_bytes());
+        assert_eq!(fields.bytes(&raw), None);
+    }
+
+    #[test]
+    fn parses_executable_path_from_dynamic_trace_field() {
+        let format = "\
+field:__data_loc char[] filename; offset:8; size:4; signed:0;\n\
+field:pid_t pid; offset:12; size:4; signed:1;";
+        let fields = ExecFields::parse(format).unwrap();
+        let path = b"/tmp/iris-udp-probe\0";
+        let mut raw = vec![0u8; 20 + path.len()];
+        let location = ((path.len() as u32) << 16) | 20;
+        raw[8..12].copy_from_slice(&location.to_ne_bytes());
+        raw[12..16].copy_from_slice(&4242i32.to_ne_bytes());
+        raw[20..].copy_from_slice(path);
+
+        let mut sample = vec![0u8; 12 + raw.len()];
+        sample[0..4].copy_from_slice(&4242u32.to_ne_bytes());
+        sample[8..12].copy_from_slice(&(raw.len() as u32).to_ne_bytes());
+        sample[12..].copy_from_slice(&raw);
+        assert_eq!(
+            fields.path(&sample),
+            Some((4242, "/tmp/iris-udp-probe".to_owned()))
+        );
     }
 }

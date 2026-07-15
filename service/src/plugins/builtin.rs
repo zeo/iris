@@ -117,14 +117,13 @@ impl Enricher for Geo {
         if ip_scope(ip) != "Public internet" {
             return Vec::new();
         }
-        let Ok(record) = reader.lookup::<maxminddb::geoip2::Country>(*ip) else {
+        let Ok(lookup) = reader.lookup(*ip) else {
             return Vec::new();
         };
-        let Some(name) = record
-            .country
-            .and_then(|c| c.names)
-            .and_then(|n| n.get("en").map(|s| s.to_string()))
-        else {
+        let Ok(Some(record)) = lookup.decode::<maxminddb::geoip2::Country>() else {
+            return Vec::new();
+        };
+        let Some(name) = record.country.names.english.map(str::to_owned) else {
             return Vec::new();
         };
         vec![Annotation::text(

@@ -18,8 +18,8 @@ use crate::ct;
 use crate::dns::{self, DnsMap};
 use crate::proc::{self, PidCache};
 use crate::sockets::{self, SockInfo};
-use crate::trace::{FlowKey, FlowOwner, OwnerListener};
-use iris_core::Aggregator;
+use crate::trace::{DatagramBytes, DatagramListener, FlowKey, FlowOwner, OwnerListener};
+use iris_core::{AdapterKind, Aggregator, Direction, Endpoint, Protocol};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,6 +32,21 @@ pub struct Monitor {
     threads: Vec<JoinHandle<()>>,
     cache: Arc<Mutex<PidCache>>,
     adapters: Arc<AdapterMap>,
+    recent_flows: Arc<Mutex<Vec<RecentFlow>>>,
+}
+
+#[derive(Clone)]
+pub struct RecentFlow {
+    pub path: String,
+    pub remote: Endpoint,
+    pub direction: Direction,
+}
+
+#[derive(Clone)]
+struct AccountingShared {
+    cache: Arc<Mutex<PidCache>>,
+    adapters: Arc<AdapterMap>,
+    recent_flows: Arc<Mutex<Vec<RecentFlow>>>,
 }
 
 impl Monitor {
@@ -39,6 +54,12 @@ impl Monitor {
         let stop = Arc::new(AtomicBool::new(false));
         let cache = Arc::new(Mutex::new(PidCache::new()));
         let adapters = Arc::new(AdapterMap::new());
+        let recent_flows = Arc::new(Mutex::new(Vec::new()));
+        let shared = AccountingShared {
+            cache: cache.clone(),
+            adapters: adapters.clone(),
+            recent_flows: recent_flows.clone(),
+        };
         ct::enable_acct();
 
         let mut threads = Vec::new();
@@ -50,23 +71,39 @@ impl Monitor {
         let owner_listener = OwnerListener::open()
             .inspect_err(|error| tracing::warn!("short TCP attribution unavailable: {error}"))
             .ok();
-        if close_listener.is_some() || owner_listener.is_some() {
+        let datagram_listener = DatagramListener::open()
+            .inspect_err(|error| tracing::warn!("event-backed UDP accounting unavailable: {error}"))
+            .ok();
+        let udp_events_active = Arc::new(AtomicBool::new(datagram_listener.is_some()));
+        if close_listener.is_some() || owner_listener.is_some() || datagram_listener.is_some() {
             let stop = stop.clone();
+            let udp_events_active = udp_events_active.clone();
             threads.push(
                 std::thread::Builder::new()
-                    .name("iris-tcp-events".into())
-                    .spawn(move || tcp_event_loop(stop, owner_listener, close_listener, tcp_tx))?,
+                    .name("iris-net-events".into())
+                    .spawn(move || {
+                        network_event_loop(
+                            stop,
+                            owner_listener,
+                            close_listener,
+                            datagram_listener,
+                            udp_events_active,
+                            tcp_tx,
+                        )
+                    })?,
             );
         }
 
         let acct = {
             let stop = stop.clone();
-            let cache = cache.clone();
-            let adapters = adapters.clone();
             let snapshots = dns_map.clone();
+            let udp_events_active = udp_events_active.clone();
+            let shared = shared.clone();
             std::thread::Builder::new()
                 .name("iris-acct".into())
-                .spawn(move || accounting_loop(stop, agg, cache, adapters, snapshots, tcp_rx))?
+                .spawn(move || {
+                    accounting_loop(stop, agg, shared, snapshots, tcp_rx, udp_events_active)
+                })?
         };
         threads.push(acct);
 
@@ -90,6 +127,7 @@ impl Monitor {
             threads,
             cache,
             adapters,
+            recent_flows,
         })
     }
 
@@ -103,6 +141,13 @@ impl Monitor {
     /// rebuild the address-to-adapter table on a slow cadence
     pub fn refresh_adapters(&self) {
         self.adapters.refresh();
+    }
+
+    pub fn take_recent_flows(&self) -> Vec<RecentFlow> {
+        self.recent_flows
+            .lock()
+            .map(|mut flows| std::mem::take(&mut *flows))
+            .unwrap_or_default()
     }
 
     pub fn stop(mut self) {
@@ -131,17 +176,23 @@ struct Baseline {
 fn accounting_loop(
     stop: Arc<AtomicBool>,
     agg: Arc<Mutex<Aggregator>>,
-    cache: Arc<Mutex<PidCache>>,
-    adapters: Arc<AdapterMap>,
+    shared: AccountingShared,
     snapshots: DnsMap,
-    tcp_events: std::sync::mpsc::Receiver<TcpEvent>,
+    network_events: std::sync::mpsc::Receiver<NetworkEvent>,
+    udp_events_active: Arc<AtomicBool>,
 ) {
+    let AccountingShared {
+        cache,
+        adapters,
+        recent_flows,
+    } = shared;
     let mut tcp_seen: HashMap<u64, Baseline> = HashMap::new();
     let mut tcp_owners: HashMap<u64, TcpOwner> = HashMap::new();
     let mut flow_owners: HashMap<FlowKey, (TcpOwner, std::time::Instant)> = HashMap::new();
     let mut pending_closed: HashMap<FlowKey, (SockInfo, std::time::Instant)> = HashMap::new();
     let mut udp_seen: HashMap<UdpKey, Baseline> = HashMap::new();
     let mut primed = false;
+    let mut udp_event_was_active = udp_events_active.load(Ordering::Relaxed);
 
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_secs(1));
@@ -149,9 +200,9 @@ fn accounting_loop(
         let socks = sockets::dump();
         dns::record_sockets(&snapshots, &socks, &owners);
 
-        for event in tcp_events.try_iter() {
+        for event in network_events.try_iter() {
             match event {
-                TcpEvent::Owner(owner) => {
+                NetworkEvent::Owner(owner) => {
                     flow_owners.insert(
                         owner.key,
                         (
@@ -164,7 +215,9 @@ fn accounting_loop(
                         ),
                     );
                 }
-                TcpEvent::Closed(socket) => {
+                NetworkEvent::Closed(socket) => {
+                    let owner = closed_owner(&socket, &tcp_seen, &tcp_owners, &flow_owners);
+                    let remote = socket.remote;
                     if !account_closed_tcp(&socket, &tcp_seen, &tcp_owners, &flow_owners, &agg) {
                         pending_closed.insert(
                             FlowKey {
@@ -173,13 +226,36 @@ fn accounting_loop(
                             },
                             (socket, std::time::Instant::now()),
                         );
+                    } else if let Some(owner) = owner {
+                        record_recent_flow(&recent_flows, &owner.path, remote);
+                    }
+                }
+                NetworkEvent::Datagram(bytes) => {
+                    if bytes.sent != 0 || bytes.recv != 0 {
+                        agg.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .record(
+                                bytes.pid,
+                                &bytes.path,
+                                None,
+                                AdapterKind::Other,
+                                bytes.sent,
+                                bytes.recv,
+                            );
                     }
                 }
             }
         }
         pending_closed.retain(|_, (socket, queued)| {
-            !account_closed_tcp(socket, &tcp_seen, &tcp_owners, &flow_owners, &agg)
-                && queued.elapsed() < Duration::from_secs(5)
+            let owner = closed_owner(socket, &tcp_seen, &tcp_owners, &flow_owners);
+            if account_closed_tcp(socket, &tcp_seen, &tcp_owners, &flow_owners, &agg) {
+                if let Some(owner) = owner {
+                    record_recent_flow(&recent_flows, &owner.path, socket.remote);
+                }
+                false
+            } else {
+                queued.elapsed() < Duration::from_secs(5)
+            }
         });
         flow_owners.retain(|_, (_, seen)| seen.elapsed() < Duration::from_secs(30));
         account_tcp(
@@ -193,15 +269,19 @@ fn accounting_loop(
         );
         tcp_owners.retain(|cookie, _| tcp_seen.contains_key(cookie));
         tcp_owners.extend(tcp_owner_map(&socks, &owners, &cache, &adapters));
-        account_udp(
-            &socks,
-            &owners,
-            &mut udp_seen,
-            &agg,
-            &cache,
-            &adapters,
-            primed,
-        );
+        let event_accounted_udp = udp_events_active.load(Ordering::Relaxed);
+        if !event_accounted_udp {
+            account_udp(
+                &socks,
+                &owners,
+                &mut udp_seen,
+                &agg,
+                &cache,
+                &adapters,
+                primed && !udp_event_was_active,
+            );
+        }
+        udp_event_was_active = event_accounted_udp;
         primed = true;
     }
 }
@@ -237,6 +317,41 @@ fn tcp_owner_map(
         );
     }
     tracked
+}
+
+fn closed_owner(
+    socket: &SockInfo,
+    seen: &HashMap<u64, Baseline>,
+    owners: &HashMap<u64, TcpOwner>,
+    flow_owners: &HashMap<FlowKey, (TcpOwner, std::time::Instant)>,
+) -> Option<TcpOwner> {
+    if seen.contains_key(&socket.cookie) {
+        return owners.get(&socket.cookie).cloned();
+    }
+    flow_owners
+        .get(&FlowKey {
+            local: socket.local,
+            remote: socket.remote,
+        })
+        .map(|(owner, _)| owner.clone())
+}
+
+fn record_recent_flow(recent_flows: &Mutex<Vec<RecentFlow>>, path: &str, remote: (IpAddr, u16)) {
+    let flow = RecentFlow {
+        path: path.to_owned(),
+        remote: Endpoint {
+            addr: remote.0,
+            port: remote.1,
+            protocol: Protocol::Tcp,
+        },
+        direction: Direction::Outbound,
+    };
+    if let Ok(mut flows) = recent_flows.lock() {
+        flows.push(flow);
+        if flows.len() > 256 {
+            flows.drain(..128);
+        }
+    }
 }
 
 fn account_closed_tcp(
@@ -280,34 +395,54 @@ fn account_closed_tcp(
     true
 }
 
-enum TcpEvent {
+enum NetworkEvent {
     Owner(FlowOwner),
     Closed(SockInfo),
+    Datagram(DatagramBytes),
 }
 
-fn tcp_event_loop(
+fn network_event_loop(
     stop: Arc<AtomicBool>,
     mut owners: Option<OwnerListener>,
     mut closes: Option<sockets::DestroyListener>,
-    sender: std::sync::mpsc::Sender<TcpEvent>,
+    mut datagrams: Option<DatagramListener>,
+    udp_events_active: Arc<AtomicBool>,
+    sender: std::sync::mpsc::Sender<NetworkEvent>,
 ) {
     let mut found_owners = Vec::new();
     let mut closed = Vec::new();
+    let mut bytes = Vec::new();
     while !stop.load(Ordering::Relaxed) {
+        let mut waited = false;
         if let Some(listener) = owners.as_mut() {
-            match listener.receive(200, &mut found_owners) {
-                Ok(()) => {}
+            match listener.receive(100, &mut found_owners) {
+                Ok(()) => waited = true,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => {
                     tracing::warn!("short TCP attribution stopped: {error}");
                     owners = None;
                 }
             }
-        } else {
-            std::thread::sleep(Duration::from_millis(200));
         }
         for owner in found_owners.drain(..) {
-            if sender.send(TcpEvent::Owner(owner)).is_err() {
+            if sender.send(NetworkEvent::Owner(owner)).is_err() {
+                return;
+            }
+        }
+
+        if let Some(listener) = datagrams.as_mut() {
+            match listener.receive(if waited { 0 } else { 100 }, &mut bytes) {
+                Ok(()) => waited = true,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    tracing::warn!("event-backed UDP accounting stopped: {error}");
+                    datagrams = None;
+                    udp_events_active.store(false, Ordering::Relaxed);
+                }
+            }
+        }
+        for datagram in bytes.drain(..) {
+            if sender.send(NetworkEvent::Datagram(datagram)).is_err() {
                 return;
             }
         }
@@ -316,7 +451,7 @@ fn tcp_event_loop(
             match listener.receive(&mut closed) {
                 Ok(()) => {
                     for socket in closed.drain(..) {
-                        if sender.send(TcpEvent::Closed(socket)).is_err() {
+                        if sender.send(NetworkEvent::Closed(socket)).is_err() {
                             return;
                         }
                     }
@@ -330,10 +465,15 @@ fn tcp_event_loop(
                 }
             }
         }
-        if owners.is_none() && closes.is_none() {
+        if !waited {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if owners.is_none() && closes.is_none() && datagrams.is_none() {
+            udp_events_active.store(false, Ordering::Relaxed);
             return;
         }
     }
+    udp_events_active.store(false, Ordering::Relaxed);
 }
 
 fn resolve_path(cache: &Mutex<PidCache>, pid: u32) -> Option<String> {

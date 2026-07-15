@@ -5,23 +5,17 @@ function css(el: HTMLElement, name: string): string {
   return getComputedStyle(el).getPropertyValue(name).trim();
 }
 
-// the mini instrument in the always-on readout. idles with a faint travelling
-// pulse so the panel reads as powered-on; plots the recent ring once live.
+// the mini instrument in the always-on readout. idles on a faint powered-on
+// marker and plots the recent ring once live.
 export function Sparkline(props: { data?: () => Sample[] }) {
   let canvas!: HTMLCanvasElement;
 
   onMount(() => {
     const ctx = canvas.getContext("2d")!;
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    let t0 = 0;
     let raf = 0;
-    // true while a frame is queued; the idle branch keeps it queued to animate,
-    // the live branch clears it so we only repaint when a new sample arrives
     let looping = false;
 
-    const frame = (ts: number) => {
-      if (!t0) t0 = ts;
-      const t = (ts - t0) / 1000;
+    const frame = () => {
       const dpr = window.devicePixelRatio || 1;
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
@@ -46,17 +40,12 @@ export function Sparkline(props: { data?: () => Sample[] }) {
         ctx.lineTo(w, midY);
         ctx.stroke();
         ctx.globalAlpha = 1;
-        if (!reduce) {
-          const x = ((t * 0.4) % 1) * w;
-          ctx.fillStyle = live;
-          ctx.globalAlpha = 0.9;
-          ctx.beginPath();
-          ctx.arc(x, midY, 1.6, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.globalAlpha = 1;
-          raf = requestAnimationFrame(frame);
-          return;
-        }
+        ctx.fillStyle = live;
+        ctx.globalAlpha = 0.9;
+        ctx.beginPath();
+        ctx.arc(w * 0.16, midY, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
         looping = false;
         return;
       }
@@ -82,8 +71,7 @@ export function Sparkline(props: { data?: () => Sample[] }) {
       }
     };
 
-    // repaint when the ring changes; the frame loop sustains itself only while
-    // idle, so a live always-on monitor is not burning a full-rate rAF loop
+    // repaint only when the ring changes
     createEffect(() => {
       props.data?.();
       request();

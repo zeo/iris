@@ -6,10 +6,13 @@
 
 use crate::engine::Engine;
 use crate::plugins::registry::EnrichmentRegistry;
+use crate::rules::RuleStore;
 use crate::tracker::Tracker;
 use iris_core::{Aggregator, AlertKind, EnrichTarget, Severity};
 use iris_ipc::ServerMessage;
 use iris_store::Store;
+#[cfg(target_os = "linux")]
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -30,7 +33,14 @@ fn target_name(target: &EnrichTarget) -> String {
 }
 
 /// start monitoring and the flush loop.
-pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentRegistry>) {
+pub fn spawn(
+    engine: Engine,
+    rules: Arc<Mutex<RuleStore>>,
+    store: Arc<Mutex<Store>>,
+    enrich: Arc<EnrichmentRegistry>,
+) {
+    #[cfg(not(target_os = "linux"))]
+    let _ = &rules;
     let agg = Arc::new(Mutex::new(Aggregator::new(now_ms())));
 
     #[cfg(has_platform)]
@@ -64,7 +74,50 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentReg
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let now = now_ms();
+            #[cfg(target_os = "linux")]
+            let pending = rules
+                .lock()
+                .map(|rules| rules.take_pending_connections())
+                .unwrap_or_default();
+            #[cfg(target_os = "linux")]
+            for connection in pending {
+                let alert = {
+                    let store = store.lock().unwrap_or_else(|error| error.into_inner());
+                    store.ensure_app(connection.app.as_str(), None, now);
+                    let already_pending = store.list_alerts(true).into_iter().any(|alert| {
+                        matches!(
+                            alert.kind,
+                            AlertKind::NewApp { ref app, direction, .. }
+                                if app == &connection.app && direction == Some(connection.direction)
+                        )
+                    });
+                    (!already_pending).then(|| {
+                        store.insert_alert(
+                            &AlertKind::NewApp {
+                                app: connection.app,
+                                remote: Some(connection.remote),
+                                direction: Some(connection.direction),
+                            },
+                            now,
+                        )
+                    })
+                };
+                if let Some(alert) = alert {
+                    engine.publish(ServerMessage::Alert(alert));
+                }
+            }
             let tick = tracker.tick(now);
+            #[cfg(target_os = "linux")]
+            let recent_flows: HashMap<String, crate::platform::RecentFlow> = byte_monitor
+                .as_ref()
+                .map(|monitor| {
+                    monitor
+                        .take_recent_flows()
+                        .into_iter()
+                        .map(|flow| (flow.path.clone(), flow))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             // record usage + first-seen alerts under one store lock. recover a
             // poisoned guard so one panicking tick never silently ends all
@@ -87,9 +140,36 @@ pub fn spawn(engine: Engine, store: Arc<Mutex<Store>>, enrich: Arc<EnrichmentReg
                         && store.ensure_app(app.app.as_str(), app.name.as_deref(), now)
                         && alerting
                     {
+                        let connection = app
+                            .processes
+                            .iter()
+                            .flat_map(|process| &process.conns)
+                            .next();
+                        #[cfg(target_os = "linux")]
+                        let closed = recent_flows.get(app.app.as_str());
                         let alert = store.insert_alert(
                             &AlertKind::NewApp {
                                 app: app.app.clone(),
+                                remote: connection.map(|conn| conn.remote.clone()).or_else(|| {
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        closed.map(|flow| flow.remote.clone())
+                                    }
+                                    #[cfg(not(target_os = "linux"))]
+                                    {
+                                        None
+                                    }
+                                }),
+                                direction: connection.map(|conn| conn.direction).or_else(|| {
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        closed.map(|flow| flow.direction)
+                                    }
+                                    #[cfg(not(target_os = "linux"))]
+                                    {
+                                        None
+                                    }
+                                }),
                             },
                             now,
                         );

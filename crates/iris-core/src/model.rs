@@ -81,6 +81,14 @@ impl AppId {
     }
 }
 
+/// an application retained in the durable Protect inventory
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownApp {
+    pub app: AppId,
+    pub name: Option<String>,
+    pub last_seen: u64,
+}
+
 #[cfg(test)]
 mod app_id_tests {
     use super::AppId;
@@ -179,6 +187,9 @@ pub struct AppSample {
     /// whether any process is active now; false while the app lingers in the
     /// post-disconnect grace window
     pub online: bool,
+    /// distinct remote hostnames or addresses for compact app-level views
+    #[serde(default)]
+    pub hosts: Vec<String>,
     /// the app's processes, each with its own rate, totals, and connections
     pub processes: Vec<ProcSample>,
 }

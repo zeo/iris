@@ -49,6 +49,15 @@ jobs:
           pnpm build
       - name: build engine (release, for the app resource)
         run: cargo build --release -p iris-service
+      - name: verify packaged desktop
+        shell: pwsh
+        run: |
+          cargo build --release -p iris-app
+          $binary = [IO.File]::ReadAllBytes("target/release/iris.exe")
+          $text = [Text.Encoding]::ASCII.GetString($binary)
+          if ($text.Contains("http://localhost:1423")) {
+            throw "release desktop still points at the development server"
+          }
       - name: test
         run: cargo test
       - name: clippy
@@ -92,6 +101,13 @@ jobs:
           pnpm build
       - name: build engine (release, for the app resource)
         run: cargo build --release -p iris-service
+      - name: verify packaged desktop
+        run: |
+          cargo build --release -p iris-app
+          if LC_ALL=C grep -aFq 'http://localhost:1423' target/release/iris; then
+            echo 'release desktop still points at the development server' >&2
+            exit 1
+          fi
       - name: test
         run: cargo test
       - name: clippy

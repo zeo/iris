@@ -106,14 +106,18 @@ fn fit_main_window(app: &tauri::AppHandle) {
     let work = monitor.work_area().size;
     let available_width = (f64::from(work.width) / scale - 32.0).max(640.0);
     let available_height = (f64::from(work.height) / scale - 32.0).max(480.0);
-    let width = 1180.0_f64.min(available_width);
-    let height = 820.0_f64.min(available_height);
-    let min_width = 820.0_f64.min(width);
-    let min_height = 600.0_f64.min(height);
+    let webview_scale = prompt::webview_scale();
+    let (width, min_width) = main_dimension(1180.0, 820.0, available_width, webview_scale);
+    let (height, min_height) = main_dimension(820.0, 600.0, available_height, webview_scale);
     let _ = window.set_min_size(Some(tauri::LogicalSize::new(min_width, min_height)));
     let _ = window.set_size(tauri::LogicalSize::new(width, height));
     let _ = window.set_resizable(true);
     let _ = window.set_maximizable(true);
+}
+
+fn main_dimension(preferred: f64, minimum: f64, available: f64, webview_scale: f64) -> (f64, f64) {
+    let size = (preferred * webview_scale).min(available);
+    (size, (minimum * webview_scale).min(size))
 }
 
 /// a tray icon that restores the window on click and offers show / quit
@@ -150,5 +154,22 @@ fn reveal(app: &tauri::AppHandle) {
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::main_dimension;
+
+    #[test]
+    fn expands_main_host_for_fractional_webview_scale() {
+        assert_eq!(main_dimension(1180.0, 820.0, 2000.0, 1.5), (1770.0, 1230.0));
+        assert_eq!(main_dimension(820.0, 600.0, 1400.0, 1.5), (1230.0, 900.0));
+    }
+
+    #[test]
+    fn caps_main_host_to_the_monitor_work_area() {
+        assert_eq!(main_dimension(1180.0, 820.0, 1500.0, 1.5), (1500.0, 1230.0));
+        assert_eq!(main_dimension(820.0, 600.0, 1000.0, 1.5), (1000.0, 900.0));
     }
 }

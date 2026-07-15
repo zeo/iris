@@ -43,7 +43,10 @@ export const visibleDecisionPrompts = (
   dismissed: ReadonlySet<number>,
   limit = 3,
 ): Alert[] =>
-  alerts.filter((alert) => needsDecision(alert) && !dismissed.has(alert.id)).slice(0, limit);
+  alerts
+    .filter((alert) => needsDecision(alert) && !dismissed.has(alert.id))
+    .slice(0, limit)
+    .reverse();
 
 export function fileName(path: string): string {
   const seg = path.split(/[\\/]/).pop();

@@ -577,7 +577,7 @@ html {
   gap: 10px;
   align-items: flex-end;
   justify-content: flex-end;
-  padding: 8px;
+  padding: 0;
 }
 .connection-prompt {
   width: 420px;
@@ -589,7 +589,6 @@ html {
   border: 1px solid var(--line2);
   border-radius: var(--r-lg);
   background: var(--plate);
-  box-shadow: var(--e3);
 }
 .connection-prompt > header {
   display: grid;

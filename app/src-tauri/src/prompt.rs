@@ -5,7 +5,7 @@ const LABEL: &str = "connection-prompts";
 const CARD_WIDTH: f64 = 420.0;
 const CARD_HEIGHT: f64 = 228.0;
 const CARD_GAP: f64 = 10.0;
-const HOST_PADDING: f64 = 8.0;
+const HOST_PADDING: f64 = 0.0;
 const EDGE_MARGIN: i32 = 18;
 const MAX_VISIBLE: usize = 2;
 
@@ -14,7 +14,7 @@ fn stack_height(count: usize) -> f64 {
     count * CARD_HEIGHT + (count - 1.0) * CARD_GAP + HOST_PADDING * 2.0
 }
 
-fn webview_scale() -> f64 {
+pub(crate) fn webview_scale() -> f64 {
     std::env::var("IRIS_X11_WEBVIEW_SCALE")
         .ok()
         .and_then(|scale| scale.parse().ok())
@@ -158,21 +158,21 @@ mod tests {
 
     #[test]
     fn sizes_the_visible_prompt_stack_without_exceeding_two_cards() {
-        assert_eq!(stack_height(1), 244.0);
-        assert_eq!(stack_height(2), 482.0);
-        assert_eq!(stack_height(3), 482.0);
+        assert_eq!(stack_height(1), 228.0);
+        assert_eq!(stack_height(2), 466.0);
+        assert_eq!(stack_height(3), 466.0);
     }
 
     #[test]
     fn positions_from_the_requested_stack_height() {
-        assert_eq!(trailing_edge(0, 720, stack_height(2), 1.0), 220);
-        assert_eq!(trailing_edge(40, 1080, stack_height(2), 1.5), 379);
+        assert_eq!(trailing_edge(0, 720, stack_height(2), 1.0), 236);
+        assert_eq!(trailing_edge(40, 1080, stack_height(2), 1.5), 403);
     }
 
     #[test]
     fn expands_the_native_host_for_fractional_webview_scale() {
-        assert_eq!(host_width(1.5), 654.0);
-        assert_eq!(host_height(1, 1.5), 366.0);
-        assert_eq!(host_height(2, 1.5), 723.0);
+        assert_eq!(host_width(1.5), 630.0);
+        assert_eq!(host_height(1, 1.5), 342.0);
+        assert_eq!(host_height(2, 1.5), 699.0);
     }
 }

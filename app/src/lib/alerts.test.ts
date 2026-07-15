@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { needsDecision, type Alert } from "./alerts";
+import { needsDecision, needsNativeNotification, type Alert } from "./alerts";
 
 const pending = {
   id: 7,
@@ -23,5 +23,20 @@ describe("needsDecision", () => {
         kind: { ...pending.kind, remote: null },
       }),
     ).toBe(false);
+  });
+
+  it("uses the actionable prompt without also raising a generic notification", () => {
+    expect(needsNativeNotification(pending)).toBe(false);
+    expect(needsNativeNotification({ ...pending, acknowledged: true })).toBe(true);
+    expect(
+      needsNativeNotification({
+        ...pending,
+        kind: {
+          kind: "blocked",
+          app: pending.kind.app,
+          remote: { addr: "203.0.113.7", port: 443 },
+        },
+      }),
+    ).toBe(true);
   });
 });

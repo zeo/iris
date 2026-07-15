@@ -36,6 +36,8 @@ export const needsDecision = (alert: Alert): boolean =>
   alert.kind.remote !== null &&
   alert.kind.direction !== null;
 
+export const needsNativeNotification = (alert: Alert): boolean => !needsDecision(alert);
+
 export function fileName(path: string): string {
   const seg = path.split(/[\\/]/).pop();
   return seg && seg.length ? seg : path;
@@ -92,7 +94,7 @@ export async function decideAlert(id: number, action: "allow" | "block"): Promis
 }
 
 async function toast(a: Alert): Promise<void> {
-  if (!showNotifications()) return;
+  if (!showNotifications() || !needsNativeNotification(a)) return;
   let title: string;
   let body: string;
   if (a.kind.kind === "plugin") {

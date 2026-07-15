@@ -65,7 +65,7 @@ pub(crate) mod linux {
                 let Ok(text) = std::fs::read_to_string(&p) else {
                     continue;
                 };
-                if desktop_matches(&text, binary) {
+                if desktop_matches(&text, path, binary) {
                     if let Some(icon) = field(&text, "Icon") {
                         return Some(icon);
                     }
@@ -75,7 +75,7 @@ pub(crate) mod linux {
         None
     }
 
-    fn desktop_matches(text: &str, binary: &str) -> bool {
+    fn desktop_matches(text: &str, path: &str, binary: &str) -> bool {
         for key in ["Exec", "TryExec"] {
             if let Some(val) = field(text, key) {
                 let first = val.split_whitespace().next().unwrap_or("");
@@ -88,7 +88,30 @@ pub(crate) mod linux {
                 }
             }
         }
-        false
+        let appimage = path
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("appimage"));
+        if !appimage {
+            return false;
+        }
+        let bundle = Path::new(binary)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(normalized_identifier)
+            .unwrap_or_default();
+        ["Name", "StartupWMClass"]
+            .into_iter()
+            .filter_map(|key| field(text, key))
+            .map(|identity| normalized_identifier(&identity))
+            .any(|identity| identity.len() >= 4 && bundle.starts_with(&identity))
+    }
+
+    fn normalized_identifier(identity: &str) -> String {
+        identity
+            .chars()
+            .filter(|character| character.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
     }
 
     fn field(text: &str, key: &str) -> Option<String> {
@@ -160,6 +183,37 @@ pub(crate) mod linux {
             .ancestors()
             .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some("usr"))
             .map(Path::to_path_buf)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::desktop_matches;
+
+        #[test]
+        fn matches_the_desktop_executable_directly() {
+            let desktop = "Exec=/usr/bin/browser %U\nIcon=browser\n";
+            assert!(desktop_matches(desktop, "/usr/bin/browser", "browser"));
+        }
+
+        #[test]
+        fn matches_a_versioned_appimage_by_desktop_identity() {
+            let desktop = "Name=Helium\nExec=/home/one/.local/bin/helium %U\nIcon=net.imput.helium\nStartupWMClass=helium\n";
+            assert!(desktop_matches(
+                desktop,
+                "/home/one/Downloads/helium-0.14.5.1-x86_64.AppImage",
+                "helium-0.14.5.1-x86_64.AppImage"
+            ));
+        }
+
+        #[test]
+        fn does_not_fuzzy_match_an_ordinary_executable() {
+            let desktop = "Name=Browser\nExec=/opt/other-browser\nIcon=browser\n";
+            assert!(!desktop_matches(
+                desktop,
+                "/tmp/browser-nightly",
+                "browser-nightly"
+            ));
+        }
     }
 }
 

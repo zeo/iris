@@ -4,7 +4,7 @@ import { Titlebar } from "./components/Titlebar";
 import { Icon } from "./components/Icon";
 import { createTheme } from "./lib/theme";
 import { engine, initEngine, setTickCadence } from "./lib/engine";
-import { initAlerts, unackedCount } from "./lib/alerts";
+import { initAlerts, restoreDecisionPrompts, unackedCount } from "./lib/alerts";
 import { initQuota } from "./lib/quota";
 import { autoUpdate } from "./lib/updater";
 import { Protect } from "./tabs/Protect";
@@ -68,7 +68,10 @@ export function App() {
 
   // the tab list depends on the plugin catalog, so load it with the engine
   createEffect(() => {
-    if (engine.online()) refreshPlugins();
+    if (engine.online()) {
+      refreshPlugins();
+      void restoreDecisionPrompts();
+    }
   });
 
   // offer to install the background service if the engine stays unreachable

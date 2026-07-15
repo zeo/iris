@@ -30,6 +30,12 @@ export { alerts };
 
 export const unackedCount = () => alerts().filter((a) => !a.acknowledged).length;
 
+export const needsDecision = (alert: Alert): boolean =>
+  !alert.acknowledged &&
+  alert.kind.kind === "new_app" &&
+  alert.kind.remote !== null &&
+  alert.kind.direction !== null;
+
 export function fileName(path: string): string {
   const seg = path.split(/[\\/]/).pop();
   return seg && seg.length ? seg : path;
@@ -39,11 +45,20 @@ let started = false;
 export function initAlerts() {
   if (started) return;
   started = true;
-  refreshAlerts();
+  void restoreDecisionPrompts();
   listen<Alert>("engine-alert", (e) => {
     setAlerts((a) => [e.payload, ...a.filter((x) => x.id !== e.payload.id)].slice(0, 500));
     void toast(e.payload);
   });
+}
+
+export async function restoreDecisionPrompts(): Promise<void> {
+  await refreshAlerts();
+  try {
+    await invoke("restore_connection_prompts");
+  } catch {
+    /* offline */
+  }
 }
 
 export async function refreshAlerts(): Promise<void> {
@@ -64,7 +79,16 @@ export async function ackAlert(id: number): Promise<void> {
 }
 
 export async function ackAll(): Promise<void> {
-  for (const a of alerts().filter((x) => !x.acknowledged)) await ackAlert(a.id);
+  for (const a of alerts().filter((x) => !x.acknowledged && !needsDecision(x))) {
+    await ackAlert(a.id);
+  }
+}
+
+export async function decideAlert(id: number, action: "allow" | "block"): Promise<void> {
+  await invoke("decide_alert", { id, action });
+  setAlerts((current) =>
+    current.map((alert) => (alert.id === id ? { ...alert, acknowledged: true } : alert)),
+  );
 }
 
 async function toast(a: Alert): Promise<void> {

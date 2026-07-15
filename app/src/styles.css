@@ -2312,6 +2312,9 @@ html {
   cursor: pointer;
   gap: var(--s3);
 }
+.row.alert.decision {
+  cursor: default;
+}
 .row.alert .unread-dot {
   width: 7px;
   height: 7px;
@@ -2360,6 +2363,38 @@ html {
   gap: 2px;
   flex: none;
   text-align: right;
+}
+.alert-decisions {
+  display: flex;
+  gap: var(--s2);
+  flex: none;
+}
+.alert-decision {
+  min-width: 66px;
+  height: 30px;
+  border: 1px solid var(--line2);
+  border-radius: var(--r-sm);
+  background: var(--surf2);
+  color: var(--text-2);
+  font: 500 var(--fz-sm) var(--ui);
+  cursor: pointer;
+}
+.alert-decision.block {
+  border-color: rgba(207, 106, 86, 0.5);
+  color: var(--err);
+}
+.alert-decision.allow {
+  border-color: rgba(111, 174, 131, 0.5);
+  color: var(--live);
+}
+.alert-decision:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+.alert-decision-error {
+  margin-top: var(--s2);
+  color: var(--err);
+  font-size: var(--fz-sm);
 }
 .alert-cat {
   font-size: var(--fz-sm);

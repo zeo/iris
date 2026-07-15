@@ -1,7 +1,17 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
-import { ackAlert, ackAll, alerts, fileName, initAlerts, refreshAlerts, type Alert } from "../lib/alerts";
+import {
+  ackAlert,
+  ackAll,
+  alerts,
+  decideAlert,
+  fileName,
+  initAlerts,
+  needsDecision,
+  refreshAlerts,
+  type Alert,
+} from "../lib/alerts";
 import { persisted } from "../lib/persist";
 
 const FILTERS = ["all", "new apps", "blocks", "flags"] as const;
@@ -21,6 +31,8 @@ export function Alerts() {
   // a coarse clock so relative timestamps re-derive instead of freezing at the
   // value they had when their row first rendered
   const [now, setNow] = createSignal(Date.now());
+  const [deciding, setDeciding] = createSignal<number>();
+  const [decisionError, setDecisionError] = createSignal("");
   onMount(() => {
     initAlerts();
     refreshAlerts();
@@ -41,6 +53,20 @@ export function Alerts() {
     a.kind.kind === "new_app"
       ? "initiated its first network connection."
       : "was blocked from connecting.";
+
+  const decide = async (event: MouseEvent, alert: Alert, action: "allow" | "block") => {
+    event.stopPropagation();
+    if (deciding() !== undefined) return;
+    setDeciding(alert.id);
+    setDecisionError("");
+    try {
+      await decideAlert(alert.id, action);
+    } catch (reason) {
+      setDecisionError(String(reason));
+    } finally {
+      setDeciding(undefined);
+    }
+  };
 
   const flagRow = (a: Alert, k: Extract<Alert["kind"], { kind: "plugin" }>) => (
     <div class="row alert" classList={{ unread: !a.acknowledged }} onClick={() => ackAlert(a.id)}>
@@ -97,7 +123,11 @@ export function Alerts() {
               if (k.kind === "plugin") return flagRow(a, k);
               const blocked = k.kind === "blocked";
               return (
-                <div class="row alert" classList={{ unread: !a.acknowledged }} onClick={() => ackAlert(a.id)}>
+                <div
+                  class="row alert"
+                  classList={{ unread: !a.acknowledged, decision: needsDecision(a) }}
+                  onClick={() => !needsDecision(a) && ackAlert(a.id)}
+                >
                   <span class="unread-dot" />
                   <span class="alert-badge" classList={{ block: blocked }}>
                     {blocked ? <Icon name="block" size={13} /> : "NEW"}
@@ -106,6 +136,24 @@ export function Alerts() {
                   <div class="alert-body">
                     <b>{fileName(k.app)}</b> {title(a)}
                   </div>
+                  <Show when={needsDecision(a)}>
+                    <div class="alert-decisions">
+                      <button
+                        class="alert-decision block"
+                        disabled={deciding() !== undefined}
+                        onClick={(event) => decide(event, a, "block")}
+                      >
+                        Block
+                      </button>
+                      <button
+                        class="alert-decision allow"
+                        disabled={deciding() !== undefined}
+                        onClick={(event) => decide(event, a, "allow")}
+                      >
+                        {deciding() === a.id ? "Applying…" : "Allow"}
+                      </button>
+                    </div>
+                  </Show>
                   <div class="alert-when">
                     <span class="alert-cat">{blocked ? "Blocked connection" : "First network activity"}</span>
                     <span class="alert-time">{ago(a.at_ms, now())}</span>
@@ -115,6 +163,9 @@ export function Alerts() {
             }}
           </For>
         </div>
+        <Show when={decisionError()}>
+          <div class="alert-decision-error">{decisionError()}</div>
+        </Show>
       </Show>
     </section>
   );

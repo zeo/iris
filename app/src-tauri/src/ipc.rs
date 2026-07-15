@@ -159,6 +159,23 @@ pub async fn list_alerts(app: AppHandle, unacked_only: bool) -> Result<Vec<Alert
 }
 
 #[tauri::command]
+pub async fn restore_connection_prompts(app: AppHandle) -> Result<(), String> {
+    for alert in list_alerts(app.clone(), true).await? {
+        if matches!(
+            &alert.kind,
+            iris_core::AlertKind::NewApp {
+                remote: Some(_),
+                direction: Some(_),
+                ..
+            }
+        ) {
+            crate::prompt::show(&app, &alert);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn ack_alert(app: AppHandle, id: i64) -> Result<(), String> {
     match dispatch(&app, EngineCmd::AckAlert(id)).await? {
         Reply::Ok => Ok(()),

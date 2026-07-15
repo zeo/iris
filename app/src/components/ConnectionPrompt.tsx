@@ -11,7 +11,7 @@ import {
 import { AppIcon } from "./AppIcon";
 import { Icon } from "./Icon";
 
-const MAX_VISIBLE = 3;
+const MAX_VISIBLE = 2;
 
 function destination(remote: Extract<AlertKind, { kind: "new_app" }>["remote"]): string {
   return remote ? `${remote.addr}:${remote.port}` : "Network access";

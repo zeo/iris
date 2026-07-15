@@ -73,6 +73,7 @@ pub fn run() {
         .setup(move |app| {
             ipc::spawn(app.handle().clone(), cmd_rx);
             build_tray(app.handle())?;
+            fit_main_window(app.handle());
             // a login launch passes --tray so it comes up quietly in the tray
             if std::env::args().any(|a| a == "--tray") {
                 if let Some(win) = app.get_webview_window("main") {
@@ -93,6 +94,26 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Iris");
+}
+
+fn fit_main_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let (Ok(Some(monitor)), Ok(scale)) = (window.current_monitor(), window.scale_factor()) else {
+        return;
+    };
+    let work = monitor.work_area().size;
+    let available_width = (f64::from(work.width) / scale - 32.0).max(640.0);
+    let available_height = (f64::from(work.height) / scale - 32.0).max(480.0);
+    let width = 1180.0_f64.min(available_width);
+    let height = 820.0_f64.min(available_height);
+    let min_width = 820.0_f64.min(width);
+    let min_height = 600.0_f64.min(height);
+    let _ = window.set_min_size(Some(tauri::LogicalSize::new(min_width, min_height)));
+    let _ = window.set_size(tauri::LogicalSize::new(width, height));
+    let _ = window.set_resizable(true);
+    let _ = window.set_maximizable(true);
 }
 
 /// a tray icon that restores the window on click and offers show / quit

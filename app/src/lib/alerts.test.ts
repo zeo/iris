@@ -45,9 +45,9 @@ describe("needsDecision", () => {
     ).toBe(true);
   });
 
-  it("keeps three prompts visible and pulls the queue down after dismissal", () => {
+  it("keeps two prompts visible and pulls the queue down after dismissal", () => {
     const queued = [4, 3, 2, 1].map((id) => ({ ...pending, id }));
-    expect(visibleDecisionPrompts(queued, new Set()).map((alert) => alert.id)).toEqual([4, 3, 2]);
-    expect(visibleDecisionPrompts(queued, new Set([3])).map((alert) => alert.id)).toEqual([4, 2, 1]);
+    expect(visibleDecisionPrompts(queued, new Set(), 2).map((alert) => alert.id)).toEqual([4, 3]);
+    expect(visibleDecisionPrompts(queued, new Set([3]), 2).map((alert) => alert.id)).toEqual([4, 2]);
   });
 });

@@ -2,14 +2,16 @@ use iris_core::{Alert, AlertKind};
 use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 const LABEL: &str = "connection-prompts";
-const WIDTH: f64 = 420.0;
+const CARD_WIDTH: f64 = 420.0;
 const CARD_HEIGHT: f64 = 228.0;
 const CARD_GAP: f64 = 10.0;
+const HOST_PADDING: f64 = 8.0;
 const EDGE_MARGIN: i32 = 18;
+const MAX_VISIBLE: usize = 2;
 
 fn stack_height(count: usize) -> f64 {
-    let count = count.clamp(1, 3) as f64;
-    count * CARD_HEIGHT + (count - 1.0) * CARD_GAP
+    let count = count.clamp(1, MAX_VISIBLE) as f64;
+    count * CARD_HEIGHT + (count - 1.0) * CARD_GAP + HOST_PADDING * 2.0
 }
 
 pub fn show(app: &tauri::AppHandle, alert: &Alert) {
@@ -33,9 +35,9 @@ fn show_window(app: &tauri::AppHandle) {
         WebviewUrl::App("index.html?connection-prompts=1".into()),
     )
     .title("New network connection")
-    .inner_size(WIDTH, CARD_HEIGHT)
-    .min_inner_size(WIDTH, CARD_HEIGHT)
-    .max_inner_size(WIDTH, CARD_HEIGHT * 3.0 + CARD_GAP * 2.0)
+    .inner_size(CARD_WIDTH + HOST_PADDING * 2.0, stack_height(1))
+    .min_inner_size(CARD_WIDTH + HOST_PADDING * 2.0, stack_height(1))
+    .max_inner_size(CARD_WIDTH + HOST_PADDING * 2.0, stack_height(MAX_VISIBLE))
     .resizable(false)
     .decorations(false)
     .transparent(true)
@@ -62,25 +64,12 @@ pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<
     }
     let height = stack_height(count);
     window
-        .set_size(LogicalSize::new(WIDTH, height))
+        .set_size(LogicalSize::new(CARD_WIDTH + HOST_PADDING * 2.0, height))
         .map_err(|error| error.to_string())?;
     position_window(&app, &window);
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::stack_height;
-
-    #[test]
-    fn sizes_the_visible_prompt_stack_without_exceeding_three_cards() {
-        assert_eq!(stack_height(1), 228.0);
-        assert_eq!(stack_height(2), 466.0);
-        assert_eq!(stack_height(3), 704.0);
-        assert_eq!(stack_height(4), 704.0);
-    }
 }
 
 fn position_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
@@ -130,4 +119,16 @@ fn anchor_wayland(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> bool
     gtk_window.set_layer_shell_margin(Edge::Bottom, EDGE_MARGIN);
     gtk_window.set_keyboard_mode(KeyboardMode::OnDemand);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stack_height;
+
+    #[test]
+    fn sizes_the_visible_prompt_stack_without_exceeding_two_cards() {
+        assert_eq!(stack_height(1), 244.0);
+        assert_eq!(stack_height(2), 482.0);
+        assert_eq!(stack_height(3), 482.0);
+    }
 }

@@ -14,6 +14,22 @@ fn stack_height(count: usize) -> f64 {
     count * CARD_HEIGHT + (count - 1.0) * CARD_GAP + HOST_PADDING * 2.0
 }
 
+fn webview_scale() -> f64 {
+    std::env::var("IRIS_X11_WEBVIEW_SCALE")
+        .ok()
+        .and_then(|scale| scale.parse().ok())
+        .filter(|scale: &f64| scale.is_finite() && (1.0..=4.0).contains(scale))
+        .unwrap_or(1.0)
+}
+
+fn host_width() -> f64 {
+    (CARD_WIDTH + HOST_PADDING * 2.0) * webview_scale()
+}
+
+fn host_height(count: usize) -> f64 {
+    stack_height(count) * webview_scale()
+}
+
 fn trailing_edge(origin: i32, available: u32, logical_size: f64, scale: f64) -> i32 {
     origin + available as i32 - (logical_size * scale).round() as i32 - EDGE_MARGIN
 }
@@ -39,9 +55,9 @@ fn show_window(app: &tauri::AppHandle) {
         WebviewUrl::App("index.html?connection-prompts=1".into()),
     )
     .title("New network connection")
-    .inner_size(CARD_WIDTH + HOST_PADDING * 2.0, stack_height(1))
-    .min_inner_size(CARD_WIDTH + HOST_PADDING * 2.0, stack_height(1))
-    .max_inner_size(CARD_WIDTH + HOST_PADDING * 2.0, stack_height(MAX_VISIBLE))
+    .inner_size(host_width(), host_height(1))
+    .min_inner_size(host_width(), host_height(1))
+    .max_inner_size(host_width(), host_height(MAX_VISIBLE))
     .resizable(false)
     .decorations(false)
     .transparent(true)
@@ -54,7 +70,7 @@ fn show_window(app: &tauri::AppHandle) {
         return;
     };
 
-    position_window(app, &window, stack_height(1));
+    position_window(app, &window, host_height(1));
 }
 
 #[tauri::command]
@@ -66,9 +82,9 @@ pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<
         window.hide().map_err(|error| error.to_string())?;
         return Ok(());
     }
-    let height = stack_height(count);
+    let height = host_height(count);
     window
-        .set_size(LogicalSize::new(CARD_WIDTH + HOST_PADDING * 2.0, height))
+        .set_size(LogicalSize::new(host_width(), height))
         .map_err(|error| error.to_string())?;
     position_window(&app, &window, height);
     window.show().map_err(|error| error.to_string())?;
@@ -87,12 +103,7 @@ fn position_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, height
     };
     let area = monitor.work_area();
     let scale = monitor.scale_factor();
-    let x = trailing_edge(
-        area.position.x,
-        area.size.width,
-        CARD_WIDTH + HOST_PADDING * 2.0,
-        scale,
-    );
+    let x = trailing_edge(area.position.x, area.size.width, host_width(), scale);
     let y = trailing_edge(area.position.y, area.size.height, height, scale);
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }

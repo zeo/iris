@@ -37,6 +37,7 @@ fn configure_linux_display() {
     std::env::set_var("GDK_SCALE", "1");
     std::env::set_var("GDK_DPI_SCALE", "1");
     std::env::set_var("WINIT_X11_SCALE_FACTOR", "1");
+    std::env::set_var("IRIS_X11_WEBVIEW_SCALE", format!("{:.4}", dpi / 96.0));
 }
 
 #[cfg(target_os = "linux")]

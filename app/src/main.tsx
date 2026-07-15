@@ -13,8 +13,8 @@ import "./styles.css";
 const root = document.getElementById("root");
 if (!root) throw new Error("root element missing");
 
-const promptId = Number(new URLSearchParams(location.search).get("connection-prompt"));
-if (Number.isSafeInteger(promptId) && promptId > 0) {
+const connectionPrompts = new URLSearchParams(location.search).has("connection-prompts");
+if (connectionPrompts) {
   document.documentElement.classList.add("prompt-window");
 }
 
@@ -31,7 +31,7 @@ render(
         </div>
       )}
     >
-      {Number.isSafeInteger(promptId) && promptId > 0 ? <ConnectionPrompt alertId={promptId} /> : <App />}
+      {connectionPrompts ? <ConnectionPrompt /> : <App />}
     </ErrorBoundary>
   ),
   root,

@@ -44,6 +44,7 @@ pub fn run() {
             ipc::forget_app,
             ipc::list_alerts,
             ipc::restore_connection_prompts,
+            prompt::resize_connection_prompts,
             ipc::ack_alert,
             ipc::decide_alert,
             ipc::get_usage,

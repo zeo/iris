@@ -38,6 +38,13 @@ export const needsDecision = (alert: Alert): boolean =>
 
 export const needsNativeNotification = (alert: Alert): boolean => !needsDecision(alert);
 
+export const visibleDecisionPrompts = (
+  alerts: Alert[],
+  dismissed: ReadonlySet<number>,
+  limit = 3,
+): Alert[] =>
+  alerts.filter((alert) => needsDecision(alert) && !dismissed.has(alert.id)).slice(0, limit);
+
 export function fileName(path: string): string {
   const seg = path.split(/[\\/]/).pop();
   return seg && seg.length ? seg : path;

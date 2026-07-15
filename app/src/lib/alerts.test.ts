@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { needsDecision, needsNativeNotification, type Alert } from "./alerts";
+import {
+  needsDecision,
+  needsNativeNotification,
+  visibleDecisionPrompts,
+  type Alert,
+} from "./alerts";
 
 const pending = {
   id: 7,
@@ -38,5 +43,11 @@ describe("needsDecision", () => {
         },
       }),
     ).toBe(true);
+  });
+
+  it("keeps three prompts visible and pulls the queue down after dismissal", () => {
+    const queued = [4, 3, 2, 1].map((id) => ({ ...pending, id }));
+    expect(visibleDecisionPrompts(queued, new Set()).map((alert) => alert.id)).toEqual([4, 3, 2]);
+    expect(visibleDecisionPrompts(queued, new Set([3])).map((alert) => alert.id)).toEqual([4, 2, 1]);
   });
 });

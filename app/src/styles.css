@@ -539,9 +539,17 @@ html {
 }
 
 /* first-connection decision window */
-.connection-prompt {
-  width: 100vw;
+.connection-prompt-stack {
   height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.connection-prompt {
+  width: 100%;
+  height: 228px;
+  flex: 0 0 228px;
   display: grid;
   grid-template-rows: 48px auto auto 1fr 48px;
   overflow: hidden;

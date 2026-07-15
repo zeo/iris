@@ -63,6 +63,11 @@ pub fn image_path_of(pid: u32) -> Option<String> {
     if let Some(appimage) = appimage_from_ancestors(pid, Path::new(&s)) {
         return Some(appimage);
     }
+    if is_webkit_helper(Path::new(&s)) {
+        if let Some(parent) = parent_pid(pid).and_then(image_path_of) {
+            return Some(parent);
+        }
+    }
     Some(s)
 }
 
@@ -115,6 +120,24 @@ fn appimage_mount(target: &Path) -> Option<&Path> {
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with(".mount_"))
     })
+}
+
+fn is_webkit_helper(target: &Path) -> bool {
+    let webkit_dir = target
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("webkit2gtk-"));
+    let helper = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name,
+                "WebKitWebProcess" | "WebKitNetworkProcess" | "WebKitGPUProcess"
+            )
+        });
+    webkit_dir && helper
 }
 
 fn parent_pid(pid: u32) -> Option<u32> {
@@ -170,7 +193,7 @@ fn parse_socket_inode(link: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{appimage_from_environ, appimage_mount};
+    use super::{appimage_from_environ, appimage_mount, is_webkit_helper};
     use std::path::Path;
 
     #[test]
@@ -212,5 +235,21 @@ mod tests {
             Some(Path::new("/tmp/.mount_heliumdEMJGD"))
         );
         assert_eq!(appimage_mount(Path::new("/usr/bin/browser")), None);
+    }
+
+    #[test]
+    fn recognizes_only_webkit_runtime_helpers() {
+        assert!(is_webkit_helper(Path::new(
+            "/usr/libexec/webkit2gtk-4.1/WebKitNetworkProcess"
+        )));
+        assert!(is_webkit_helper(Path::new(
+            "/tmp/.mount_App/usr/libexec/webkit2gtk-4.1/WebKitWebProcess"
+        )));
+        assert!(!is_webkit_helper(Path::new(
+            "/home/one/WebKitNetworkProcess"
+        )));
+        assert!(!is_webkit_helper(Path::new(
+            "/usr/libexec/webkit2gtk-4.1/MiniBrowser"
+        )));
     }
 }

@@ -14,6 +14,10 @@ fn stack_height(count: usize) -> f64 {
     count * CARD_HEIGHT + (count - 1.0) * CARD_GAP + HOST_PADDING * 2.0
 }
 
+fn trailing_edge(origin: i32, available: u32, logical_size: f64, scale: f64) -> i32 {
+    origin + available as i32 - (logical_size * scale).round() as i32 - EDGE_MARGIN
+}
+
 pub fn show(app: &tauri::AppHandle, alert: &Alert) {
     if !matches!(alert.kind, AlertKind::NewApp { .. }) {
         return;
@@ -50,7 +54,7 @@ fn show_window(app: &tauri::AppHandle) {
         return;
     };
 
-    position_window(app, &window);
+    position_window(app, &window, stack_height(1));
 }
 
 #[tauri::command]
@@ -66,24 +70,30 @@ pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<
     window
         .set_size(LogicalSize::new(CARD_WIDTH + HOST_PADDING * 2.0, height))
         .map_err(|error| error.to_string())?;
-    position_window(&app, &window);
+    position_window(&app, &window, height);
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
     Ok(())
 }
 
-fn position_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+fn position_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, height: f64) {
     #[cfg(target_os = "linux")]
     if anchor_wayland(app, window) {
         return;
     }
 
-    let (Ok(Some(monitor)), Ok(size)) = (window.current_monitor(), window.outer_size()) else {
+    let Ok(Some(monitor)) = window.current_monitor() else {
         return;
     };
     let area = monitor.work_area();
-    let x = area.position.x + area.size.width as i32 - size.width as i32 - EDGE_MARGIN;
-    let y = area.position.y + area.size.height as i32 - size.height as i32 - EDGE_MARGIN;
+    let scale = monitor.scale_factor();
+    let x = trailing_edge(
+        area.position.x,
+        area.size.width,
+        CARD_WIDTH + HOST_PADDING * 2.0,
+        scale,
+    );
+    let y = trailing_edge(area.position.y, area.size.height, height, scale);
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
@@ -123,12 +133,18 @@ fn anchor_wayland(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::stack_height;
+    use super::{stack_height, trailing_edge};
 
     #[test]
     fn sizes_the_visible_prompt_stack_without_exceeding_two_cards() {
         assert_eq!(stack_height(1), 244.0);
         assert_eq!(stack_height(2), 482.0);
         assert_eq!(stack_height(3), 482.0);
+    }
+
+    #[test]
+    fn positions_from_the_requested_stack_height() {
+        assert_eq!(trailing_edge(0, 720, stack_height(2), 1.0), 220);
+        assert_eq!(trailing_edge(40, 1080, stack_height(2), 1.5), 379);
     }
 }

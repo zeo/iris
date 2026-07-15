@@ -22,7 +22,7 @@ export function ConnectionPrompt(props: { alertId: number }) {
     try {
       const alerts = await invoke<Alert[]>("list_alerts", { unackedOnly: false });
       const match = alerts.find((candidate) => candidate.id === props.alertId);
-      if (match?.kind.kind === "new_app") setAlert(match);
+      if (match?.kind.kind === "new_app" && !match.acknowledged) setAlert(match);
       else await getCurrentWindow().close();
     } catch (reason) {
       setError(String(reason));

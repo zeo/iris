@@ -77,7 +77,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq pkg-config libwebkit2gtk-4.1-dev \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+            libgtk-layer-shell-dev libnetfilter-queue-dev nftables
       - uses: pnpm/action-setup@v4
         with:
           version: 9

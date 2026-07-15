@@ -1,8 +1,16 @@
 use iris_core::{Alert, AlertKind};
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
 use tauri::{Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const EDGE_MARGIN: i32 = 18;
 const STACK_STEP: i32 = 246;
+const MAX_VISIBLE: usize = 3;
+
+fn waiting() -> &'static Mutex<VecDeque<Alert>> {
+    static WAITING: OnceLock<Mutex<VecDeque<Alert>>> = OnceLock::new();
+    WAITING.get_or_init(|| Mutex::new(VecDeque::new()))
+}
 
 pub fn show(app: &tauri::AppHandle, alert: &Alert) {
     if !matches!(alert.kind, AlertKind::NewApp { .. }) {
@@ -11,17 +19,34 @@ pub fn show(app: &tauri::AppHandle, alert: &Alert) {
 
     let handle = app.clone();
     let alert = alert.clone();
-    let _ = app.run_on_main_thread(move || show_window(&handle, &alert));
+    let _ = app.run_on_main_thread(move || show_or_queue(&handle, alert));
 }
 
-fn show_window(app: &tauri::AppHandle, alert: &Alert) {
+fn show_or_queue(app: &tauri::AppHandle, alert: Alert) {
     let label = format!("connection-prompt-{}", alert.id);
     if let Some(window) = app.get_webview_window(&label) {
         let _ = window.show();
         let _ = window.set_focus();
         return;
     }
+    let visible = app
+        .webview_windows()
+        .keys()
+        .filter(|label| label.starts_with("connection-prompt-"))
+        .count();
+    if visible >= MAX_VISIBLE {
+        if let Ok(mut waiting) = waiting().lock() {
+            if !waiting.iter().any(|queued| queued.id == alert.id) {
+                waiting.push_back(alert);
+            }
+        }
+        return;
+    }
+    show_window(app, &alert);
+}
 
+fn show_window(app: &tauri::AppHandle, alert: &Alert) {
+    let label = format!("connection-prompt-{}", alert.id);
     let Ok(window) = WebviewWindowBuilder::new(
         app,
         label,
@@ -48,11 +73,22 @@ fn show_window(app: &tauri::AppHandle, alert: &Alert) {
     window.on_window_event(move |event| {
         if matches!(event, WindowEvent::Destroyed) {
             relayout(&app_for_close, Some(&closed_label));
+            show_next(&app_for_close);
         }
     });
     relayout(app, None);
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+fn show_next(app: &tauri::AppHandle) {
+    let next = waiting()
+        .lock()
+        .ok()
+        .and_then(|mut waiting| waiting.pop_front());
+    if let Some(alert) = next {
+        show_window(app, &alert);
+    }
 }
 
 fn relayout(app: &tauri::AppHandle, closing: Option<&str>) {

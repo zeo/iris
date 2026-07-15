@@ -150,7 +150,7 @@ pub fn spawn(
                         let alert = store.insert_alert(
                             &AlertKind::NewApp {
                                 app: app.app.clone(),
-                                remote: connection.map(|conn| conn.remote.clone()).or_else(|| {
+                                remote: connection.map(|conn| conn.remote.clone()).or({
                                     #[cfg(target_os = "linux")]
                                     {
                                         closed.map(|flow| flow.remote.clone())
@@ -160,7 +160,7 @@ pub fn spawn(
                                         None
                                     }
                                 }),
-                                direction: connection.map(|conn| conn.direction).or_else(|| {
+                                direction: connection.map(|conn| conn.direction).or({
                                     #[cfg(target_os = "linux")]
                                     {
                                         closed.map(|flow| flow.direction)

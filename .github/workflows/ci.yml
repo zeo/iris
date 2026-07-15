@@ -50,7 +50,6 @@ jobs:
       - name: build engine (release, for the app resource)
         run: cargo build --release -p iris-service
       - name: verify packaged desktop
-        shell: pwsh
         run: |
           cargo build --release -p iris-app
           $binary = [IO.File]::ReadAllBytes("target/release/iris.exe")

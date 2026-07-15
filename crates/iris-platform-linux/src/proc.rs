@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// resolves a pid to its executable image path, caching results so the hot
 /// attribution path does not readlink per socket. the cache is cleared
@@ -53,7 +53,30 @@ pub fn image_path_of(pid: u32) -> Option<String> {
     if let Some(stripped) = s.strip_suffix(" (deleted)") {
         s = stripped.to_string();
     }
+    if let Ok(environ) = fs::read(format!("/proc/{pid}/environ")) {
+        if let Some(appimage) = appimage_from_environ(Path::new(&s), &environ) {
+            if fs::metadata(appimage).is_ok_and(|metadata| metadata.is_file()) {
+                return Some(appimage.to_owned());
+            }
+        }
+    }
     Some(s)
+}
+
+fn appimage_from_environ<'a>(target: &Path, environ: &'a [u8]) -> Option<&'a str> {
+    let variable = |name: &[u8]| {
+        environ
+            .split(|byte| *byte == 0)
+            .find_map(|entry| entry.strip_prefix(name))
+            .and_then(|path| std::str::from_utf8(path).ok())
+    };
+    let appdir = Path::new(variable(b"APPDIR=")?);
+    let appimage = variable(b"APPIMAGE=")?;
+    let mounted = appdir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(".mount_"));
+    (mounted && target.starts_with(appdir) && Path::new(appimage).is_absolute()).then_some(appimage)
 }
 
 /// index every socket inode currently held open to the pid that owns it, by
@@ -97,4 +120,42 @@ fn parse_socket_inode(link: &str) -> Option<u64> {
     let rest = link.strip_prefix("socket:[")?;
     let num = rest.strip_suffix(']')?;
     num.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::appimage_from_environ;
+    use std::path::Path;
+
+    #[test]
+    fn maps_a_mounted_appimage_child_to_the_bundle() {
+        let environ =
+            b"HOME=/home/one\0APPDIR=/tmp/.mount_ReservAbC\0APPIMAGE=/opt/Reservoir.AppImage\0";
+        assert_eq!(
+            appimage_from_environ(
+                Path::new("/tmp/.mount_ReservAbC/usr/libexec/WebKitWebProcess"),
+                environ
+            ),
+            Some("/opt/Reservoir.AppImage")
+        );
+    }
+
+    #[test]
+    fn ignores_spoofed_or_unrelated_appimage_variables() {
+        let outside = b"APPDIR=/tmp/.mount_ReservAbC\0APPIMAGE=/opt/Reservoir.AppImage\0";
+        assert_eq!(
+            appimage_from_environ(Path::new("/usr/bin/browser"), outside),
+            None
+        );
+        let ordinary_dir = b"APPDIR=/opt/reservoir\0APPIMAGE=/opt/Reservoir.AppImage\0";
+        assert_eq!(
+            appimage_from_environ(Path::new("/opt/reservoir/browser"), ordinary_dir),
+            None
+        );
+        let relative = b"APPDIR=/tmp/.mount_ReservAbC\0APPIMAGE=Reservoir.AppImage\0";
+        assert_eq!(
+            appimage_from_environ(Path::new("/tmp/.mount_ReservAbC/usr/bin/browser"), relative),
+            None
+        );
+    }
 }

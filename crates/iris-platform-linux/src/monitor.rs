@@ -205,12 +205,13 @@ fn accounting_loop(
         for event in network_events.try_iter() {
             match event {
                 NetworkEvent::Owner(owner) => {
+                    let path = resolve_path(&cache, owner.pid).unwrap_or(owner.path);
                     flow_owners.insert(
                         owner.key,
                         (
                             TcpOwner {
                                 pid: owner.pid,
-                                path: owner.path,
+                                path,
                                 kind: adapters.kind_for(owner.key.local.0, owner.key.remote.0),
                             },
                             std::time::Instant::now(),
@@ -234,11 +235,12 @@ fn accounting_loop(
                 }
                 NetworkEvent::Datagram(bytes) => {
                     if bytes.sent != 0 || bytes.recv != 0 {
+                        let path = resolve_path(&cache, bytes.pid).unwrap_or(bytes.path);
                         agg.lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .record(
                                 bytes.pid,
-                                &bytes.path,
+                                &path,
                                 None,
                                 AdapterKind::Other,
                                 bytes.sent,

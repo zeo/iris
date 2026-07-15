@@ -86,6 +86,13 @@ fn appimage_from_ancestors(pid: u32, target: &Path) -> Option<String> {
     let mount = appimage_mount(target)?;
     let mut ancestor = parent_pid(pid)?;
     for _ in 0..12 {
+        if let Ok(environ) = fs::read(format!("/proc/{ancestor}/environ")) {
+            if let Some(appimage) = appimage_from_environ(target, &environ) {
+                if fs::metadata(appimage).is_ok_and(|metadata| metadata.is_file()) {
+                    return Some(appimage.to_owned());
+                }
+            }
+        }
         let path = fs::read_link(format!("/proc/{ancestor}/exe")).ok()?;
         let appimage = path
             .extension()

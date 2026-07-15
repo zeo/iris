@@ -60,6 +60,9 @@ pub fn image_path_of(pid: u32) -> Option<String> {
             }
         }
     }
+    if let Some(appimage) = appimage_from_ancestors(pid, Path::new(&s)) {
+        return Some(appimage);
+    }
     Some(s)
 }
 
@@ -77,6 +80,42 @@ fn appimage_from_environ<'a>(target: &Path, environ: &'a [u8]) -> Option<&'a str
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with(".mount_"));
     (mounted && target.starts_with(appdir) && Path::new(appimage).is_absolute()).then_some(appimage)
+}
+
+fn appimage_from_ancestors(pid: u32, target: &Path) -> Option<String> {
+    let mount = appimage_mount(target)?;
+    let mut ancestor = parent_pid(pid)?;
+    for _ in 0..12 {
+        let path = fs::read_link(format!("/proc/{ancestor}/exe")).ok()?;
+        let appimage = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("appimage"));
+        if appimage
+            && !path.starts_with(mount)
+            && fs::metadata(&path).is_ok_and(|metadata| metadata.is_file())
+        {
+            return Some(path.to_string_lossy().into_owned());
+        }
+        ancestor = parent_pid(ancestor)?;
+    }
+    None
+}
+
+fn appimage_mount(target: &Path) -> Option<&Path> {
+    target.ancestors().find(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".mount_"))
+    })
+}
+
+fn parent_pid(pid: u32) -> Option<u32> {
+    fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:")?.trim().parse().ok())
+        .filter(|parent| *parent != 0)
 }
 
 /// index every socket inode currently held open to the pid that owns it, by
@@ -124,7 +163,7 @@ fn parse_socket_inode(link: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::appimage_from_environ;
+    use super::{appimage_from_environ, appimage_mount};
     use std::path::Path;
 
     #[test]
@@ -157,5 +196,14 @@ mod tests {
             appimage_from_environ(Path::new("/tmp/.mount_ReservAbC/usr/bin/browser"), relative),
             None
         );
+    }
+
+    #[test]
+    fn finds_the_temporary_appimage_mount_root() {
+        assert_eq!(
+            appimage_mount(Path::new("/tmp/.mount_heliumdEMJGD/opt/helium/helium")),
+            Some(Path::new("/tmp/.mount_heliumdEMJGD"))
+        );
+        assert_eq!(appimage_mount(Path::new("/usr/bin/browser")), None);
     }
 }

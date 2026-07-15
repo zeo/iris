@@ -5,8 +5,6 @@
   "identifier": "lt.rot.iris",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:1423",
-    "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "cargo build --release -p iris-service && pnpm build"
   },
   "app": {

@@ -54,8 +54,9 @@ export function App() {
 
   createEffect(() => {
     const liveView = tab() === "activity" || tab() === "graph";
-    setTickCadence(liveView ? 1000 : 4000);
-    void invoke("set_tick_details", { enabled: tab() === "activity" });
+    const cadenceMs = liveView ? 1000 : 4000;
+    setTickCadence(cadenceMs);
+    void invoke("set_tick_details", { enabled: tab() === "activity", cadenceMs });
   });
 
   onMount(() => {

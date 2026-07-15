@@ -13,7 +13,7 @@ use iris_ipc::message::{ClientMessage, PluginInfo, Reply, ServerMessage, PROTOCO
 use iris_ipc::transport;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -35,8 +35,19 @@ pub struct EnrichmentEvent {
 #[derive(Default)]
 pub struct StatusState(pub Mutex<Status>);
 
-#[derive(Default)]
-pub struct TickDetailState(pub AtomicBool);
+pub struct TickDetailState {
+    detailed: AtomicBool,
+    cadence_ms: AtomicU64,
+}
+
+impl Default for TickDetailState {
+    fn default() -> Self {
+        Self {
+            detailed: AtomicBool::new(false),
+            cadence_ms: AtomicU64::new(4_000),
+        }
+    }
+}
 
 /// what the UI asks the engine to do; the session task assigns the wire id
 pub enum EngineCmd {
@@ -78,8 +89,11 @@ pub fn engine_status(state: tauri::State<'_, StatusState>) -> Status {
 }
 
 #[tauri::command]
-pub fn set_tick_details(state: tauri::State<'_, TickDetailState>, enabled: bool) {
-    state.0.store(enabled, Ordering::Release);
+pub fn set_tick_details(state: tauri::State<'_, TickDetailState>, enabled: bool, cadence_ms: u64) {
+    state.detailed.store(enabled, Ordering::Release);
+    state
+        .cadence_ms
+        .store(cadence_ms.max(1_000), Ordering::Release);
 }
 
 async fn dispatch(app: &AppHandle, cmd: EngineCmd) -> Result<Reply, String> {
@@ -363,6 +377,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
     transport::write_frame(&mut send, &ClientMessage::Subscribe).await?;
 
     let mut next_id: u64 = 1;
+    let mut last_tick_emit = 0;
     let mut pending: HashMap<u64, oneshot::Sender<Reply>> = HashMap::new();
 
     loop {
@@ -371,9 +386,15 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                 let Some(msg) = frame? else { break };
                 match msg {
                     ServerMessage::Tick(mut tick) => {
-                        let detailed = app
-                            .try_state::<TickDetailState>()
-                            .is_some_and(|state| state.0.load(Ordering::Acquire));
+                        let Some(state) = app.try_state::<TickDetailState>() else {
+                            continue;
+                        };
+                        let cadence_ms = state.cadence_ms.load(Ordering::Acquire);
+                        if tick.at_ms.saturating_sub(last_tick_emit) < cadence_ms {
+                            continue;
+                        }
+                        last_tick_emit = tick.at_ms;
+                        let detailed = state.detailed.load(Ordering::Acquire);
                         if !detailed {
                             for sample in &mut tick.apps {
                                 sample.processes.clear();

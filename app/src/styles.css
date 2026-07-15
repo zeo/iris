@@ -1915,6 +1915,10 @@ html {
   padding-top: 6px;
   padding-bottom: 6px;
 }
+.protect-table tbody tr {
+  content-visibility: auto;
+  contain-intrinsic-block-size: 49px;
+}
 .protect-table tr.dormant td {
   color: var(--muted);
 }

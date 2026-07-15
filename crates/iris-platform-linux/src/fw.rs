@@ -24,6 +24,15 @@ const QUEUE_OUT: u16 = 17410;
 const QUEUE_IN: u16 = 17411;
 const WORKER_COUNT: u8 = 2;
 
+#[derive(Clone)]
+struct VerdictShared {
+    rules: Arc<Mutex<RuleMap>>,
+    resolver: Arc<Mutex<Resolver>>,
+    revision: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    ready_workers: Arc<AtomicU8>,
+}
+
 /// one enforced rule: which action applies to an app in a direction
 #[derive(Clone, Copy, PartialEq)]
 enum Enforce {
@@ -95,6 +104,7 @@ pub struct PendingConnection {
 
 pub struct Wfp {
     rules: Arc<Mutex<RuleMap>>,
+    revision: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     ready_workers: Arc<AtomicU8>,
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -113,6 +123,8 @@ impl Wfp {
     pub fn open() -> EngineResult<Wfp> {
         ensure_modules();
         let rules = Arc::new(Mutex::new(RuleMap::default()));
+        let resolver = Arc::new(Mutex::new(Resolver::new()));
+        let revision = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let ready_workers = Arc::new(AtomicU8::new(0));
         let mut threads = Vec::new();
@@ -123,6 +135,8 @@ impl Wfp {
             (QUEUE_IN, Direction::Inbound),
         ] {
             let rules = rules.clone();
+            let resolver = resolver.clone();
+            let revision = revision.clone();
             let stop = stop.clone();
             let ready_workers = ready_workers.clone();
             let ready_tx = ready_tx.clone();
@@ -130,7 +144,19 @@ impl Wfp {
             let handle = std::thread::Builder::new()
                 .name(format!("iris-verdict-{queue}"))
                 .spawn(move || {
-                    verdict_loop(queue, dir, rules, stop, ready_workers, ready_tx, pending_tx)
+                    verdict_loop(
+                        queue,
+                        dir,
+                        VerdictShared {
+                            rules,
+                            resolver,
+                            revision,
+                            stop,
+                            ready_workers,
+                        },
+                        ready_tx,
+                        pending_tx,
+                    )
                 })
                 .map_err(|e| EngineError::Os(format!("cannot start verdict thread: {e}")))?;
             threads.push(handle);
@@ -153,6 +179,7 @@ impl Wfp {
         }
         Ok(Wfp {
             rules,
+            revision,
             stop,
             ready_workers,
             threads,
@@ -167,6 +194,7 @@ impl Wfp {
     /// keeps enforcing.
     pub fn reset(&mut self) -> EngineResult<()> {
         *self.rules.lock().unwrap_or_else(|e| e.into_inner()) = RuleMap::default();
+        self.revision.fetch_add(1, Ordering::Release);
         remove_table();
         install_table()?;
         self.hooked = true;
@@ -201,6 +229,7 @@ impl Wfp {
                 .remove_id(id);
             return Err(e);
         }
+        self.revision.fetch_add(1, Ordering::Release);
         Ok(vec![id])
     }
 
@@ -214,7 +243,9 @@ impl Wfp {
                 map.remove_id(*id);
             }
         }
-        self.sync_hook()
+        self.sync_hook()?;
+        self.revision.fetch_add(1, Ordering::Release);
+        Ok(())
     }
 
     /// keep the queue hook installed so an undecided application cannot send its
@@ -250,6 +281,7 @@ impl Wfp {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .trust(paths);
+        self.revision.fetch_add(1, Ordering::Release);
     }
 
     pub fn forget_app(&self, path: &str) {
@@ -257,6 +289,7 @@ impl Wfp {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .forget(path);
+        self.revision.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -332,17 +365,22 @@ fn run_nft(ruleset: &str) -> EngineResult<()> {
 }
 
 /// the NFQUEUE verdict loop for one direction. resolves each queued packet to the
-/// owning executable and accepts or drops per the rule map; anything it cannot
-/// resolve is accepted, so a lookup miss never silently cuts traffic.
+/// owning executable and accepts or drops per the rule map; an unresolved owner
+/// gets a short attribution window before the packet fails open.
 fn verdict_loop(
     queue: u16,
     dir: Direction,
-    rules: Arc<Mutex<RuleMap>>,
-    stop: Arc<AtomicBool>,
-    ready_workers: Arc<AtomicU8>,
+    shared: VerdictShared,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
     pending_tx: std::sync::mpsc::Sender<PendingConnection>,
 ) {
+    let VerdictShared {
+        rules,
+        resolver,
+        revision,
+        stop,
+        ready_workers,
+    } = shared;
     let mut nfq = match nfq::Queue::open() {
         Ok(q) => q,
         Err(e) => {
@@ -357,75 +395,163 @@ fn verdict_loop(
     nfq.set_nonblocking(true);
     ready_workers.fetch_add(1, Ordering::Release);
     let _ = ready.send(Ok(()));
-    let mut resolver = Resolver::new();
     let mut held: Vec<HeldPacket> = Vec::new();
+    let mut held_flows = HashSet::new();
+    let mut unresolved: Vec<UnresolvedPacket> = Vec::new();
+    let mut decisions = Vec::new();
+    let mut next_resolve = std::time::Instant::now();
     let mut notified: HashSet<String> = HashSet::new();
+    let mut seen_revision = revision.load(Ordering::Acquire);
+    let mut next_held_scan = std::time::Instant::now();
     tracing::info!("firewall verdict thread on queue {queue} ready");
     while !stop.load(Ordering::Relaxed) {
         let now = std::time::Instant::now();
-        let mut waiting = Vec::with_capacity(held.len());
-        for mut packet in held.drain(..) {
-            let action = rules
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .lookup(dir, &packet.app);
-            let verdict = match action {
-                Some(Enforce::Allow) => Some(nfq::Verdict::Accept),
-                Some(Enforce::Block) => Some(nfq::Verdict::Drop),
-                None if now.duration_since(packet.since) >= std::time::Duration::from_secs(120) => {
-                    Some(nfq::Verdict::Drop)
+        if !unresolved.is_empty() && now >= next_resolve {
+            let mut resolver = resolver.lock().unwrap_or_else(|error| error.into_inner());
+            resolver.refresh_if_stale(std::time::Duration::from_secs(1));
+            let mut waiting = Vec::with_capacity(unresolved.len());
+            for packet in unresolved.drain(..) {
+                if let Some(decision) = decide(packet.flow, dir, &rules, &mut resolver) {
+                    decisions.push((packet.message, decision));
+                } else if now.duration_since(packet.since) >= std::time::Duration::from_millis(1500)
+                {
+                    decisions.push((
+                        packet.message,
+                        PacketDecision::Verdict(nfq::Verdict::Accept),
+                    ));
+                } else {
+                    waiting.push(packet);
                 }
-                None => None,
-            };
-            if let Some(verdict) = verdict {
-                packet.message.set_verdict(verdict);
-                if let Err(error) = nfq.verdict(packet.message) {
-                    tracing::debug!("NFQUEUE {queue} delayed verdict failed: {error}");
-                }
-            } else {
-                waiting.push(packet);
             }
+            unresolved = waiting;
+            next_resolve = now + std::time::Duration::from_millis(250);
         }
-        held = waiting;
-        notified.retain(|app| held.iter().any(|packet| &packet.app == app));
-
-        match nfq.recv() {
-            Ok(mut message) => match decide(message.get_payload(), dir, &rules, &mut resolver) {
-                PacketDecision::Verdict(verdict) => {
-                    message.set_verdict(verdict);
-                    if let Err(error) = nfq.verdict(message) {
-                        tracing::debug!("NFQUEUE {queue} verdict failed: {error}");
-                        break;
-                    }
+        let current_revision = revision.load(Ordering::Acquire);
+        if !held.is_empty() && (current_revision != seen_revision || now >= next_held_scan) {
+            let actions = {
+                let map = rules.lock().unwrap_or_else(|error| error.into_inner());
+                let mut actions = HashMap::new();
+                for packet in &held {
+                    actions
+                        .entry(packet.app.clone())
+                        .or_insert_with(|| map.lookup(dir, &packet.app));
                 }
-                PacketDecision::Pending(connection) => {
-                    let app = connection.app.0.clone();
-                    if notified.insert(app.clone()) {
-                        let _ = pending_tx.send(connection);
+                actions
+            };
+            let mut waiting = Vec::with_capacity(held.len());
+            for mut packet in held.drain(..) {
+                let action = actions.get(&packet.app).copied().flatten();
+                let verdict = match action {
+                    Some(Enforce::Allow) => Some(nfq::Verdict::Accept),
+                    Some(Enforce::Block) => Some(nfq::Verdict::Drop),
+                    None if now.duration_since(packet.since)
+                        >= std::time::Duration::from_secs(120) =>
+                    {
+                        Some(nfq::Verdict::Drop)
                     }
-                    if held.len() < 512 {
-                        held.push(HeldPacket {
+                    None => None,
+                };
+                if let Some(verdict) = verdict {
+                    packet.message.set_verdict(verdict);
+                    if let Err(error) = nfq.verdict(packet.message) {
+                        tracing::debug!("NFQUEUE {queue} delayed verdict failed: {error}");
+                    }
+                } else {
+                    waiting.push(packet);
+                }
+            }
+            held = waiting;
+            held_flows.clear();
+            held_flows.extend(held.iter().map(|packet| packet.flow));
+            notified.clear();
+            notified.extend(held.iter().map(|packet| packet.app.clone()));
+            seen_revision = current_revision;
+            next_held_scan = now + std::time::Duration::from_millis(100);
+        }
+
+        let mut worker_failed = false;
+        match nfq.recv() {
+            Ok(mut message) => {
+                if let Some(flow) = parse_tuple(message.get_payload()) {
+                    if held_flows.contains(&flow) {
+                        message.set_verdict(nfq::Verdict::Drop);
+                        if nfq.verdict(message).is_err() {
+                            worker_failed = true;
+                        }
+                    } else if let Some(decision) = decide(
+                        flow,
+                        dir,
+                        &rules,
+                        &mut resolver.lock().unwrap_or_else(|error| error.into_inner()),
+                    ) {
+                        decisions.push((message, decision));
+                    } else {
+                        unresolved.push(UnresolvedPacket {
                             message,
-                            app,
+                            flow,
                             since: now,
                         });
-                    } else {
-                        message.set_verdict(nfq::Verdict::Drop);
-                        let _ = nfq.verdict(message);
+                        if unresolved.len() == 1 {
+                            next_resolve = now;
+                        }
+                    }
+                } else {
+                    message.set_verdict(nfq::Verdict::Accept);
+                    if nfq.verdict(message).is_err() {
+                        worker_failed = true;
                     }
                 }
-            },
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::thread::sleep(std::time::Duration::from_millis(25));
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) => {
                 tracing::debug!("NFQUEUE {queue} recv ended: {error}");
-                break;
+                worker_failed = true;
             }
+        }
+        for (mut message, decision) in decisions.drain(..) {
+            match decision {
+                PacketDecision::Verdict(verdict) => {
+                    message.set_verdict(verdict);
+                    if let Err(error) = nfq.verdict(message) {
+                        tracing::debug!("NFQUEUE {queue} verdict failed: {error}");
+                        worker_failed = true;
+                        break;
+                    }
+                }
+                PacketDecision::Pending { connection, flow } => {
+                    let app = connection.app.0.clone();
+                    if notified.insert(app.clone()) {
+                        let _ = pending_tx.send(connection);
+                    }
+                    if held.len() < 512 && held_flows.insert(flow) {
+                        held.push(HeldPacket {
+                            message,
+                            app,
+                            flow,
+                            since: now,
+                        });
+                    } else {
+                        message.set_verdict(nfq::Verdict::Drop);
+                        if nfq.verdict(message).is_err() {
+                            worker_failed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if worker_failed {
+            break;
         }
     }
     for mut packet in held {
+        packet.message.set_verdict(nfq::Verdict::Drop);
+        let _ = nfq.verdict(packet.message);
+    }
+    for mut packet in unresolved {
         packet.message.set_verdict(nfq::Verdict::Drop);
         let _ = nfq.verdict(packet.message);
     }
@@ -435,56 +561,66 @@ fn verdict_loop(
 struct HeldPacket {
     message: nfq::Message,
     app: String,
+    flow: PacketFlow,
     since: std::time::Instant,
 }
 
+struct UnresolvedPacket {
+    message: nfq::Message,
+    flow: PacketFlow,
+    since: std::time::Instant,
+}
+
+type PacketFlow = (IpAddr, u16, IpAddr, u16, Protocol);
+
 enum PacketDecision {
     Verdict(nfq::Verdict),
-    Pending(PendingConnection),
+    Pending {
+        connection: PendingConnection,
+        flow: PacketFlow,
+    },
 }
 
 fn decide(
-    packet: &[u8],
+    flow: PacketFlow,
     dir: Direction,
     rules: &Arc<Mutex<RuleMap>>,
     resolver: &mut Resolver,
-) -> PacketDecision {
-    let Some((source, destination, source_port, destination_port, protocol)) = parse_tuple(packet)
-    else {
-        return PacketDecision::Verdict(nfq::Verdict::Accept);
-    };
+) -> Option<PacketDecision> {
+    let (source, source_port, destination, destination_port, protocol) = flow;
     let local = match dir {
         Direction::Outbound => (source, source_port),
         Direction::Inbound => (destination, destination_port),
     };
-    let Some(exe) = resolver.exe_for(local) else {
-        return PacketDecision::Verdict(nfq::Verdict::Accept);
-    };
+    let exe = resolver.cached_exe(local)?;
     let key = AppId::from_path(&exe).0;
     let map = rules.lock().unwrap_or_else(|e| e.into_inner());
     match map.lookup(dir, &key) {
-        Some(Enforce::Block) => PacketDecision::Verdict(nfq::Verdict::Drop),
-        Some(Enforce::Allow) => PacketDecision::Verdict(nfq::Verdict::Accept),
-        None => PacketDecision::Pending(PendingConnection {
-            app: AppId(key),
-            remote: Endpoint {
-                addr: match dir {
-                    Direction::Outbound => destination,
-                    Direction::Inbound => source,
+        Some(Enforce::Block) => Some(PacketDecision::Verdict(nfq::Verdict::Drop)),
+        Some(Enforce::Allow) => Some(PacketDecision::Verdict(nfq::Verdict::Accept)),
+        None => Some(PacketDecision::Pending {
+            connection: PendingConnection {
+                app: AppId(key),
+                remote: Endpoint {
+                    addr: match dir {
+                        Direction::Outbound => destination,
+                        Direction::Inbound => source,
+                    },
+                    port: match dir {
+                        Direction::Outbound => destination_port,
+                        Direction::Inbound => source_port,
+                    },
+                    protocol,
                 },
-                port: match dir {
-                    Direction::Outbound => destination_port,
-                    Direction::Inbound => source_port,
-                },
-                protocol,
+                direction: dir,
             },
-            direction: dir,
+            flow,
         }),
     }
 }
 
 /// parse an IPv4 or IPv6 packet enough to get the addresses and ports
-fn parse_tuple(pkt: &[u8]) -> Option<(IpAddr, IpAddr, u16, u16, Protocol)> {
+fn parse_tuple(pkt: &[u8]) -> Option<PacketFlow> {
     if pkt.is_empty() {
         return None;
     }
@@ -506,7 +642,7 @@ fn parse_tuple(pkt: &[u8]) -> Option<(IpAddr, IpAddr, u16, u16, Protocol)> {
             let l4 = &pkt[ihl..];
             let sport = u16::from_be_bytes([l4[0], l4[1]]);
             let dport = u16::from_be_bytes([l4[2], l4[3]]);
-            Some((src, dst, sport, dport, protocol(proto)?))
+            Some((src, sport, dst, dport, protocol(proto)?))
         }
         6 => {
             if pkt.len() < 40 {
@@ -522,8 +658,8 @@ fn parse_tuple(pkt: &[u8]) -> Option<(IpAddr, IpAddr, u16, u16, Protocol)> {
             let dport = u16::from_be_bytes([l4[2], l4[3]]);
             Some((
                 IpAddr::from(s),
-                IpAddr::from(d),
                 sport,
+                IpAddr::from(d),
                 dport,
                 protocol(next)?,
             ))
@@ -580,22 +716,28 @@ struct Resolver {
     cache: PidCache,
     by_local: HashMap<(IpAddr, u16), u32>,
     owners: HashMap<u64, u32>,
-    stamp: std::time::Instant,
+    refreshed_at: std::time::Instant,
+    cache_cleared_at: std::time::Instant,
 }
 
 impl Resolver {
     fn new() -> Self {
+        let stale = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .unwrap_or_else(std::time::Instant::now);
         Resolver {
             cache: PidCache::new(),
             by_local: HashMap::new(),
             owners: HashMap::new(),
-            stamp: std::time::Instant::now()
-                .checked_sub(std::time::Duration::from_secs(1))
-                .unwrap_or_else(std::time::Instant::now),
+            refreshed_at: stale,
+            cache_cleared_at: stale,
         }
     }
 
-    fn refresh(&mut self) {
+    fn refresh_if_stale(&mut self, max_age: std::time::Duration) {
+        if self.refreshed_at.elapsed() < max_age {
+            return;
+        }
         self.owners = crate::proc::socket_inode_owners();
         self.by_local.clear();
         for s in sockets::dump_for_attribution() {
@@ -603,21 +745,11 @@ impl Resolver {
                 .entry((s.local.0, s.local.1))
                 .or_insert(s.inode);
         }
-        // periodically drop the pid->path cache so a reused pid cannot keep a
-        // stale executable path
-        self.cache.clear();
-        self.stamp = std::time::Instant::now();
-    }
-
-    fn exe_for(&mut self, local: (IpAddr, u16)) -> Option<String> {
-        if self.stamp.elapsed() > std::time::Duration::from_millis(200) {
-            self.refresh();
+        self.refreshed_at = std::time::Instant::now();
+        if self.cache_cleared_at.elapsed() >= std::time::Duration::from_secs(30) {
+            self.cache.clear();
+            self.cache_cleared_at = self.refreshed_at;
         }
-        if let Some(exe) = self.cached_exe(local) {
-            return Some(exe);
-        }
-        self.refresh();
-        self.cached_exe(local)
     }
 
     fn cached_exe(&mut self, local: (IpAddr, u16)) -> Option<String> {
@@ -636,7 +768,7 @@ impl Resolver {
             })
             .copied()?;
         let pid = *self.owners.get(&(inode as u64))?;
-        crate::proc::image_path_of(pid).or_else(|| self.cache.resolve(pid))
+        self.cache.resolve(pid)
     }
 }
 
@@ -654,7 +786,7 @@ mod packet_tests {
         packet[41] = 0;
         packet[48..50].copy_from_slice(&1234u16.to_be_bytes());
         packet[50..52].copy_from_slice(&443u16.to_be_bytes());
-        let (_, _, source, destination, protocol) = parse_tuple(&packet).unwrap();
+        let (_, source, _, destination, protocol) = parse_tuple(&packet).unwrap();
         assert_eq!((source, destination), (1234, 443));
         assert_eq!(protocol, Protocol::Tcp);
     }

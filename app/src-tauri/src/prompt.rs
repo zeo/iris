@@ -97,9 +97,14 @@ pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<
     Ok(())
 }
 
-fn position_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, width: f64, height: f64) {
+fn position_window(
+    _app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    width: f64,
+    height: f64,
+) {
     #[cfg(target_os = "linux")]
-    if anchor_wayland(app, window) {
+    if anchor_wayland(_app, window) {
         return;
     }
 

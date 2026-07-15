@@ -395,7 +395,7 @@ fn run_nft(ruleset: &str) -> EngineResult<()> {
 
 /// the NFQUEUE verdict loop for one direction. resolves each queued packet to the
 /// owning executable and accepts or drops per the rule map; an unresolved owner
-/// gets a short attribution window before the packet fails open.
+/// gets a short attribution window before the packet fails closed.
 fn verdict_loop(
     queue: u16,
     dir: Direction,
@@ -446,7 +446,7 @@ fn verdict_loop(
                 {
                     decisions.push((
                         packet.message,
-                        PacketDecision::Verdict(nfq::Verdict::Accept),
+                        PacketDecision::Verdict(attribution_timeout_verdict()),
                     ));
                 } else {
                     waiting.push(packet);
@@ -608,6 +608,10 @@ enum PacketDecision {
         connection: PendingConnection,
         flow: PacketFlow,
     },
+}
+
+fn attribution_timeout_verdict() -> nfq::Verdict {
+    nfq::Verdict::Drop
 }
 
 fn decide(
@@ -818,12 +822,17 @@ impl Resolver {
 
 #[cfg(test)]
 mod packet_tests {
-    use super::{parse_tuple, publish_attribution, Resolver};
+    use super::{attribution_timeout_verdict, parse_tuple, publish_attribution, Resolver};
     use crate::sockets::SockInfo;
     use iris_core::Protocol;
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
+
+    #[test]
+    fn unresolved_owner_fails_closed() {
+        assert!(matches!(attribution_timeout_verdict(), nfq::Verdict::Drop));
+    }
 
     #[test]
     fn parses_ports_after_an_ipv6_extension_header() {

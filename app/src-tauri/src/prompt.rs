@@ -22,12 +22,12 @@ fn webview_scale() -> f64 {
         .unwrap_or(1.0)
 }
 
-fn host_width() -> f64 {
-    (CARD_WIDTH + HOST_PADDING * 2.0) * webview_scale()
+fn host_width(scale: f64) -> f64 {
+    (CARD_WIDTH + HOST_PADDING * 2.0) * scale
 }
 
-fn host_height(count: usize) -> f64 {
-    stack_height(count) * webview_scale()
+fn host_height(count: usize, scale: f64) -> f64 {
+    stack_height(count) * scale
 }
 
 fn trailing_edge(origin: i32, available: u32, logical_size: f64, scale: f64) -> i32 {
@@ -49,15 +49,18 @@ fn show_window(app: &tauri::AppHandle) {
         return;
     }
 
+    let scale = webview_scale();
+    let width = host_width(scale);
+    let height = host_height(1, scale);
     let Ok(window) = WebviewWindowBuilder::new(
         app,
         LABEL,
         WebviewUrl::App("index.html?connection-prompts=1".into()),
     )
     .title("New network connection")
-    .inner_size(host_width(), host_height(1))
-    .min_inner_size(host_width(), host_height(1))
-    .max_inner_size(host_width(), host_height(MAX_VISIBLE))
+    .inner_size(width, height)
+    .min_inner_size(width, height)
+    .max_inner_size(width, host_height(MAX_VISIBLE, scale))
     .resizable(false)
     .decorations(false)
     .transparent(true)
@@ -70,7 +73,7 @@ fn show_window(app: &tauri::AppHandle) {
         return;
     };
 
-    position_window(app, &window, host_height(1));
+    position_window(app, &window, width, height);
 }
 
 #[tauri::command]
@@ -82,17 +85,19 @@ pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<
         window.hide().map_err(|error| error.to_string())?;
         return Ok(());
     }
-    let height = host_height(count);
+    let scale = webview_scale();
+    let width = host_width(scale);
+    let height = host_height(count, scale);
     window
-        .set_size(LogicalSize::new(host_width(), height))
+        .set_size(LogicalSize::new(width, height))
         .map_err(|error| error.to_string())?;
-    position_window(&app, &window, height);
+    position_window(&app, &window, width, height);
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
     Ok(())
 }
 
-fn position_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, height: f64) {
+fn position_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, width: f64, height: f64) {
     #[cfg(target_os = "linux")]
     if anchor_wayland(app, window) {
         return;
@@ -103,7 +108,7 @@ fn position_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, height
     };
     let area = monitor.work_area();
     let scale = monitor.scale_factor();
-    let x = trailing_edge(area.position.x, area.size.width, host_width(), scale);
+    let x = trailing_edge(area.position.x, area.size.width, width, scale);
     let y = trailing_edge(area.position.y, area.size.height, height, scale);
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
@@ -144,7 +149,7 @@ fn anchor_wayland(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{stack_height, trailing_edge};
+    use super::{host_height, host_width, stack_height, trailing_edge};
 
     #[test]
     fn sizes_the_visible_prompt_stack_without_exceeding_two_cards() {
@@ -157,5 +162,12 @@ mod tests {
     fn positions_from_the_requested_stack_height() {
         assert_eq!(trailing_edge(0, 720, stack_height(2), 1.0), 220);
         assert_eq!(trailing_edge(40, 1080, stack_height(2), 1.5), 379);
+    }
+
+    #[test]
+    fn expands_the_native_host_for_fractional_webview_scale() {
+        assert_eq!(host_width(1.5), 654.0);
+        assert_eq!(host_height(1, 1.5), 366.0);
+        assert_eq!(host_height(2, 1.5), 723.0);
     }
 }

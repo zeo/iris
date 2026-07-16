@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-07-16
+
+### Security
+
+- Blocking a connection from a prompt on Windows now goes through the elevated channel; the unprivileged telemetry channel can no longer install a firewall filter on its own.
+- Out-of-process plugins on Windows run inside a kill-on-close job object and with only the standard system environment, so a plugin cannot outlive the service or read variables it inherited.
+- The unprivileged control channel no longer runs database or firewall work on the async reactor, closing a local denial-of-service path against the engine.
+
+### Changed
+
+- DNS response capture applies its port-53 filter in the kernel, so the engine wakes only for DNS traffic instead of every packet on the host.
+- Less work per sampling tick in the connection monitor and tracker.
+
+### Fixed
+
+- The data-plan meter refreshes as soon as you set a cap or the engine connects instead of staying blank for a few minutes.
+- Plugin panels no longer blank and redraw every few seconds when their data has not changed.
+- Alert Allow and Block buttons act on their own row instead of disabling every pending decision at once.
+- The Activity list keeps TCP and UDP connections that share addresses and ports on separate rows.
+- The Known apps list and the Plugins tab show a "waiting for the engine" state while the service is unreachable instead of appearing empty.
+
 ## [0.1.3] - 2026-07-16
 
 ### Added

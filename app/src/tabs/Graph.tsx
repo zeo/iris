@@ -4,6 +4,7 @@ import { BandwidthGraph, type Sample } from "../components/BandwidthGraph";
 import { AppIcon } from "../components/AppIcon";
 import { adapterLabel, engine } from "../lib/engine";
 import { rate } from "../lib/format";
+import { fileName } from "../lib/path";
 
 const RANGES = ["5m", "1h", "24h", "7d"] as const;
 
@@ -22,10 +23,6 @@ const HISTORY: Record<string, { granularity: string; ms: number; widthSec: numbe
   "7d": { granularity: "day", ms: 7 * 86_400_000, widthSec: 86_400 },
 };
 
-function fileName(path: string): string {
-  const seg = path.split(/[\\/]/).pop();
-  return seg && seg.length ? seg : path;
-}
 
 // the scope: a live, scrolling picture of bandwidth, with the apps driving it
 // right now listed underneath.

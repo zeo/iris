@@ -7,6 +7,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { showNotifications } from "./settings";
+import { fileName } from "./path";
 
 export type AlertKind =
   | {
@@ -48,10 +49,7 @@ export const visibleDecisionPrompts = (
     .slice(0, limit)
     .reverse();
 
-export function fileName(path: string): string {
-  const seg = path.split(/[\\/]/).pop();
-  return seg && seg.length ? seg : path;
-}
+export { fileName };
 
 let started = false;
 export function initAlerts() {

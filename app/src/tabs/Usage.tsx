@@ -6,6 +6,7 @@ import { AppIcon } from "../components/AppIcon";
 import { adapterLabel, engine, type AdapterKind } from "../lib/engine";
 import { persisted } from "../lib/persist";
 import { bytes } from "../lib/format";
+import { fileName } from "../lib/path";
 import { formatGb, quota } from "../lib/quota";
 import { dataCapGb } from "../lib/settings";
 
@@ -33,10 +34,6 @@ interface AdapterUsageRow {
   bytes: { sent: number; recv: number };
 }
 
-function fileName(path: string): string {
-  const seg = path.split(/[\\/]/).pop();
-  return seg && seg.length ? seg : path;
-}
 function since(span: Span): number {
   const now = Date.now();
   if (span === "day") {

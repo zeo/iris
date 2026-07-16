@@ -7,11 +7,7 @@ import { engine, type AppSample, type Conn } from "../lib/engine";
 import { blockApp, isBlocked, unblockApp } from "../lib/rules";
 import { persisted } from "../lib/persist";
 import { bytes, rate } from "../lib/format";
-
-function fileName(path: string): string {
-  const seg = path.split(/[\\/]/).pop();
-  return seg && seg.length ? seg : path;
-}
+import { fileName } from "../lib/path";
 function label(s: AppSample): string {
   return s.name ?? fileName(s.app);
 }

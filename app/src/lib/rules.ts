@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { pathKey } from "./path";
 
 export interface Rule {
   app: string;
@@ -16,9 +17,6 @@ export interface StoredRule {
 
 const [rules, setRules] = createSignal<StoredRule[]>([]);
 export { rules };
-
-const pathKey = (path: string): string =>
-  navigator.userAgent.includes("Windows") ? path.toLowerCase() : path;
 
 export async function refreshRules(): Promise<void> {
   try {

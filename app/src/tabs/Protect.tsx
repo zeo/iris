@@ -9,6 +9,7 @@ import { engine, type AppSample } from "../lib/engine";
 import { bytes, rate } from "../lib/format";
 import { acceptProposal, pendingProposals, refreshProposals, rejectProposal } from "../lib/proposals";
 import { addRule, refreshRules, removeRule, rules, type StoredRule } from "../lib/rules";
+import { fileName, pathKey } from "../lib/path";
 
 type Direction = "inbound" | "outbound";
 type Decision = "open" | "allow" | "block" | "paused";
@@ -20,15 +21,6 @@ interface AppRow {
   name?: string;
   sample?: AppSample;
   rules: StoredRule[];
-}
-
-function fileName(path: string): string {
-  const segment = path.split(/[\\/]/).pop();
-  return segment?.length ? segment : path;
-}
-
-function pathKey(path: string): string {
-  return navigator.userAgent.includes("Windows") ? path.toLowerCase() : path;
 }
 
 function decisionFor(row: AppRow, direction: Direction): Decision {

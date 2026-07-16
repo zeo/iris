@@ -109,8 +109,17 @@ fn fit_main_window(app: &tauri::AppHandle) {
     let webview_scale = prompt::webview_scale();
     let (width, min_width) = main_dimension(1180.0, 820.0, available_width, webview_scale);
     let (height, min_height) = main_dimension(820.0, 600.0, available_height, webview_scale);
-    let _ = window.set_min_size(Some(tauri::LogicalSize::new(min_width, min_height)));
-    let _ = window.set_size(tauri::LogicalSize::new(width, height));
+    // under the fractional-scaling workaround (GDK_SCALE=1) the computed sizes are
+    // already physical pixels; set_size(LogicalSize) would divide the 1.5x back out
+    // and leave the content at its base width while webkit renders it 1.5x larger,
+    // which clips. size in physical pixels in that mode, logical otherwise.
+    if (webview_scale - 1.0).abs() < f64::EPSILON {
+        let _ = window.set_min_size(Some(tauri::LogicalSize::new(min_width, min_height)));
+        let _ = window.set_size(tauri::LogicalSize::new(width, height));
+    } else {
+        let _ = window.set_min_size(Some(tauri::PhysicalSize::new(min_width, min_height)));
+        let _ = window.set_size(tauri::PhysicalSize::new(width, height));
+    }
     let _ = window.set_resizable(true);
     let _ = window.set_maximizable(true);
 }

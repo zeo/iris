@@ -183,7 +183,7 @@ export function Activity() {
                               <td class="num">{bytes(proc().total.sent + proc().total.recv)}</td>
                             </tr>
                             <Show when={openProcs().has(proc().pid)}>
-                              <Key each={proc().conns} by={(c) => `${c.remote.addr}:${c.remote.port}:${c.local_port}`}>
+                              <Key each={proc().conns} by={(c) => `${c.remote.protocol}:${c.remote.addr}:${c.remote.port}:${c.local_port}`}>
                                 {(c) => <ConnRow c={c()} onSelect={() => setSel({ app: app().app, conn: c() })} />}
                               </Key>
                               <Show when={proc().conns.length === 0}>

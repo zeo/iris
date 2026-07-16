@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { createEffect, createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import {
   isPermissionGranted,
@@ -50,7 +50,11 @@ let started = false;
 export function initQuota() {
   if (started) return;
   started = true;
-  void refresh();
+  // refresh the moment the engine comes online or the cap changes, not only on
+  // the slow poll, so the meter is never stale for minutes after enabling a cap
+  createEffect(() => {
+    if (engine.online() && dataCapGb() > 0) void refresh();
+  });
   setInterval(() => void refresh(), POLL_MS);
 }
 

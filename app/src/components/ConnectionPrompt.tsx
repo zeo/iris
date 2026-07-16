@@ -35,13 +35,22 @@ export function ConnectionPrompt() {
     }
   };
 
-  onMount(async () => {
-    const unlistenAlert = await listen<Alert>("engine-alert", ({ payload }) => {
-      if (needsDecision(payload)) {
-        setAlerts((current) => [payload, ...current.filter((alert) => alert.id !== payload.id)]);
-      }
-    });
-    const unlistenRefresh = await listen("connection-prompts-refresh", refresh);
+  onMount(() => {
+    // register cleanup synchronously: an onCleanup after an await runs outside
+    // the owner scope and would silently fail to unregister these listeners
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const track = (pending: Promise<() => void>) => {
+      void pending.then((unlisten) => (disposed ? unlisten() : unlisteners.push(unlisten)));
+    };
+    track(
+      listen<Alert>("engine-alert", ({ payload }) => {
+        if (needsDecision(payload)) {
+          setAlerts((current) => [payload, ...current.filter((alert) => alert.id !== payload.id)]);
+        }
+      }),
+    );
+    track(listen("connection-prompts-refresh", refresh));
     // Escape defers the front card (same as its dismiss X); it never decides,
     // so a stray key can't allow or block a connection
     const onKey = (event: KeyboardEvent) => {
@@ -51,11 +60,11 @@ export function ConnectionPrompt() {
     };
     window.addEventListener("keydown", onKey);
     onCleanup(() => {
-      unlistenAlert();
-      unlistenRefresh();
+      disposed = true;
+      for (const unlisten of unlisteners) unlisten();
       window.removeEventListener("keydown", onKey);
     });
-    await refresh();
+    void refresh();
   });
 
   createEffect(() => {

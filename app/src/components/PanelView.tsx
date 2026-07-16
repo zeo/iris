@@ -16,7 +16,10 @@ export function PanelView(props: { id: string; name: string }) {
   const load = async () => {
     if (!engine.online()) return;
     try {
-      setPanel(await fetchPanel(props.id));
+      const fresh = await fetchPanel(props.id);
+      // keep the same object when the poll returns identical data, so the
+      // widget rows (and their canvases) are not torn down and rebuilt every 5s
+      setPanel((prev) => (JSON.stringify(prev) === JSON.stringify(fresh) ? prev : fresh));
       setErr("");
     } catch (e) {
       setErr(String(e));

@@ -31,7 +31,10 @@ export function Alerts() {
   // a coarse clock so relative timestamps re-derive instead of freezing at the
   // value they had when their row first rendered
   const [now, setNow] = createSignal(Date.now());
-  const [deciding, setDeciding] = createSignal<number>();
+  // in-flight decisions as a set of alert ids, so acting on one row never
+  // disables the buttons on the others
+  const [deciding, setDeciding] = createSignal<Set<number>>(new Set());
+  const isDeciding = (id: number) => deciding().has(id);
   const [decisionError, setDecisionError] = createSignal("");
   onMount(() => {
     initAlerts();
@@ -60,15 +63,19 @@ export function Alerts() {
 
   const decide = async (event: MouseEvent, alert: Alert, action: "allow" | "block") => {
     event.stopPropagation();
-    if (deciding() !== undefined) return;
-    setDeciding(alert.id);
+    if (isDeciding(alert.id)) return;
+    setDeciding((current) => new Set(current).add(alert.id));
     setDecisionError("");
     try {
       await decideAlert(alert.id, action);
     } catch (reason) {
       setDecisionError(String(reason));
     } finally {
-      setDeciding(undefined);
+      setDeciding((current) => {
+        const next = new Set(current);
+        next.delete(alert.id);
+        return next;
+      });
     }
   };
 
@@ -144,17 +151,17 @@ export function Alerts() {
                     <div class="alert-decisions">
                       <button
                         class="alert-decision block"
-                        disabled={deciding() !== undefined}
+                        disabled={isDeciding(a.id)}
                         onClick={(event) => decide(event, a, "block")}
                       >
                         Block
                       </button>
                       <button
                         class="alert-decision allow"
-                        disabled={deciding() !== undefined}
+                        disabled={isDeciding(a.id)}
                         onClick={(event) => decide(event, a, "allow")}
                       >
-                        {deciding() === a.id ? "Applying…" : "Allow"}
+                        {isDeciding(a.id) ? "Applying…" : "Allow"}
                       </button>
                     </div>
                   </Show>

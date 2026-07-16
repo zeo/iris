@@ -93,22 +93,33 @@ pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<
         .map_err(|error| error.to_string())?;
     position_window(&app, &window, width, height);
     window.show().map_err(|error| error.to_string())?;
+    // re-anchor once the window is mapped: the pre-show placement can be dropped
+    // by the compositor before the surface exists (the position reads back as
+    // 0,0 until it settles), which strands the host away from the corner
+    position_window(&app, &window, width, height);
     window.set_focus().map_err(|error| error.to_string())?;
     Ok(())
 }
 
 fn position_window(
-    _app: &tauri::AppHandle,
+    app: &tauri::AppHandle,
     window: &tauri::WebviewWindow,
     width: f64,
     height: f64,
 ) {
     #[cfg(target_os = "linux")]
-    if anchor_wayland(_app, window) {
+    if anchor_wayland(app, window) {
         return;
     }
 
-    let Ok(Some(monitor)) = window.current_monitor() else {
+    // anchor to the monitor the main window sits on; an unmapped prompt window
+    // can report the wrong monitor (or none) on a multi-monitor setup
+    let monitor = app
+        .get_webview_window("main")
+        .and_then(|main| main.current_monitor().ok().flatten())
+        .or_else(|| window.current_monitor().ok().flatten())
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
         return;
     };
     let area = monitor.work_area();

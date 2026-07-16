@@ -19,16 +19,21 @@ use windows::Win32::Security::{
 };
 use windows::Win32::System::SystemServices::{SE_GROUP_INTEGRITY, SE_GROUP_USE_FOR_DENY_ONLY};
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken,
-    TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
-    PROCESS_INFORMATION, STARTUPINFOW,
+    CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, ResumeThread,
+    TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
-/// a running restricted child. dropping it does not kill the child; call
-/// [`RestrictedChild::terminate`] for that. the process handle is closed on drop.
+/// a running restricted child. the child is confined to a job object whose only
+/// handle this struct owns, so dropping it (or the service exiting) closes the
+/// job and terminates the child, leaving no orphaned SYSTEM process. [`terminate`]
+/// kills it early. all handles are closed on drop.
+///
+/// [`terminate`]: RestrictedChild::terminate
 pub struct RestrictedChild {
     process: HANDLE,
     thread: HANDLE,
+    job: HANDLE,
 }
 
 // the handles are owned by this struct and only touched behind the supervisor's
@@ -64,6 +69,11 @@ impl RestrictedChild {
 impl Drop for RestrictedChild {
     fn drop(&mut self) {
         unsafe {
+            // close the job first: it is kill-on-close, so this terminates the
+            // child before its process and thread handles go
+            if !self.job.is_invalid() {
+                let _ = CloseHandle(self.job);
+            }
             let _ = CloseHandle(self.thread);
             let _ = CloseHandle(self.process);
         }
@@ -181,6 +191,8 @@ pub fn spawn_restricted(exe: &Path, extra_env: &[(String, String)]) -> io::Resul
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
 
+        // start suspended so the child is placed in its job before it runs its
+        // first instruction, closing the window where it could act unjobbed
         let result = CreateProcessAsUserW(
             Some(restricted),
             None,
@@ -188,7 +200,7 @@ pub fn spawn_restricted(exe: &Path, extra_env: &[(String, String)]) -> io::Resul
             None,
             None,
             false,
-            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
             Some(env.as_mut_ptr() as *const core::ffi::c_void),
             PCWSTR(cwd.as_ptr()),
             &si,
@@ -197,11 +209,56 @@ pub fn spawn_restricted(exe: &Path, extra_env: &[(String, String)]) -> io::Resul
         let _ = CloseHandle(restricted);
         result.map_err(io::Error::other)?;
 
+        // confine the child to a kill-on-close job, then let it run. resuming
+        // happens even if the job could not be set up, so a jobless child still
+        // starts (restricted by its token) rather than hanging suspended.
+        let job = confine_to_job(pi.hProcess);
+        ResumeThread(pi.hThread);
+
         Ok(RestrictedChild {
             process: pi.hProcess,
             thread: pi.hThread,
+            job,
         })
     }
+}
+
+/// place `process` in a job object that kills its members when the last handle
+/// closes and on an unhandled exception. returns the job handle to keep alive
+/// for the child's lifetime, or an invalid handle if the job could not be built
+/// or assigned (the child then runs jobless, still restricted by its token).
+unsafe fn confine_to_job(process: HANDLE) -> HANDLE {
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    let job = match CreateJobObjectW(None, PCWSTR::null()) {
+        Ok(job) => job,
+        Err(e) => {
+            tracing::warn!("could not create the plugin job object: {e}");
+            return HANDLE::default();
+        }
+    };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    if let Err(e) = SetInformationJobObject(
+        job,
+        JobObjectExtendedLimitInformation,
+        &limits as *const _ as *const core::ffi::c_void,
+        std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+    ) {
+        tracing::warn!("could not set plugin job limits: {e}");
+        let _ = CloseHandle(job);
+        return HANDLE::default();
+    }
+    if let Err(e) = AssignProcessToJobObject(job, process) {
+        tracing::warn!("could not assign the plugin to its job: {e}");
+        let _ = CloseHandle(job);
+        return HANDLE::default();
+    }
+    job
 }
 
 /// label the process's own window station and desktop Low so a low-integrity
@@ -273,11 +330,45 @@ unsafe fn set_low_integrity(token: HANDLE) -> io::Result<()> {
     .map_err(io::Error::other)
 }
 
-/// a UTF-16, double-null-terminated environment block: the current environment
-/// with `extra` merged in (extras win on a name clash)
+// the standard Windows system variables a process needs to load and run,
+// case-insensitive. the plugin child gets only these plus its injected token,
+// so nothing non-standard the service inherited (secrets, parent-set values)
+// leaks into an out-of-process plugin.
+const KEEP_ENV: &[&str] = &[
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "PATH",
+    "PATHEXT",
+    "OS",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER",
+    "PROCESSOR_LEVEL",
+    "PROCESSOR_REVISION",
+    "COMPUTERNAME",
+    "TEMP",
+    "TMP",
+    "ALLUSERSPROFILE",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "CommonProgramFiles",
+    "CommonProgramFiles(x86)",
+    "CommonProgramW6432",
+];
+
+/// a UTF-16, double-null-terminated environment block: the standard system
+/// variables plus `extra` merged in (extras win on a name clash)
 fn build_environment(extra: &[(String, String)]) -> Vec<u16> {
     use std::collections::BTreeMap;
-    let mut vars: BTreeMap<String, String> = std::env::vars().collect();
+    let keep: std::collections::HashSet<String> =
+        KEEP_ENV.iter().map(|name| name.to_ascii_lowercase()).collect();
+    let mut vars: BTreeMap<String, String> = std::env::vars()
+        .filter(|(name, _)| keep.contains(&name.to_ascii_lowercase()))
+        .collect();
     for (k, v) in extra {
         vars.insert(k.clone(), v.clone());
     }

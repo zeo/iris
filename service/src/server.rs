@@ -2,7 +2,11 @@ use crate::engine::Engine;
 use crate::plugins::registry::EnrichmentRegistry;
 use crate::plugins::PanelHub;
 use crate::rules::RuleStore;
-use iris_core::{AlertKind, Direction, Rule};
+use iris_core::AlertKind;
+#[cfg(windows)]
+use iris_core::RuleAction;
+#[cfg(not(windows))]
+use iris_core::{Direction, Rule};
 use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
 use iris_store::Store;
@@ -214,20 +218,50 @@ async fn handle(
                         let result = match alert.map(|alert| alert.kind) {
                             Some(AlertKind::NewApp { app, direction, .. }) => {
                                 let path = app.0.clone();
-                                let rule = Rule {
-                                    app,
-                                    direction: direction.unwrap_or(Direction::Outbound),
-                                    action,
-                                    label: None,
-                                };
-                                match rules.lock().unwrap_or_else(|e| e.into_inner()).add(rule) {
-                                    Ok(_) => {
-                                        let store = store.lock().unwrap_or_else(|e| e.into_inner());
-                                        store.set_app_decision(&path, action);
-                                        store.ack_alert(id);
-                                        Reply::Ok
+                                // on windows a block is a SYSTEM wfp filter, the
+                                // same privileged change as AddRule, so it is not
+                                // accepted on this unprivileged pipe: the UI routes
+                                // a block through the elevated admin channel. an
+                                // allow needs no filter (enforcement is allow by
+                                // default) so it is only recorded. on linux the
+                                // root engine holds the connection and applies the
+                                // rule directly for either verdict.
+                                #[cfg(windows)]
+                                {
+                                    let _ = &direction;
+                                    match action {
+                                        RuleAction::Block => Reply::Error(
+                                            "blocking a connection requires elevation".into(),
+                                        ),
+                                        RuleAction::Allow => {
+                                            let store =
+                                                store.lock().unwrap_or_else(|e| e.into_inner());
+                                            store.set_app_decision(&path, action);
+                                            store.ack_alert(id);
+                                            Reply::Ok
+                                        }
                                     }
-                                    Err(error) => Reply::Error(format!("could not apply decision: {error}")),
+                                }
+                                #[cfg(not(windows))]
+                                {
+                                    let rule = Rule {
+                                        app,
+                                        direction: direction.unwrap_or(Direction::Outbound),
+                                        action,
+                                        label: None,
+                                    };
+                                    match rules.lock().unwrap_or_else(|e| e.into_inner()).add(rule) {
+                                        Ok(_) => {
+                                            let store =
+                                                store.lock().unwrap_or_else(|e| e.into_inner());
+                                            store.set_app_decision(&path, action);
+                                            store.ack_alert(id);
+                                            Reply::Ok
+                                        }
+                                        Err(error) => {
+                                            Reply::Error(format!("could not apply decision: {error}"))
+                                        }
+                                    }
                                 }
                             }
                             _ => Reply::Error("connection decision is no longer pending".into()),

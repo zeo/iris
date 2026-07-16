@@ -191,6 +191,34 @@ pub async fn decide_alert(app: AppHandle, id: i64, action: String) -> Result<(),
     } else {
         RuleAction::Block
     };
+    // on windows a block installs a SYSTEM wfp filter, the same privileged change
+    // as adding a rule by hand, so it runs through the elevated admin channel (a
+    // uac prompt) instead of this unprivileged command; the pending alert is then
+    // acked. an allow needs no filter, and every linux verdict is applied by the
+    // root engine, so both go straight through.
+    #[cfg(windows)]
+    if matches!(action, RuleAction::Block) {
+        let pending = list_alerts(app.clone(), true)
+            .await?
+            .into_iter()
+            .find(|alert| alert.id == id)
+            .ok_or_else(|| "connection decision is no longer pending".to_string())?;
+        let iris_core::AlertKind::NewApp {
+            app: target,
+            direction,
+            ..
+        } = pending.kind
+        else {
+            return Err("connection decision is no longer pending".into());
+        };
+        let dir = if matches!(direction, Some(iris_core::Direction::Inbound)) {
+            "inbound"
+        } else {
+            "outbound"
+        };
+        crate::rulectl::rule_add(app.clone(), target.0, dir.to_string(), "block".to_string()).await?;
+        return ack_alert(app, id).await;
+    }
     match dispatch(&app, EngineCmd::DecideAlert(id, action)).await? {
         Reply::Ok => Ok(()),
         Reply::Error(error) => Err(error),

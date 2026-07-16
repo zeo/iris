@@ -99,10 +99,21 @@ pnpm tauri dev      # run the UI against a dev build
 pnpm tauri build    # produce an installer
 ```
 
+## Contributing
+
+Build steps, the checks to run, and how to send a change are in
+[CONTRIBUTING.md](CONTRIBUTING.md). Security issues go through private reporting,
+see [SECURITY.md](SECURITY.md).
+
 ## Credits
 
 IP-to-country data is DB-IP's [IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite),
 licensed under CC-BY-4.0.
+
+## License
+
+Dual-licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at
+your option. Bundled third-party data is credited in [NOTICE](NOTICE).
 
 ## Status
 

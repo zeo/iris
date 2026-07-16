@@ -221,7 +221,7 @@ function ConnRow(props: { c: Conn; onSelect: () => void }) {
       <td>
         <div class="conn-cell">
           <span class="dir"><Icon name={out() ? "out" : "in"} size={13} /></span>
-          <span class="addr" classList={{ host: !!c.host }}>{connLabel(c)}</span>
+          <span class="addr" classList={{ host: !!c.host }} title={connLabel(c)}>{connLabel(c)}</span>
         </div>
       </td>
       <td class="proto">{c.remote.protocol.toUpperCase()}</td>

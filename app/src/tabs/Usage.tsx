@@ -50,6 +50,7 @@ function since(span: Span): number {
 // historical data usage per app, backed by the SQLite rollup store.
 export function Usage() {
   const [span, setSpan] = persisted<Span>("usage.span", "day");
+  const [loadError, setLoadError] = createSignal(false);
 
   // key on the engine's online state too, so history loads once the service
   // connects even if this tab was opened during startup
@@ -65,7 +66,9 @@ export function Usage() {
         toMs: now,
         granularity: "day",
       });
+      setLoadError(false);
     } catch {
+      setLoadError(true);
       return [];
     }
     const map = new Map<string, AppTotal>();
@@ -189,10 +192,11 @@ export function Usage() {
         fallback={
           <div class="empty">
             <Icon name="clock" class="glyph" size={44} />
-            <h3>No history yet</h3>
+            <h3>{totals.loading ? "Loading history…" : loadError() ? "Couldn't load history" : "No history yet"}</h3>
             <p>
-              Iris keeps a rolling record of how much each app sends and receives. This {span()}'s
-              totals show up here once traffic is recorded.
+              {loadError() && !totals.loading
+                ? "The engine couldn't return usage history. It may be offline, or the history store is unavailable."
+                : `Iris keeps a rolling record of how much each app sends and receives. This ${span()}'s totals show up here once traffic is recorded.`}
             </p>
           </div>
         }

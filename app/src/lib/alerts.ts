@@ -91,9 +91,19 @@ export async function ackAlert(id: number): Promise<void> {
 }
 
 export async function ackAll(): Promise<void> {
-  for (const a of alerts().filter((x) => !x.acknowledged && !needsDecision(x))) {
-    await ackAlert(a.id);
-  }
+  const ids = alerts()
+    .filter((x) => !x.acknowledged && !needsDecision(x))
+    .map((x) => x.id);
+  if (ids.length === 0) return;
+  const acked = new Set<number>();
+  await Promise.all(
+    ids.map((id) =>
+      invoke("ack_alert", { id })
+        .then(() => void acked.add(id))
+        .catch(() => {}),
+    ),
+  );
+  setAlerts((current) => current.map((x) => (acked.has(x.id) ? { ...x, acknowledged: true } : x)));
 }
 
 export async function decideAlert(id: number, action: "allow" | "block"): Promise<void> {

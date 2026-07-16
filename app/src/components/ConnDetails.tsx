@@ -9,7 +9,9 @@ import { engine, fetchEnrichment, type Annotation, type Conn } from "../lib/engi
 export function ConnDetails(props: { app: string; conn: Conn; onClose: () => void }) {
   const [rdns] = createResource(
     () => props.conn.remote.addr,
-    (ip) => invoke<string | null>("reverse_dns", { ip }),
+    // a failed lookup (engine offline, ipv6, command error) must not throw in
+    // render and take down the whole ui; fall back to unresolved like a miss
+    (ip) => invoke<string | null>("reverse_dns", { ip }).catch(() => null),
   );
   // pull any cached engine annotations for this endpoint; live pushes keep the
   // store current while the drawer is open

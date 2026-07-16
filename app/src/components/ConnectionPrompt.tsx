@@ -20,9 +20,12 @@ function destination(remote: Extract<AlertKind, { kind: "new_app" }>["remote"]):
 export function ConnectionPrompt() {
   const [alerts, setAlerts] = createSignal<Alert[]>([]);
   const [dismissed, setDismissed] = createSignal<Set<number>>(new Set());
-  const [busy, setBusy] = createSignal<number>();
+  const [busy, setBusy] = createSignal<Set<number>>(new Set());
   const [error, setError] = createSignal<{ id: number; message: string }>();
   const visible = () => visibleDecisionPrompts(alerts(), dismissed(), MAX_VISIBLE);
+  // each stacked prompt decides independently, so track in-flight ids as a set
+  // rather than a single value that would freeze the whole stack
+  const isBusy = (id: number) => busy().has(id);
 
   const refresh = async () => {
     try {
@@ -55,8 +58,8 @@ export function ConnectionPrompt() {
   };
 
   const decide = async (alert: Alert, action: "allow" | "block") => {
-    if (busy() !== undefined) return;
-    setBusy(alert.id);
+    if (isBusy(alert.id)) return;
+    setBusy((current) => new Set(current).add(alert.id));
     setError(undefined);
     try {
       await invoke("decide_alert", { id: alert.id, action });
@@ -64,12 +67,19 @@ export function ConnectionPrompt() {
     } catch (reason) {
       setError({ id: alert.id, message: String(reason) });
     } finally {
-      setBusy(undefined);
+      setBusy((current) => {
+        const next = new Set(current);
+        next.delete(alert.id);
+        return next;
+      });
     }
   };
 
   return (
     <main class="connection-prompt-stack">
+      <Show when={error()?.id === 0}>
+        <div class="prompt-error">{error()?.message}</div>
+      </Show>
       <For each={visible()}>
         {(alert) => {
           const application = alert.kind as Extract<AlertKind, { kind: "new_app" }>;
@@ -93,9 +103,9 @@ export function ConnectionPrompt() {
               </div>
               <Show when={error()?.id === alert.id}><div class="prompt-error">{error()?.message}</div></Show>
               <footer>
-                <button class="prompt-btn block" disabled={busy() !== undefined} onClick={() => decide(alert, "block")}>Block</button>
-                <button class="prompt-btn allow" disabled={busy() !== undefined} onClick={() => decide(alert, "allow")}>
-                  {busy() === alert.id ? "Applying…" : "Allow"}
+                <button class="prompt-btn block" disabled={isBusy(alert.id)} onClick={() => decide(alert, "block")}>Block</button>
+                <button class="prompt-btn allow" disabled={isBusy(alert.id)} onClick={() => decide(alert, "allow")}>
+                  {isBusy(alert.id) ? "Applying…" : "Allow"}
                 </button>
               </footer>
             </section>

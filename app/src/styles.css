@@ -470,7 +470,7 @@ html {
 }
 .tab.on .badge {
   background: var(--steel);
-  color: #151515;
+  color: var(--bg);
   box-shadow: none;
 }
 
@@ -719,9 +719,20 @@ html {
   background: linear-gradient(180deg, #362420, #241917);
 }
 .prompt-btn.allow {
-  color: #151515;
+  color: var(--bg);
   border-color: var(--steel);
   background: var(--steel);
+}
+.prompt-btn.allow:hover {
+  background: var(--steel-hi, var(--steel));
+  filter: brightness(1.06);
+}
+.prompt-btn.block:hover {
+  filter: brightness(1.12);
+}
+.prompt-btn:not(:disabled):active {
+  transform: translateY(1px);
+  box-shadow: var(--press);
 }
 .prompt-btn:disabled {
   cursor: wait;

@@ -53,6 +53,7 @@ export function Protect() {
   const [direction, setDirection] = createSignal<Direction>("outbound");
   const [toolError, setToolError] = createSignal("");
   const [toolNote, setToolNote] = createSignal("");
+  const [ioBusy, setIoBusy] = createSignal(false);
   const [changing, setChanging] = createSignal("");
   const [sort, setSort] = createSignal<SortKey>("app");
   const [sortDirection, setSortDirection] = createSignal<SortDirection>("asc");
@@ -165,6 +166,8 @@ export function Protect() {
   };
 
   const exportRules = async () => {
+    if (ioBusy()) return;
+    setIoBusy(true);
     setToolError("");
     setToolNote("");
     try {
@@ -177,10 +180,14 @@ export function Protect() {
       await revealItemInDir(path);
     } catch (error) {
       setToolError(String(error));
+    } finally {
+      setIoBusy(false);
     }
   };
 
   const importRules = async () => {
+    if (ioBusy()) return;
+    setIoBusy(true);
     setToolError("");
     setToolNote("");
     try {
@@ -190,6 +197,8 @@ export function Protect() {
       setToolNote(`imported ${count} rule${count === 1 ? "" : "s"}`);
     } catch (error) {
       setToolError(String(error));
+    } finally {
+      setIoBusy(false);
     }
   };
 
@@ -257,8 +266,8 @@ export function Protect() {
           <button class="btn proposal-count" onClick={() => setAdding(false)}>{pendingProposals().length} proposed</button>
         </Show>
         <button class="btn" onClick={() => setAdding((open) => !open)}><Icon name="plus" /> Add rule</button>
-        <button class="btn icon" onClick={exportRules} disabled={rules().length === 0} title="Export rules"><Icon name="download" /></button>
-        <button class="btn icon" onClick={importRules} title="Import rules"><Icon name="upload" /></button>
+        <button class="btn icon" onClick={exportRules} disabled={ioBusy() || rules().length === 0} title="Export rules"><Icon name="download" /></button>
+        <button class="btn icon" onClick={importRules} disabled={ioBusy()} title="Import rules"><Icon name="upload" /></button>
       </div>
 
       <Show when={toolError()}><div class="tool-err">{toolError()}</div></Show>
@@ -354,7 +363,7 @@ export function Protect() {
                         <AppIcon path={row().app} />
                         <span class="protect-app-meta">
                           <b>{row().sample?.name ?? row().name ?? fileName(row().app)}</b>
-                          <small>{row().app}</small>
+                          <small title={row().app}>{row().app}</small>
                         </span>
                         <Show when={!row().sample?.online}>
                           <button
@@ -370,7 +379,7 @@ export function Protect() {
                     </td>
                     <td><DecisionSelect row={row()} direction="inbound" changing={changing()} choose={chooseDecision} /></td>
                     <td><DecisionSelect row={row()} direction="outbound" changing={changing()} choose={chooseDecision} /></td>
-                    <td><span class="remote-field">{hostsFor(row().sample)}</span></td>
+                    <td><span class="remote-field" title={hostsFor(row().sample)}>{hostsFor(row().sample)}</span></td>
                     <td class="num">{rate(row().sample?.rate_recv ?? 0)}</td>
                     <td class="num">{rate(row().sample?.rate_sent ?? 0)}</td>
                     <td class="num">{bytes((row().sample?.total.recv ?? 0) + (row().sample?.total.sent ?? 0))}</td>
@@ -420,7 +429,7 @@ function DecisionSelect(props: {
       <span class="decision-light" />
       <select
         value={value()}
-        disabled={!!props.changing}
+        disabled={busy()}
         aria-label={`${props.direction} rule for ${fileName(props.row.app)}`}
         onChange={(event) => props.choose(props.row, props.direction, event.currentTarget.value as Decision)}
       >

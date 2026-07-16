@@ -438,9 +438,22 @@ fn verdict_loop(
         if !unresolved.is_empty() && now >= next_resolve {
             let mut resolver = resolver.lock().unwrap_or_else(|error| error.into_inner());
             resolver.refresh_if_stale(std::time::Duration::from_secs(1));
+            // the published snapshot lags new sockets by up to a second, so a
+            // packet it can't attribute gets one live sock_diag dump before we
+            // give up on it. without this the socket of an app that connects the
+            // instant it opens (games, short-lived requests) is missed and the
+            // packet is dropped at the timeout with no prompt ever raised. one
+            // live dump per tick covers every packet still waiting this pass.
+            let mut tried_live = false;
             let mut waiting = Vec::with_capacity(unresolved.len());
             for packet in unresolved.drain(..) {
-                if let Some(decision) = decide(packet.flow, dir, &rules, &mut resolver) {
+                let mut decision = decide(packet.flow, dir, &rules, &mut resolver);
+                if decision.is_none() && !tried_live {
+                    tried_live = true;
+                    resolver.refresh_live();
+                    decision = decide(packet.flow, dir, &rules, &mut resolver);
+                }
+                if let Some(decision) = decision {
                     decisions.push((packet.message, decision));
                 } else if now.duration_since(packet.since) >= std::time::Duration::from_millis(1500)
                 {
@@ -798,6 +811,22 @@ impl Resolver {
             self.cache.clear();
             self.cache_cleared_at = self.refreshed_at;
         }
+    }
+
+    // force a live sock_diag + inode-owner enumeration, bypassing the published
+    // snapshot. a new connection's socket can be younger than the last published
+    // snapshot (an app opens a socket and sends on it in the same instant), so
+    // attributing a held packet has to be able to look at the sockets that exist
+    // right now, not only the ones the monitor saw up to a second ago.
+    fn refresh_live(&mut self) {
+        self.owners = crate::proc::socket_inode_owners();
+        self.by_local.clear();
+        for s in sockets::dump_for_attribution() {
+            self.by_local
+                .entry((s.local.0, s.local.1))
+                .or_insert(s.inode);
+        }
+        self.refreshed_at = std::time::Instant::now();
     }
 
     fn cached_exe(&mut self, local: (IpAddr, u16)) -> Option<String> {

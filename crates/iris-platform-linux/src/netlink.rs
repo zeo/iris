@@ -128,7 +128,12 @@ impl NlSocket {
                     NLMSG_NOOP => {}
                     NLMSG_ERROR => {
                         // the error code is the first i32 of the payload; 0 is an
-                        // ACK, anything else a real failure
+                        // ACK, anything else a real failure. a truncated error
+                        // frame at the buffer tail has no code to read: treat it
+                        // as an ack rather than decode stale bytes.
+                        if off + 20 > len {
+                            return Ok(());
+                        }
                         let code = i32::from_ne_bytes(buf[off + 16..off + 20].try_into().unwrap());
                         if code != 0 {
                             return Err(io::Error::from_raw_os_error(-code));

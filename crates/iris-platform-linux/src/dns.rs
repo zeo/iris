@@ -48,9 +48,14 @@ pub fn record(map: &DnsMap, host: &str, ip: IpAddr) {
         return;
     };
     guard.insert(normalize(ip), host.to_string());
-    // bound memory: DNS churn is unbounded over a long session
+    // bound memory: DNS churn is unbounded over a long session. evict roughly
+    // half rather than clearing every learned name at once, which would blank
+    // the whole connection view back to raw IPs until DNS re-populates.
     if guard.len() > 8192 {
-        guard.clear();
+        let victims: Vec<IpAddr> = guard.keys().take(guard.len() - 4096).copied().collect();
+        for victim in victims {
+            guard.remove(&victim);
+        }
     }
 }
 

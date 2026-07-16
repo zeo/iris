@@ -237,6 +237,7 @@ export function Protect() {
           <label class="field protect-search">
             <Icon name="search" />
             <input
+              aria-label="Search apps, paths, or endpoints"
               placeholder="search app, path, or endpoint"
               value={query()}
               onInput={(event) => setQuery(event.currentTarget.value)}
@@ -244,7 +245,7 @@ export function Protect() {
           </label>
           <div class="seg" role="group" aria-label="application filter">
             <For each={["all", "active", "ruled"] as const}>
-              {(mode) => <button classList={{ on: filter() === mode }} onClick={() => setFilter(mode)}>{mode}</button>}
+              {(mode) => <button classList={{ on: filter() === mode }} aria-pressed={filter() === mode} onClick={() => setFilter(mode)}>{mode}</button>}
             </For>
           </div>
         </div>
@@ -287,12 +288,12 @@ export function Protect() {
             <span class="label">new rule from a live application</span>
             <div class="picker-opts">
               <div class="seg" role="group" aria-label="action">
-                <button classList={{ on: action() === "block" }} onClick={() => setAction("block")}>block</button>
-                <button classList={{ on: action() === "allow" }} onClick={() => setAction("allow")}>allow</button>
+                <button classList={{ on: action() === "block" }} aria-pressed={action() === "block"} onClick={() => setAction("block")}>block</button>
+                <button classList={{ on: action() === "allow" }} aria-pressed={action() === "allow"} onClick={() => setAction("allow")}>allow</button>
               </div>
               <div class="seg" role="group" aria-label="direction">
-                <button classList={{ on: direction() === "outbound" }} onClick={() => setDirection("outbound")}>out</button>
-                <button classList={{ on: direction() === "inbound" }} onClick={() => setDirection("inbound")}>in</button>
+                <button classList={{ on: direction() === "outbound" }} aria-pressed={direction() === "outbound"} onClick={() => setDirection("outbound")}>out</button>
+                <button classList={{ on: direction() === "inbound" }} aria-pressed={direction() === "inbound"} onClick={() => setDirection("inbound")}>in</button>
               </div>
             </div>
             <button class="iconbtn" onClick={() => setAdding(false)} aria-label="close"><Icon name="x" /></button>

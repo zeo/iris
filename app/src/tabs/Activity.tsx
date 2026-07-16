@@ -68,9 +68,11 @@ export function Activity() {
   const onlineCount = () => engine.apps().filter((s) => s.online).length;
   const connTotal = () => engine.apps().reduce((n, s) => n + s.connections, 0);
   const th = (key: Sort, cls: string, text: string) => (
-    <th class={cls} classList={{ sorted: sort() === key }} onClick={() => setSort(key)}>
-      {text}
-      <span class="sort">▾</span>
+    <th class={cls} classList={{ sorted: sort() === key }} aria-sort={sort() === key ? "descending" : "none"}>
+      <button class="col-sort" onClick={() => setSort(key)}>
+        {text}
+        <span class="sort">▾</span>
+      </button>
     </th>
   );
 
@@ -84,12 +86,12 @@ export function Activity() {
         <div class="actions">
           <label class="field">
             <Icon name="search" />
-            <input placeholder="filter apps…" value={q()} onInput={(e) => setQ(e.currentTarget.value)} />
+            <input aria-label="Filter apps" placeholder="filter apps…" value={q()} onInput={(e) => setQ(e.currentTarget.value)} />
           </label>
           <div class="seg" role="group" aria-label="status">
             <For each={["all", "online", "offline"] as Filter[]}>
               {(f) => (
-                <button classList={{ on: filter() === f }} onClick={() => setFilter(f)}>{f}</button>
+                <button classList={{ on: filter() === f }} aria-pressed={filter() === f} onClick={() => setFilter(f)}>{f}</button>
               )}
             </For>
           </div>
@@ -213,7 +215,20 @@ function ConnRow(props: { c: Conn; onSelect: () => void }) {
   const c = props.c;
   const out = () => c.direction === "outbound";
   return (
-    <tr class="conn-row" classList={{ out: out(), in: !out() }} onClick={props.onSelect}>
+    <tr
+      class="conn-row"
+      classList={{ out: out(), in: !out() }}
+      role="button"
+      tabindex={0}
+      aria-label={`Inspect connection ${connLabel(c)}`}
+      onClick={props.onSelect}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          props.onSelect();
+        }
+      }}
+    >
       <td>
         <div class="conn-cell">
           <span class="dir"><Icon name={out() ? "out" : "in"} size={13} /></span>

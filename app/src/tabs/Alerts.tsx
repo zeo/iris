@@ -104,7 +104,7 @@ export function Alerts() {
           <div class="seg" role="group" aria-label="filter">
             <For each={FILTERS}>
               {(f) => (
-                <button classList={{ on: filter() === f }} onClick={() => setFilter(f)}>{f}</button>
+                <button classList={{ on: filter() === f }} aria-pressed={filter() === f} onClick={() => setFilter(f)}>{f}</button>
               )}
             </For>
           </div>

@@ -102,7 +102,12 @@ export function ConnectionPrompt() {
         {(alert) => {
           const application = alert.kind as Extract<AlertKind, { kind: "new_app" }>;
           return (
-            <section class="connection-prompt">
+            <section
+              class="connection-prompt"
+              role="alertdialog"
+              aria-modal="true"
+              aria-label={`New network connection from ${fileName(application.app)}`}
+            >
               <header data-tauri-drag-region>
                 <span class="prompt-mark"><Icon name="shield" /></span>
                 <span><b>New network connection</b><small>Choose how Iris should handle this application</small></span>
@@ -119,7 +124,9 @@ export function ConnectionPrompt() {
                 <span><small>Protocol</small><b>{application.remote?.protocol.toUpperCase() ?? "Unknown"}</b></span>
                 <span><small>Direction</small><b>{application.direction ?? "outbound"}</b></span>
               </div>
-              <Show when={error()?.id === alert.id}><div class="prompt-error">{error()?.message}</div></Show>
+              <Show when={error()?.id === alert.id}>
+                <div class="prompt-error" role="alert">{error()?.message}</div>
+              </Show>
               <footer>
                 <button class="prompt-btn block" disabled={isBusy(alert.id)} onClick={() => decide(alert, "block")}>Block</button>
                 <button class="prompt-btn allow" disabled={isBusy(alert.id)} onClick={() => decide(alert, "allow")}>

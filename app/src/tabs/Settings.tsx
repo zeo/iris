@@ -81,7 +81,7 @@ export function Settings() {
           <div class="seg" role="group" aria-label="throughput units">
             <For each={UNIT_OPTS}>
               {(o) => (
-                <button classList={{ on: rateUnits() === o.id }} onClick={() => setRateUnits(o.id)}>
+                <button classList={{ on: rateUnits() === o.id }} aria-pressed={rateUnits() === o.id} onClick={() => setRateUnits(o.id)}>
                   {o.label}
                 </button>
               )}

@@ -205,13 +205,37 @@ html {
   font-size: var(--fz-cap);
   letter-spacing: var(--track-label);
   text-transform: uppercase;
-  color: var(--faint);
+  /* section headings must clear small-text contrast; --faint reads under 3:1 */
+  color: var(--muted);
   text-shadow: var(--engrave);
 }
 
 :where(button, a, input, select, [tabindex="0"], [role="button"], [role="tab"]):focus-visible {
   outline: 2px solid var(--steel);
   outline-offset: 2px;
+}
+
+/* these two null their outline in their base rule, so restore a keyboard ring */
+.decision-select select:focus-visible,
+.num-field input:focus-visible {
+  outline: 2px solid var(--steel);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* a header sort control that stays visually inline with its column label */
+.tbl th .col-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2090,6 +2114,7 @@ html {
   border: 0;
   outline: 0;
   appearance: none;
+  border-radius: 4px;
   background: transparent;
   color: inherit;
   font-family: var(--mono);

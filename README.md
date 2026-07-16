@@ -1,9 +1,16 @@
-# iris
+<p align="center">
+  <img src="docs/banner.png" alt="iris" width="360">
+</p>
 
 A firewall and network monitor for Windows and Linux. Iris watches application
 network traffic and puts you in control of what is allowed to
 connect: per-app allow and block rules, a live view of what every process is
 talking to, and a running history of how much each one uses.
+
+<p align="center">
+  <img src="docs/activity.png" alt="Activity: live per-app traffic" width="820"><br>
+  <img src="docs/graph.png" alt="Graph: bandwidth over time, per adapter" width="820">
+</p>
 
 Built native: a small privileged engine (a Windows service, or a systemd unit on
 Linux) does the real work with the OS filtering layer and kernel network events,

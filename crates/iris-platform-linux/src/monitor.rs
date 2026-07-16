@@ -646,6 +646,10 @@ impl DnsSniffer {
             return Err(std::io::Error::last_os_error());
         }
         let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        // keep only dns responses in the kernel so recv wakes for those alone
+        // instead of every packet on the host; best effort, the userspace parse
+        // still guards the payload if the kernel ever refuses the program
+        attach_dns_filter(&fd);
         // wake out of recv once a second so the stop flag is honoured promptly
         let tv = libc::timeval {
             tv_sec: 1,
@@ -681,6 +685,69 @@ impl DnsSniffer {
             }
             parse_dns_packet(&buf[..n as usize], &dns_map);
         }
+    }
+}
+
+/// attach a classic-BPF program that passes only UDP packets sourced from port
+/// 53 (IPv4 and IPv6), dropping everything else before it is copied to userspace.
+///
+/// the socket sees every link type at once (loopback, ethernet, wifi, tun), so
+/// the program reads through the kernel's `SKF_NET_OFF` magic offset, which is
+/// relative to the L3 header and therefore link-layer agnostic. the IPv4 source
+/// port is reached with an IHL-indexed load; IPv6 uses the fixed 40-byte header.
+/// only the first IPv4 fragment (offset 0) carries the L4 header, so later
+/// fragments are dropped, matching the non-reassembling userspace parser.
+///
+/// failure is non-fatal: without the filter the socket still delivers dns, just
+/// alongside all other traffic that the userspace parser then discards.
+fn attach_dns_filter(fd: &std::os::fd::OwnedFd) {
+    use std::os::fd::AsRawFd;
+    // offsets into the kernel's synthetic areas: auxiliary data (skb->protocol)
+    // and the start of the network-layer header
+    const SKF_AD_OFF: i32 = -0x1000;
+    const SKF_AD_PROTOCOL: i32 = 0;
+    const SKF_NET_OFF: i32 = -0x10_0000;
+    const fn i(code: u16, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
+        libc::sock_filter { code, jt, jf, k }
+    }
+    // codes are the classic-BPF encoding; the program was validated on-kernel to
+    // pass v4 and v6 dns and drop udp on other ports, tcp, and icmp
+    let prog = [
+        i(0x28, 0, 0, (SKF_AD_OFF + SKF_AD_PROTOCOL) as u32), // A = ethertype
+        i(0x15, 1, 0, 0x0000_0800),                          // IPv4 -> ipv4 block
+        i(0x15, 7, 12, 0x0000_86dd),                         // IPv6 -> ipv6 block else drop
+        i(0x30, 0, 0, (SKF_NET_OFF + 9) as u32),             // A = ipv4 protocol
+        i(0x15, 0, 10, 0x0000_0011),                         // UDP? else drop
+        i(0x28, 0, 0, (SKF_NET_OFF + 6) as u32),             // A = flags+frag offset
+        i(0x45, 8, 0, 0x0000_1fff),                          // fragment? drop
+        i(0xb1, 0, 0, (SKF_NET_OFF) as u32),                 // X = IPv4 header length
+        i(0x48, 0, 0, (SKF_NET_OFF) as u32),                 // A = udp source port
+        i(0x15, 4, 5, 0x0000_0035),                          // port 53? accept else drop
+        i(0x30, 0, 0, (SKF_NET_OFF + 6) as u32),             // A = ipv6 next header
+        i(0x15, 0, 3, 0x0000_0011),                          // UDP? else drop
+        i(0x28, 0, 0, (SKF_NET_OFF + 40) as u32),            // A = udp source port
+        i(0x15, 0, 1, 0x0000_0035),                          // port 53? accept else drop
+        i(0x06, 0, 0, 0x0004_0000),                          // accept (256k)
+        i(0x06, 0, 0, 0x0000_0000),                          // drop
+    ];
+    let fprog = libc::sock_fprog {
+        len: prog.len() as u16,
+        filter: prog.as_ptr() as *mut libc::sock_filter,
+    };
+    let rc = unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_ATTACH_FILTER,
+            &fprog as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::sock_fprog>() as u32,
+        )
+    };
+    if rc != 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "could not attach the dns capture filter; falling back to userspace filtering"
+        );
     }
 }
 

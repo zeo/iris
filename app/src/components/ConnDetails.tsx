@@ -1,4 +1,4 @@
-import { createEffect, createResource, createSignal, For, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Icon } from "./Icon";
@@ -18,6 +18,14 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
   createEffect(() => {
     fetchEnrichment([props.conn.remote.addr]);
   });
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") props.onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
+
   const annotations = () => engine.annotationsFor(props.conn.remote.addr);
   const annText = (a: Annotation): string => {
     if ("Text" in a.value) return a.value.Text;

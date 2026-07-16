@@ -102,7 +102,7 @@ export function Activity() {
 
       <div class="tiles">
         <div class="tile"><div class="k">online apps</div><div class="v">{onlineCount()}</div></div>
-        <div class="tile"><div class="k">connections</div><div class="v">{connTotal()}</div></div>
+        <div class="tile"><div class="k">connections</div><div class="v">{connTotal().toLocaleString()}</div></div>
         <div class="tile"><div class="k">download</div><div class="v">{rate(engine.down())}</div></div>
         <div class="tile"><div class="k">upload</div><div class="v">{rate(engine.up())}</div></div>
       </div>

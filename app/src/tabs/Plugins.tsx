@@ -9,6 +9,7 @@ import { capLabel, grantAndEnable, plugins, refreshPlugins, setEnabled, type Plu
 export function Plugins() {
   const [consent, setConsent] = createSignal<PluginInfo | null>(null);
   const [err, setErr] = createSignal("");
+  const [toggling, setToggling] = createSignal<Set<string>>(new Set());
 
   createEffect(() => {
     if (engine.online()) refreshPlugins();
@@ -24,11 +25,19 @@ export function Plugins() {
     }
   };
   const toggle = async (p: PluginInfo, on: boolean) => {
+    if (toggling().has(p.id)) return;
+    setToggling((current) => new Set(current).add(p.id));
     setErr("");
     try {
       await setEnabled(p.id, on);
     } catch (e) {
       setErr(String(e));
+    } finally {
+      setToggling((current) => {
+        const next = new Set(current);
+        next.delete(p.id);
+        return next;
+      });
     }
   };
 
@@ -91,6 +100,7 @@ export function Plugins() {
                     class="rocker"
                     role="switch"
                     aria-checked={p.enabled}
+                    disabled={toggling().has(p.id)}
                     onClick={() => toggle(p, !p.enabled)}
                     title={p.enabled ? "enabled" : "disabled"}
                   >

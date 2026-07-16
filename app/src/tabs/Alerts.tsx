@@ -40,6 +40,9 @@ export function Alerts() {
     onCleanup(() => clearInterval(timer));
   });
 
+  // the store can hold hundreds of alerts; render a bounded window so we don't
+  // mount that many rows (each with its own icon lookup) at once
+  const RENDER_CAP = 200;
   const list = createMemo(() => {
     const f = filter();
     let a = alerts();
@@ -48,6 +51,7 @@ export function Alerts() {
     else if (f === "flags") a = a.filter((x) => x.kind.kind === "plugin");
     return a;
   });
+  const shown = createMemo(() => list().slice(0, RENDER_CAP));
 
   const title = (a: Alert) =>
     a.kind.kind === "new_app"
@@ -117,7 +121,7 @@ export function Alerts() {
         }
       >
         <div class="rows">
-          <For each={list()}>
+          <For each={shown()}>
             {(a) => {
               const k = a.kind;
               if (k.kind === "plugin") return flagRow(a, k);
@@ -163,6 +167,9 @@ export function Alerts() {
             }}
           </For>
         </div>
+        <Show when={list().length > shown().length}>
+          <div class="rows-more">showing {shown().length} of {list().length} · mark read to clear the rest</div>
+        </Show>
         <Show when={decisionError()}>
           <div class="alert-decision-error">{decisionError()}</div>
         </Show>

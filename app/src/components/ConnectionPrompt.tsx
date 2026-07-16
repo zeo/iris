@@ -42,9 +42,18 @@ export function ConnectionPrompt() {
       }
     });
     const unlistenRefresh = await listen("connection-prompts-refresh", refresh);
+    // Escape defers the front card (same as its dismiss X); it never decides,
+    // so a stray key can't allow or block a connection
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const stack = visible();
+      if (stack.length) dismiss(stack[stack.length - 1].id);
+    };
+    window.addEventListener("keydown", onKey);
     onCleanup(() => {
       unlistenAlert();
       unlistenRefresh();
+      window.removeEventListener("keydown", onKey);
     });
     await refresh();
   });

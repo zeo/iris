@@ -2474,6 +2474,13 @@ html {
   color: var(--err);
   font-size: var(--fz-sm);
 }
+.rows-more {
+  margin-top: var(--s3);
+  text-align: center;
+  color: var(--faint);
+  font-size: var(--fz-sm);
+  letter-spacing: 0.01em;
+}
 .alert-cat {
   font-size: var(--fz-sm);
   color: var(--muted);

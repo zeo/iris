@@ -9,7 +9,8 @@ const BIT_UNITS = ["bit", "Kbit", "Mbit", "Gbit", "Tbit"];
 
 function scale(n: number, base: number, units: string[]): string {
   if (n < 1) return `0 ${units[0]}`;
-  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(base)));
+  // nudge past float error at exact powers so 1024 reads "1.0 KiB", not "1024 B"
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(base) + 1e-9));
   const v = n / Math.pow(base, i);
   const dp = v >= 100 || i === 0 ? 0 : 1;
   return `${v.toFixed(dp)} ${units[i]}`;

@@ -132,7 +132,7 @@ async fn handle(
                         reply(&mut send, req, Reply::Pong).await?;
                     }
                     ClientMessage::ListRules { req } => {
-                        let list = rules.lock().map(|r| r.list()).unwrap_or_default();
+                        let list = rules.lock().unwrap_or_else(|e| e.into_inner()).list();
                         reply(&mut send, req, Reply::Rules(list)).await?;
                     }
                     ClientMessage::ListApps { req } => {
@@ -147,13 +147,11 @@ async fn handle(
                     ClientMessage::ForgetApp { req, path } => {
                         let removed = store
                             .lock()
-                            .map(|store| store.forget_app(&path))
-                            .unwrap_or(false);
+                            .unwrap_or_else(|e| e.into_inner())
+                            .forget_app(&path);
                         #[cfg(target_os = "linux")]
                         if removed {
-                            if let Ok(rules) = rules.lock() {
-                                rules.forget_trusted_app(&path);
-                            }
+                            rules.lock().unwrap_or_else(|e| e.into_inner()).forget_trusted_app(&path);
                         }
                         reply(
                             &mut send,
@@ -203,16 +201,16 @@ async fn handle(
                         reply(&mut send, req, Reply::Alerts(list)).await?;
                     }
                     ClientMessage::AckAlert { req, id } => {
-                        if let Ok(s) = store.lock() {
-                            s.ack_alert(id);
-                        }
+                        store.lock().unwrap_or_else(|e| e.into_inner()).ack_alert(id);
                         reply(&mut send, req, Reply::Ok).await?;
                     }
                     ClientMessage::DecideAlert { req, id, action } => {
                         let alert = store
                             .lock()
-                            .ok()
-                            .and_then(|store| store.list_alerts(true).into_iter().find(|alert| alert.id == id));
+                            .unwrap_or_else(|e| e.into_inner())
+                            .list_alerts(true)
+                            .into_iter()
+                            .find(|alert| alert.id == id);
                         let result = match alert.map(|alert| alert.kind) {
                             Some(AlertKind::NewApp { app, direction, .. }) => {
                                 let path = app.0.clone();
@@ -222,18 +220,14 @@ async fn handle(
                                     action,
                                     label: None,
                                 };
-                                match rules.lock() {
-                                    Ok(mut rules) => match rules.add(rule) {
-                                        Ok(_) => {
-                                            if let Ok(store) = store.lock() {
-                                                store.set_app_decision(&path, action);
-                                                store.ack_alert(id);
-                                            }
-                                            Reply::Ok
-                                        }
-                                        Err(error) => Reply::Error(format!("could not apply decision: {error}")),
-                                    },
-                                    Err(_) => Reply::Error("rule store unavailable".into()),
+                                match rules.lock().unwrap_or_else(|e| e.into_inner()).add(rule) {
+                                    Ok(_) => {
+                                        let store = store.lock().unwrap_or_else(|e| e.into_inner());
+                                        store.set_app_decision(&path, action);
+                                        store.ack_alert(id);
+                                        Reply::Ok
+                                    }
+                                    Err(error) => Reply::Error(format!("could not apply decision: {error}")),
                                 }
                             }
                             _ => Reply::Error("connection decision is no longer pending".into()),
@@ -321,8 +315,9 @@ async fn handle(
                             Reply::Error("accepting a proposal requires elevation".into())
                         } else if store
                             .lock()
-                            .map(|s| s.resolve_proposal(id, false).is_some())
-                            .unwrap_or(false)
+                            .unwrap_or_else(|e| e.into_inner())
+                            .resolve_proposal(id, false)
+                            .is_some()
                         {
                             Reply::Ok
                         } else {

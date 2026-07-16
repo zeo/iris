@@ -59,12 +59,14 @@ export function Plugins() {
         fallback={
           <div class="empty">
             <Icon name="plug" class="glyph" size={44} />
-            <h3>No plugins installed</h3>
-            <p>
-              Plugins extend Iris with extra endpoint intelligence. Each runs in its own restricted
-              process and only with the powers you approve. Installed plugins live under
-              ProgramData\Iris\plugins and appear here to review and enable.
-            </p>
+            <h3>{engine.online() ? "No plugins installed" : "Waiting for the engine"}</h3>
+            <Show when={engine.online()}>
+              <p>
+                Plugins extend Iris with extra endpoint intelligence. Each runs in its own
+                restricted process and only with the powers you approve. Installed plugins live
+                under ProgramData\Iris\plugins and appear here to review and enable.
+              </p>
+            </Show>
           </div>
         }
       >

@@ -11,10 +11,18 @@ const [knownApps, setKnownApps] = createSignal<KnownApp[]>([]);
 export { knownApps };
 
 export async function refreshKnownApps(): Promise<void> {
-  setKnownApps(await invoke<KnownApp[]>("list_apps"));
+  try {
+    setKnownApps(await invoke<KnownApp[]>("list_apps"));
+  } catch {
+    /* engine offline */
+  }
 }
 
 export async function forgetKnownApp(path: string): Promise<void> {
-  await invoke("forget_app", { path });
-  setKnownApps((apps) => apps.filter((app) => app.app !== path));
+  try {
+    await invoke("forget_app", { path });
+    setKnownApps((apps) => apps.filter((app) => app.app !== path));
+  } catch {
+    /* engine offline */
+  }
 }

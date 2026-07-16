@@ -136,7 +136,12 @@ async fn handle(
                         reply(&mut send, req, Reply::Pong).await?;
                     }
                     ClientMessage::ListRules { req } => {
-                        let list = rules.lock().unwrap_or_else(|e| e.into_inner()).list();
+                        let rules = rules.clone();
+                        let list = tokio::task::spawn_blocking(move || {
+                            rules.lock().unwrap_or_else(|e| e.into_inner()).list()
+                        })
+                        .await
+                        .unwrap_or_default();
                         reply(&mut send, req, Reply::Rules(list)).await?;
                     }
                     ClientMessage::ListApps { req } => {
@@ -149,14 +154,25 @@ async fn handle(
                         reply(&mut send, req, Reply::Apps(list)).await?;
                     }
                     ClientMessage::ForgetApp { req, path } => {
-                        let removed = store
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .forget_app(&path);
+                        let store = store.clone();
                         #[cfg(target_os = "linux")]
-                        if removed {
-                            rules.lock().unwrap_or_else(|e| e.into_inner()).forget_trusted_app(&path);
-                        }
+                        let rules = rules.clone();
+                        let removed = tokio::task::spawn_blocking(move || {
+                            let removed = store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .forget_app(&path);
+                            #[cfg(target_os = "linux")]
+                            if removed {
+                                rules
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .forget_trusted_app(&path);
+                            }
+                            removed
+                        })
+                        .await
+                        .unwrap_or(false);
                         reply(
                             &mut send,
                             req,
@@ -205,67 +221,83 @@ async fn handle(
                         reply(&mut send, req, Reply::Alerts(list)).await?;
                     }
                     ClientMessage::AckAlert { req, id } => {
-                        store.lock().unwrap_or_else(|e| e.into_inner()).ack_alert(id);
+                        let store = store.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            store.lock().unwrap_or_else(|e| e.into_inner()).ack_alert(id);
+                        })
+                        .await;
                         reply(&mut send, req, Reply::Ok).await?;
                     }
                     ClientMessage::DecideAlert { req, id, action } => {
-                        let alert = store
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .list_alerts(true)
-                            .into_iter()
-                            .find(|alert| alert.id == id);
-                        let result = match alert.map(|alert| alert.kind) {
-                            Some(AlertKind::NewApp { app, direction, .. }) => {
-                                let path = app.0.clone();
-                                // on windows a block is a SYSTEM wfp filter, the
-                                // same privileged change as AddRule, so it is not
-                                // accepted on this unprivileged pipe: the UI routes
-                                // a block through the elevated admin channel. an
-                                // allow needs no filter (enforcement is allow by
-                                // default) so it is only recorded. on linux the
-                                // root engine holds the connection and applies the
-                                // rule directly for either verdict.
-                                #[cfg(windows)]
-                                {
-                                    let _ = &direction;
-                                    match action {
-                                        RuleAction::Block => Reply::Error(
-                                            "blocking a connection requires elevation".into(),
-                                        ),
-                                        RuleAction::Allow => {
-                                            let store =
-                                                store.lock().unwrap_or_else(|e| e.into_inner());
-                                            store.set_app_decision(&path, action);
-                                            store.ack_alert(id);
-                                            Reply::Ok
+                        // the linux accept path spawns and waits on nft, so run the
+                        // whole decision on the blocking pool, off the reactor
+                        let store = store.clone();
+                        #[cfg(not(windows))]
+                        let rules = rules.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            let alert = store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .list_alerts(true)
+                                .into_iter()
+                                .find(|alert| alert.id == id);
+                            match alert.map(|alert| alert.kind) {
+                                Some(AlertKind::NewApp { app, direction, .. }) => {
+                                    let path = app.0.clone();
+                                    // on windows a block is a SYSTEM wfp filter, the
+                                    // same privileged change as AddRule, so it is not
+                                    // accepted on this unprivileged pipe: the UI routes
+                                    // a block through the elevated admin channel. an
+                                    // allow needs no filter (enforcement is allow by
+                                    // default) so it is only recorded. on linux the
+                                    // root engine holds the connection and applies the
+                                    // rule directly for either verdict.
+                                    #[cfg(windows)]
+                                    {
+                                        let _ = &direction;
+                                        match action {
+                                            RuleAction::Block => Reply::Error(
+                                                "blocking a connection requires elevation".into(),
+                                            ),
+                                            RuleAction::Allow => {
+                                                let store =
+                                                    store.lock().unwrap_or_else(|e| e.into_inner());
+                                                store.set_app_decision(&path, action);
+                                                store.ack_alert(id);
+                                                Reply::Ok
+                                            }
+                                        }
+                                    }
+                                    #[cfg(not(windows))]
+                                    {
+                                        let rule = Rule {
+                                            app,
+                                            direction: direction.unwrap_or(Direction::Outbound),
+                                            action,
+                                            label: None,
+                                        };
+                                        match rules.lock().unwrap_or_else(|e| e.into_inner()).add(rule)
+                                        {
+                                            Ok(_) => {
+                                                let store =
+                                                    store.lock().unwrap_or_else(|e| e.into_inner());
+                                                store.set_app_decision(&path, action);
+                                                store.ack_alert(id);
+                                                Reply::Ok
+                                            }
+                                            Err(error) => Reply::Error(format!(
+                                                "could not apply decision: {error}"
+                                            )),
                                         }
                                     }
                                 }
-                                #[cfg(not(windows))]
-                                {
-                                    let rule = Rule {
-                                        app,
-                                        direction: direction.unwrap_or(Direction::Outbound),
-                                        action,
-                                        label: None,
-                                    };
-                                    match rules.lock().unwrap_or_else(|e| e.into_inner()).add(rule) {
-                                        Ok(_) => {
-                                            let store =
-                                                store.lock().unwrap_or_else(|e| e.into_inner());
-                                            store.set_app_decision(&path, action);
-                                            store.ack_alert(id);
-                                            Reply::Ok
-                                        }
-                                        Err(error) => {
-                                            Reply::Error(format!("could not apply decision: {error}"))
-                                        }
-                                    }
-                                }
+                                _ => Reply::Error("connection decision is no longer pending".into()),
                             }
-                            _ => Reply::Error("connection decision is no longer pending".into()),
-                        };
+                        })
+                        .await
+                        .unwrap_or_else(|_| {
+                            Reply::Error("the engine could not apply the decision".into())
+                        });
                         reply(&mut send, req, result).await?;
                     }
                     ClientMessage::KillConnection { req, local_port, remote_addr, remote_port } => {
@@ -279,8 +311,12 @@ async fn handle(
                     }
                     ClientMessage::GetEnrichment { req, targets } => {
                         // cache-only read; a miss is filled by the monitor's
-                        // resolve-and-push path, so this never blocks on an enricher
-                        let anns = enrich.cached_for(&targets);
+                        // resolve-and-push path, so this never blocks on an enricher.
+                        // still off the reactor, since targets is client-sized
+                        let enrich = enrich.clone();
+                        let anns = tokio::task::spawn_blocking(move || enrich.cached_for(&targets))
+                            .await
+                            .unwrap_or_default();
                         reply(&mut send, req, Reply::Enrichment(anns)).await?;
                     }
                     ClientMessage::ListPlugins { req } => {
@@ -347,15 +383,22 @@ async fn handle(
                     ClientMessage::ResolveProposal { req, id, accept } => {
                         let result = if accept {
                             Reply::Error("accepting a proposal requires elevation".into())
-                        } else if store
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .resolve_proposal(id, false)
-                            .is_some()
-                        {
-                            Reply::Ok
                         } else {
-                            Reply::Error("no pending proposal with that id".into())
+                            let store = store.clone();
+                            let resolved = tokio::task::spawn_blocking(move || {
+                                store
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .resolve_proposal(id, false)
+                                    .is_some()
+                            })
+                            .await
+                            .unwrap_or(false);
+                            if resolved {
+                                Reply::Ok
+                            } else {
+                                Reply::Error("no pending proposal with that id".into())
+                            }
                         };
                         reply(&mut send, req, result).await?;
                     }

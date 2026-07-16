@@ -75,35 +75,45 @@ pub fn spawn(
             tokio::time::sleep(Duration::from_secs(1)).await;
             let now = now_ms();
             #[cfg(target_os = "linux")]
-            let pending = rules
-                .lock()
-                .map(|rules| rules.take_pending_connections())
-                .unwrap_or_default();
-            #[cfg(target_os = "linux")]
-            for connection in pending {
-                let alert = {
+            {
+                let pending = rules
+                    .lock()
+                    .map(|rules| rules.take_pending_connections())
+                    .unwrap_or_default();
+                if !pending.is_empty() {
+                    // dedup the whole batch against alerts already awaiting a
+                    // decision with a single alert query, not one per connection
                     let store = store.lock().unwrap_or_else(|error| error.into_inner());
-                    store.ensure_app(connection.app.as_str(), None, now);
-                    let already_pending = store.list_alerts(true).into_iter().any(|alert| {
-                        matches!(
-                            alert.kind,
-                            AlertKind::NewApp { ref app, direction, .. }
-                                if app == &connection.app && direction == Some(connection.direction)
-                        )
-                    });
-                    (!already_pending).then(|| {
-                        store.insert_alert(
-                            &AlertKind::NewApp {
-                                app: connection.app,
-                                remote: Some(connection.remote),
-                                direction: Some(connection.direction),
-                            },
-                            now,
-                        )
-                    })
-                };
-                if let Some(alert) = alert {
-                    engine.publish(ServerMessage::Alert(alert));
+                    let mut seen: HashSet<(iris_core::AppId, iris_core::Direction)> = store
+                        .list_alerts(true)
+                        .into_iter()
+                        .filter_map(|alert| match alert.kind {
+                            AlertKind::NewApp {
+                                app,
+                                direction: Some(direction),
+                                ..
+                            } => Some((app, direction)),
+                            _ => None,
+                        })
+                        .collect();
+                    let mut fresh = Vec::new();
+                    for connection in pending {
+                        store.ensure_app(connection.app.as_str(), None, now);
+                        if seen.insert((connection.app.clone(), connection.direction)) {
+                            fresh.push(store.insert_alert(
+                                &AlertKind::NewApp {
+                                    app: connection.app,
+                                    remote: Some(connection.remote),
+                                    direction: Some(connection.direction),
+                                },
+                                now,
+                            ));
+                        }
+                    }
+                    drop(store);
+                    for alert in fresh {
+                        engine.publish(ServerMessage::Alert(alert));
+                    }
                 }
             }
             let tick = tracker.tick(now);

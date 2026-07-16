@@ -14,7 +14,7 @@ const GRACE_MS: u64 = 20_000;
 /// short-lived connections do not make the view churn every second
 const CONN_GRACE_MS: u64 = 4_000;
 
-type ConnKey = (String, u16, u16);
+type ConnKey = (std::net::IpAddr, u16, u16);
 
 /// lock the shared aggregator, recovering the guard if the ETW callback thread
 /// panicked while holding it. the accumulator is just byte counters, so a
@@ -85,7 +85,7 @@ impl Tracker {
             self.pid_path.insert(*pid, path.clone());
             let hist = self.conn_history.entry(*pid).or_default();
             for c in conns {
-                let key = (c.remote.addr.to_string(), c.remote.port, c.local_port);
+                let key = (c.remote.addr, c.remote.port, c.local_port);
                 hist.insert(key, (c.clone(), now));
             }
         }

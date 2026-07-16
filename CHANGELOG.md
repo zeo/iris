@@ -10,8 +10,8 @@ First public release.
 
 ### Added
 
-- MIT and Apache-2.0 license files, a NOTICE for the bundled DB-IP data, and
-  contributor, security, and code-of-conduct docs.
+- First public release of iris, a native firewall and network monitor for Windows and Linux.
+- MIT and Apache-2.0 license files, a NOTICE for the bundled DB-IP data, and contributor, security, and code-of-conduct docs.
 
 ### Fixed
 

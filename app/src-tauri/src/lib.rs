@@ -107,7 +107,9 @@ fn fit_main_window(app: &tauri::AppHandle) {
     let available_width = (f64::from(work.width) / scale - 32.0).max(640.0);
     let available_height = (f64::from(work.height) / scale - 32.0).max(480.0);
     let webview_scale = prompt::webview_scale();
-    let (width, min_width) = main_dimension(1180.0, 820.0, available_width, webview_scale);
+    // the widest tab (Protect's 7-column table) needs ~1080 logical px before its
+  // fixed columns overflow and clip, so hold the window minimum there
+  let (width, min_width) = main_dimension(1180.0, 1080.0, available_width, webview_scale);
     let (height, min_height) = main_dimension(820.0, 600.0, available_height, webview_scale);
     // under the fractional-scaling workaround (GDK_SCALE=1) the computed sizes are
     // already physical pixels; set_size(LogicalSize) would divide the 1.5x back out

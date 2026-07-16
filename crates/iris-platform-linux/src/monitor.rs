@@ -970,4 +970,62 @@ mod tests {
         };
         assert_eq!(byte_delta(400, 700, Some(&base), true), (100, 200));
     }
+
+    // a dns response for example.com whose single answer is an A record for the
+    // given rdata, the answer name compressed back to the question at offset 12
+    fn a_response(rtype: u16, rdata: &[u8]) -> Vec<u8> {
+        let mut m = vec![0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0, 0, 0, 0];
+        m.push(7);
+        m.extend_from_slice(b"example");
+        m.push(3);
+        m.extend_from_slice(b"com");
+        m.push(0);
+        m.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+        m.extend_from_slice(&[0xc0, 0x0c]);
+        m.extend_from_slice(&rtype.to_be_bytes());
+        m.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x01, 0x2c]);
+        m.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        m.extend_from_slice(rdata);
+        m
+    }
+
+    #[test]
+    fn records_a_and_aaaa_answers_under_the_queried_name() {
+        let map = dns::new_map();
+        parse_dns_message(&a_response(1, &[1, 2, 3, 4]), &map);
+        parse_dns_message(&a_response(28, &[0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), &map);
+        assert_eq!(dns::lookup(&map, &IpAddr::from([1, 2, 3, 4])).as_deref(), Some("example.com"));
+        assert_eq!(
+            dns::lookup(&map, &IpAddr::from([0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])).as_deref(),
+            Some("example.com")
+        );
+    }
+
+    #[test]
+    fn malformed_dns_is_dropped_without_panicking() {
+        let map = dns::new_map();
+        // a compression pointer that jumps to itself must terminate, not hang
+        let mut loopy = vec![0, 0, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0, 0, 0, 0];
+        loopy.extend_from_slice(&[1, b'a', 0, 0x00, 0x01, 0x00, 0x01]);
+        let here = loopy.len() as u8;
+        loopy.extend_from_slice(&[0xc0, here]);
+        parse_dns_message(&loopy, &map);
+
+        // rdlen that runs past the buffer, both slightly and wildly
+        let mut trunc = a_response(1, &[1, 2, 3, 4]);
+        trunc.truncate(trunc.len() - 2);
+        parse_dns_message(&trunc, &map);
+        let mut over = a_response(1, &[1, 2, 3, 4]);
+        let n = over.len();
+        over[n - 6] = 0xff;
+        over[n - 5] = 0xff;
+        parse_dns_message(&over, &map);
+
+        // headers too short to hold counts or a question
+        parse_dns_message(&[], &map);
+        parse_dns_message(&[0u8; 4], &map);
+
+        // none of the malformed inputs should have recorded anything
+        assert!(dns::lookup(&map, &IpAddr::from([1, 2, 3, 4])).is_none());
+    }
 }

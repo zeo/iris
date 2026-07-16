@@ -1,0 +1,19 @@
+Iris
+Copyright 2026 rot
+
+This product is licensed under either of Apache License, Version 2.0 or the MIT
+license, at your option. See LICENSE-APACHE and LICENSE-MIT.
+
+Third-party data bundled with the application:
+
+IP-to-Country data
+  DB-IP IP to Country Lite
+  https://db-ip.com/db/download/ip-to-country-lite
+  Licensed under Creative Commons Attribution 4.0 International (CC-BY-4.0):
+  https://creativecommons.org/licenses/by/4.0/
+  Shipped as app/src-tauri/resources/geo/dbip-country.mmdb and credited in the
+  application's Settings > About panel.
+
+The installer and updater artifacts are signed with minisign. The public key is
+embedded in app/src-tauri/tauri.conf.json for update verification; the private
+signing key is held only in CI secrets and is never distributed.

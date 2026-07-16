@@ -197,11 +197,11 @@ pub(crate) mod linux {
 
         #[test]
         fn matches_a_versioned_appimage_by_desktop_identity() {
-            let desktop = "Name=Helium\nExec=/home/one/.local/bin/helium %U\nIcon=net.imput.helium\nStartupWMClass=helium\n";
+            let desktop = "Name=Example\nExec=/home/user/.local/bin/example %U\nIcon=org.example.app\nStartupWMClass=example\n";
             assert!(desktop_matches(
                 desktop,
-                "/home/one/Downloads/helium-0.14.5.1-x86_64.AppImage",
-                "helium-0.14.5.1-x86_64.AppImage"
+                "/home/user/Downloads/example-1.0.0-x86_64.AppImage",
+                "example-1.0.0-x86_64.AppImage"
             ));
         }
 

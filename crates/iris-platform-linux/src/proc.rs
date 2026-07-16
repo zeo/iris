@@ -199,31 +199,31 @@ mod tests {
     #[test]
     fn maps_a_mounted_appimage_child_to_the_bundle() {
         let environ =
-            b"HOME=/home/one\0APPDIR=/tmp/.mount_ReservAbC\0APPIMAGE=/opt/Reservoir.AppImage\0";
+            b"HOME=/home/user\0APPDIR=/tmp/.mount_SampleAbC\0APPIMAGE=/opt/Sample.AppImage\0";
         assert_eq!(
             appimage_from_environ(
-                Path::new("/tmp/.mount_ReservAbC/usr/libexec/WebKitWebProcess"),
+                Path::new("/tmp/.mount_SampleAbC/usr/libexec/WebKitWebProcess"),
                 environ
             ),
-            Some("/opt/Reservoir.AppImage")
+            Some("/opt/Sample.AppImage")
         );
     }
 
     #[test]
     fn ignores_spoofed_or_unrelated_appimage_variables() {
-        let outside = b"APPDIR=/tmp/.mount_ReservAbC\0APPIMAGE=/opt/Reservoir.AppImage\0";
+        let outside = b"APPDIR=/tmp/.mount_SampleAbC\0APPIMAGE=/opt/Sample.AppImage\0";
         assert_eq!(
             appimage_from_environ(Path::new("/usr/bin/browser"), outside),
             None
         );
-        let ordinary_dir = b"APPDIR=/opt/reservoir\0APPIMAGE=/opt/Reservoir.AppImage\0";
+        let ordinary_dir = b"APPDIR=/opt/sample\0APPIMAGE=/opt/Sample.AppImage\0";
         assert_eq!(
-            appimage_from_environ(Path::new("/opt/reservoir/browser"), ordinary_dir),
+            appimage_from_environ(Path::new("/opt/sample/browser"), ordinary_dir),
             None
         );
-        let relative = b"APPDIR=/tmp/.mount_ReservAbC\0APPIMAGE=Reservoir.AppImage\0";
+        let relative = b"APPDIR=/tmp/.mount_SampleAbC\0APPIMAGE=Sample.AppImage\0";
         assert_eq!(
-            appimage_from_environ(Path::new("/tmp/.mount_ReservAbC/usr/bin/browser"), relative),
+            appimage_from_environ(Path::new("/tmp/.mount_SampleAbC/usr/bin/browser"), relative),
             None
         );
     }
@@ -231,8 +231,8 @@ mod tests {
     #[test]
     fn finds_the_temporary_appimage_mount_root() {
         assert_eq!(
-            appimage_mount(Path::new("/tmp/.mount_heliumdEMJGD/opt/helium/helium")),
-            Some(Path::new("/tmp/.mount_heliumdEMJGD"))
+            appimage_mount(Path::new("/tmp/.mount_ExamplefEMJGD/opt/example/example")),
+            Some(Path::new("/tmp/.mount_ExamplefEMJGD"))
         );
         assert_eq!(appimage_mount(Path::new("/usr/bin/browser")), None);
     }
@@ -246,7 +246,7 @@ mod tests {
             "/tmp/.mount_App/usr/libexec/webkit2gtk-4.1/WebKitWebProcess"
         )));
         assert!(!is_webkit_helper(Path::new(
-            "/home/one/WebKitNetworkProcess"
+            "/home/user/WebKitNetworkProcess"
         )));
         assert!(!is_webkit_helper(Path::new(
             "/usr/libexec/webkit2gtk-4.1/MiniBrowser"

@@ -9,13 +9,28 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn configure_linux_display() {
-    if std::env::var_os("GDK_BACKEND").is_some()
-        || std::env::var_os("GDK_SCALE").is_some()
+    // the user is explicitly driving scaling; leave every knob untouched
+    if std::env::var_os("GDK_SCALE").is_some()
         || std::env::var_os("GDK_DPI_SCALE").is_some()
         || std::env::var_os("WINIT_X11_SCALE_FACTOR").is_some()
-        || std::env::var_os("DISPLAY").is_none()
-        || std::env::var("XDG_SESSION_TYPE").as_deref() != Ok("wayland")
     {
+        return;
+    }
+    // we host the webview on the x11 backend (real X11 or XWayland) so we own the
+    // pixel sizing; without an X server there is nothing to fall back to
+    if std::env::var_os("DISPLAY").is_none() {
+        return;
+    }
+    // respect a pinned backend, but x11 is exactly the mode we want, so a desktop
+    // that already forces GDK_BACKEND=x11 (common on KDE) must not skip the fix
+    let backend = std::env::var("GDK_BACKEND").ok();
+    if backend.as_deref().is_some_and(|b| b != "x11") {
+        return;
+    }
+    // meaningful when we can reach x11: a wayland session we push to XWayland, or
+    // a session already on the x11 backend
+    let wayland = std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland");
+    if !wayland && backend.as_deref() != Some("x11") {
         return;
     }
     let Ok(resources) = std::process::Command::new("xrdb").arg("-query").output() else {

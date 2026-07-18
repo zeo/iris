@@ -12,9 +12,20 @@ mod rulectl;
 mod startup;
 mod svcctl;
 
+use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
+
+/// the webview's measured device-pixel-ratio (physical px per CSS px). the
+/// frontend reports it after load so window sizing can multiply CSS sizes by it
+/// and the layout always gets its intended logical width, whatever GTK, XWayland,
+/// or the compositor does to the surface. seeded with a startup guess.
+pub struct DisplayScale(pub Mutex<f64>);
+
+fn valid_scale(scale: f64) -> Option<f64> {
+    (scale.is_finite() && (0.5..=4.0).contains(&scale)).then_some(scale)
+}
 
 /// build and run the Tauri application
 pub fn run() {
@@ -36,6 +47,8 @@ pub fn run() {
         .manage(ipc::StatusState::default())
         .manage(ipc::TickDetailState::default())
         .manage(ipc::Commander(cmd_tx))
+        .manage(DisplayScale(Mutex::new(1.0)))
+        .manage(prompt::PromptCount::default())
         .invoke_handler(tauri::generate_handler![
             ipc::engine_status,
             ipc::set_tick_details,
@@ -45,6 +58,7 @@ pub fn run() {
             ipc::list_alerts,
             ipc::restore_connection_prompts,
             prompt::resize_connection_prompts,
+            report_display_scale,
             ipc::ack_alert,
             ipc::decide_alert,
             ipc::get_usage,
@@ -73,7 +87,22 @@ pub fn run() {
         .setup(move |app| {
             ipc::spawn(app.handle().clone(), cmd_rx);
             build_tray(app.handle())?;
-            fit_main_window(app.handle());
+            // best startup guess before the webview reports its real ratio: the
+            // fractional-scaling env hint if we set one, else the window's own
+            // gtk scale factor. keeps the first paint from flashing under-sized.
+            let initial_scale = {
+                let hint = prompt::webview_scale();
+                if (hint - 1.0).abs() > f64::EPSILON {
+                    hint
+                } else {
+                    app.get_webview_window("main")
+                        .and_then(|w| w.scale_factor().ok())
+                        .filter(|s| s.is_finite() && *s > 0.0)
+                        .unwrap_or(1.0)
+                }
+            };
+            *app.state::<DisplayScale>().0.lock().unwrap() = initial_scale;
+            fit_main_window(app.handle(), initial_scale);
             // a login launch passes --tray so it comes up quietly in the tray
             if std::env::args().any(|a| a == "--tray") {
                 if let Some(win) = app.get_webview_window("main") {
@@ -96,32 +125,55 @@ pub fn run() {
         .expect("error while running Iris");
 }
 
-fn fit_main_window(app: &tauri::AppHandle) {
+/// the webview reports its real device-pixel-ratio once the page loads; re-fit
+/// the reporting window to that truth. sizing in physical pixels (css * ratio)
+/// lands the CSS viewport at the intended logical width whether the surface is
+/// scaled by GTK, XWayland, native wayland, or not at all.
+#[tauri::command]
+fn report_display_scale(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    scale: f64,
+) -> Result<(), String> {
+    let Some(scale) = valid_scale(scale) else {
+        return Ok(());
+    };
+    {
+        let state = app.state::<DisplayScale>();
+        let mut current = state.0.lock().unwrap();
+        // only react to a genuine change: re-fitting on every duplicate report
+        // would fight a window the user has since resized
+        if (*current - scale).abs() < 0.005 {
+            return Ok(());
+        }
+        *current = scale;
+    }
+    match window.label() {
+        "main" => fit_main_window(&app, scale),
+        prompt::LABEL => prompt::apply_scale(&app, scale),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn fit_main_window(app: &tauri::AppHandle, scale: f64) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    let (Ok(Some(monitor)), Ok(scale)) = (window.current_monitor(), window.scale_factor()) else {
+    let Ok(Some(monitor)) = window.current_monitor() else {
         return;
     };
+    // work_area is physical pixels; so are the sizes we set below (css * scale)
     let work = monitor.work_area().size;
-    let available_width = (f64::from(work.width) / scale - 32.0).max(640.0);
-    let available_height = (f64::from(work.height) / scale - 32.0).max(480.0);
-    let webview_scale = prompt::webview_scale();
-    // the widest tab (Protect's 7-column table) needs ~1080 logical px before its
-  // fixed columns overflow and clip, so hold the window minimum there
-  let (width, min_width) = main_dimension(1180.0, 1080.0, available_width, webview_scale);
-    let (height, min_height) = main_dimension(820.0, 600.0, available_height, webview_scale);
-    // under the fractional-scaling workaround (GDK_SCALE=1) the computed sizes are
-    // already physical pixels; set_size(LogicalSize) would divide the 1.5x back out
-    // and leave the content at its base width while webkit renders it 1.5x larger,
-    // which clips. size in physical pixels in that mode, logical otherwise.
-    if (webview_scale - 1.0).abs() < f64::EPSILON {
-        let _ = window.set_min_size(Some(tauri::LogicalSize::new(min_width, min_height)));
-        let _ = window.set_size(tauri::LogicalSize::new(width, height));
-    } else {
-        let _ = window.set_min_size(Some(tauri::PhysicalSize::new(min_width, min_height)));
-        let _ = window.set_size(tauri::PhysicalSize::new(width, height));
-    }
+    let margin = 32.0 * scale;
+    let available_width = (f64::from(work.width) - margin).max(640.0 * scale);
+    let available_height = (f64::from(work.height) - margin).max(480.0 * scale);
+    // the widest tab (Protect's console + rule matrix) needs ~1080 logical px
+    // before its fixed columns overflow and clip, so hold the window minimum there
+    let (width, min_width) = main_dimension(1180.0, 1080.0, available_width, scale);
+    let (height, min_height) = main_dimension(820.0, 600.0, available_height, scale);
+    let _ = window.set_min_size(Some(tauri::PhysicalSize::new(min_width, min_height)));
+    let _ = window.set_size(tauri::PhysicalSize::new(width, height));
     let _ = window.set_resizable(true);
     let _ = window.set_maximizable(true);
 }

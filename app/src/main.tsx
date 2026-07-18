@@ -8,6 +8,7 @@ import "@fontsource/geist-mono/500.css";
 import "@fontsource/newsreader/400-italic.css";
 import { App } from "./App";
 import { ConnectionPrompt } from "./components/ConnectionPrompt";
+import { initDisplayScale } from "./lib/display";
 import "./styles.css";
 
 const root = document.getElementById("root");
@@ -36,5 +37,7 @@ render(
   ),
   root,
 );
+
+initDisplayScale();
 
 document.getElementById("boot")?.remove();

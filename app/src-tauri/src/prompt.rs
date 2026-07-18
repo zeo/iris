@@ -1,19 +1,27 @@
 use iris_core::{Alert, AlertKind};
-use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
 
-const LABEL: &str = "connection-prompts";
+pub(crate) const LABEL: &str = "connection-prompts";
 const CARD_WIDTH: f64 = 420.0;
 const CARD_HEIGHT: f64 = 228.0;
 const CARD_GAP: f64 = 10.0;
-const HOST_PADDING: f64 = 0.0;
 const EDGE_MARGIN: i32 = 18;
 const MAX_VISIBLE: usize = 2;
 
+/// how many prompt cards the host window currently shows; the frontend drives it
+/// through `resize_connection_prompts`, and a later scale change re-reads it
+#[derive(Default)]
+pub struct PromptCount(pub AtomicUsize);
+
 fn stack_height(count: usize) -> f64 {
     let count = count.clamp(1, MAX_VISIBLE) as f64;
-    count * CARD_HEIGHT + (count - 1.0) * CARD_GAP + HOST_PADDING * 2.0
+    count * CARD_HEIGHT + (count - 1.0) * CARD_GAP
 }
 
+/// startup hint for the webview's device-pixel-ratio, from the fractional-scaling
+/// workaround in `main.rs`. the frontend later reports the real ratio, which is
+/// what `DisplayScale` holds; this only seeds the very first prompt.
 pub(crate) fn webview_scale() -> f64 {
     std::env::var("IRIS_X11_WEBVIEW_SCALE")
         .ok()
@@ -22,16 +30,19 @@ pub(crate) fn webview_scale() -> f64 {
         .unwrap_or(1.0)
 }
 
-fn host_width(scale: f64) -> f64 {
-    (CARD_WIDTH + HOST_PADDING * 2.0) * scale
+/// the webview's measured device-pixel-ratio, best known so far
+fn current_scale(app: &tauri::AppHandle) -> f64 {
+    app.try_state::<crate::DisplayScale>()
+        .map(|state| *state.0.lock().unwrap())
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
+        .unwrap_or(1.0)
 }
 
-fn host_height(count: usize, scale: f64) -> f64 {
-    stack_height(count) * scale
-}
-
-fn trailing_edge(origin: i32, available: u32, logical_size: f64, scale: f64) -> i32 {
-    origin + available as i32 - (logical_size * scale).round() as i32 - EDGE_MARGIN
+/// the host window's physical size for `count` cards at `scale`. sizing in
+/// physical pixels (css * ratio) lands the CSS viewport at the card's authored
+/// 420px width whatever the surface scale, so the card never clips.
+fn host_size(count: usize, scale: f64) -> PhysicalSize<f64> {
+    PhysicalSize::new(CARD_WIDTH * scale, stack_height(count) * scale)
 }
 
 pub fn show(app: &tauri::AppHandle, alert: &Alert) {
@@ -49,18 +60,15 @@ fn show_window(app: &tauri::AppHandle) {
         return;
     }
 
-    let scale = webview_scale();
-    let width = host_width(scale);
-    let height = host_height(1, scale);
+    let scale = current_scale(app);
+    let size = host_size(1, scale);
     let Ok(window) = WebviewWindowBuilder::new(
         app,
         LABEL,
         WebviewUrl::App("index.html?connection-prompts=1".into()),
     )
     .title("New network connection")
-    .inner_size(width, height)
-    .min_inner_size(width, height)
-    .max_inner_size(width, host_height(MAX_VISIBLE, scale))
+    .inner_size(CARD_WIDTH, CARD_HEIGHT)
     .resizable(false)
     .decorations(false)
     .transparent(true)
@@ -73,7 +81,9 @@ fn show_window(app: &tauri::AppHandle) {
         return;
     };
 
-    position_window(app, &window, width, height);
+    app.state::<PromptCount>().0.store(1, Ordering::Relaxed);
+    let _ = window.set_size(size);
+    position_window(app, &window, size);
 }
 
 #[tauri::command]
@@ -82,31 +92,40 @@ pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<
         return Ok(());
     };
     if count == 0 {
+        app.state::<PromptCount>().0.store(0, Ordering::Relaxed);
         window.hide().map_err(|error| error.to_string())?;
         return Ok(());
     }
-    let scale = webview_scale();
-    let width = host_width(scale);
-    let height = host_height(count, scale);
+    app.state::<PromptCount>().0.store(count, Ordering::Relaxed);
+    let size = host_size(count, current_scale(&app));
     window
-        .set_size(LogicalSize::new(width, height))
+        .set_size(size)
         .map_err(|error| error.to_string())?;
-    position_window(&app, &window, width, height);
+    position_window(&app, &window, size);
     window.show().map_err(|error| error.to_string())?;
     // re-anchor once the window is mapped: the pre-show placement can be dropped
     // by the compositor before the surface exists (the position reads back as
     // 0,0 until it settles), which strands the host away from the corner
-    position_window(&app, &window, width, height);
+    position_window(&app, &window, size);
     window.set_focus().map_err(|error| error.to_string())?;
     Ok(())
 }
 
-fn position_window(
-    app: &tauri::AppHandle,
-    window: &tauri::WebviewWindow,
-    width: f64,
-    height: f64,
-) {
+/// re-size the open prompt window to a freshly reported device-pixel-ratio
+pub fn apply_scale(app: &tauri::AppHandle, scale: f64) {
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return;
+    };
+    let count = app.state::<PromptCount>().0.load(Ordering::Relaxed);
+    if count == 0 {
+        return;
+    }
+    let size = host_size(count, scale);
+    let _ = window.set_size(size);
+    position_window(app, &window, size);
+}
+
+fn position_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, size: PhysicalSize<f64>) {
     #[cfg(target_os = "linux")]
     if anchor_wayland(app, window) {
         return;
@@ -124,9 +143,16 @@ fn position_window(
     };
     let area = monitor.work_area();
     let scale = monitor.scale_factor();
-    let x = trailing_edge(area.position.x, area.size.width, width, scale);
-    let y = trailing_edge(area.position.y, area.size.height, height, scale);
+    let margin = (EDGE_MARGIN as f64 * scale).round() as i32;
+    let x = trailing_edge(area.position.x, area.size.width, size.width, margin);
+    let y = trailing_edge(area.position.y, area.size.height, size.height, margin);
     let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+/// bottom/right corner of the work area, inset by `margin`, for a window of the
+/// given physical `extent` (already scaled) along that axis
+fn trailing_edge(origin: i32, available: u32, extent: f64, margin: i32) -> i32 {
+    origin + available as i32 - extent.round() as i32 - margin
 }
 
 #[cfg(target_os = "linux")]
@@ -165,7 +191,7 @@ fn anchor_wayland(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{host_height, host_width, stack_height, trailing_edge};
+    use super::{host_size, stack_height, trailing_edge};
 
     #[test]
     fn sizes_the_visible_prompt_stack_without_exceeding_two_cards() {
@@ -175,15 +201,17 @@ mod tests {
     }
 
     #[test]
-    fn positions_from_the_requested_stack_height() {
-        assert_eq!(trailing_edge(0, 720, stack_height(2), 1.0), 236);
-        assert_eq!(trailing_edge(40, 1080, stack_height(2), 1.5), 403);
+    fn anchors_a_physical_size_to_the_work_area_corner() {
+        // origin + available - extent - margin
+        assert_eq!(trailing_edge(0, 720, 466.0, 18), 236);
+        assert_eq!(trailing_edge(40, 1080, 699.0, 27), 394);
     }
 
     #[test]
-    fn expands_the_native_host_for_fractional_webview_scale() {
-        assert_eq!(host_width(1.5), 630.0);
-        assert_eq!(host_height(1, 1.5), 342.0);
-        assert_eq!(host_height(2, 1.5), 699.0);
+    fn scales_the_host_in_physical_pixels() {
+        let one = host_size(1, 1.5);
+        assert_eq!((one.width, one.height), (630.0, 342.0));
+        let two = host_size(2, 1.5);
+        assert_eq!((two.width, two.height), (630.0, 699.0));
     }
 }

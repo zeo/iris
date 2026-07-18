@@ -14,13 +14,21 @@ pub fn save_download(
         .path()
         .download_dir()
         .map_err(|_| "could not locate the Downloads folder".to_string())?;
-    // strip any path separators from the caller's name so the file can only land
-    // inside Downloads, never at an attacker-chosen path
-    let safe = name
-        .rsplit(['\\', '/'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("iris-export.csv");
+    // the caller controls `name`; keep the write inside Downloads and reject
+    // anything that could escape it, target an NTFS alternate data stream, or drop
+    // a hidden control file. only the two export formats the UI produces are let
+    // through, so a stray or hostile name falls back to a fixed safe filename.
+    let base = name.rsplit(['\\', '/']).next().unwrap_or_default();
+    let ext_ok = std::path::Path::new(base)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("csv") || ext.eq_ignore_ascii_case("json"));
+    let clean = !base.is_empty()
+        && base != "."
+        && !base.contains("..")
+        && !base.contains(':')
+        && !base.chars().any(char::is_control);
+    let safe = if clean && ext_ok { base } else { "iris-export.csv" };
     let path = dir.join(safe);
     std::fs::write(&path, contents).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())

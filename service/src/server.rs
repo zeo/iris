@@ -48,12 +48,19 @@ pub async fn serve(
             }
         };
         #[cfg(target_os = "linux")]
-        if !authorized_linux_peer(&conn)? {
-            tracing::warn!(
-                uid = transport::peer_euid(&conn)?,
-                "refusing unauthorized client"
-            );
-            continue;
+        match authorized_linux_peer(&conn) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(uid = ?transport::peer_euid(&conn).ok(), "refusing unauthorized client");
+                continue;
+            }
+            Err(e) => {
+                // a peer we cannot authorize (unreadable creds, or the desktop-uid
+                // file missing/corrupt) is denied, never fatal: propagating here
+                // would drop the whole engine and crash-loop it under systemd
+                tracing::warn!("refusing client, authorization check failed: {e}");
+                continue;
+            }
         }
         let permit = match Arc::clone(&slots).try_acquire_owned() {
             Ok(permit) => permit,

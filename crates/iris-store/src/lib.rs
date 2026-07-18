@@ -428,6 +428,18 @@ impl Store {
                 0
             }
         };
+        if id > 0 {
+            // keep the alert log bounded: acknowledged alerts are history, so retain
+            // only the most recent, while unacknowledged ones stay until acted on.
+            // without this the table grows for the life of the install (nothing else
+            // ever deletes from it)
+            const KEEP_ACKED_ALERTS: i64 = 1000;
+            let _ = self.conn.execute(
+                "DELETE FROM alerts WHERE acknowledged = 1 AND id NOT IN \
+                 (SELECT id FROM alerts WHERE acknowledged = 1 ORDER BY id DESC LIMIT ?1)",
+                params![KEEP_ACKED_ALERTS],
+            );
+        }
         Alert {
             id,
             at_ms,

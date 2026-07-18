@@ -13,6 +13,11 @@ use std::time::{Duration, Instant};
 /// repeat lookups (a drawer reopened, the same host seen again) off the enrichers
 const TTL: Duration = Duration::from_secs(3600);
 
+/// cap the cache so a long-running engine on a host that talks to many distinct
+/// endpoints does not accumulate one entry per remote ever seen; annotations are
+/// cheap to recompute, so bounding memory beats unbounded retention
+const MAX_CACHE: usize = 4096;
+
 struct Cached {
     annotations: Vec<Annotation>,
     at: Instant,
@@ -76,13 +81,24 @@ impl EnrichmentRegistry {
             }
         }
 
-        self.cache.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= MAX_CACHE {
+            // reclaim stale entries first, then fall back to evicting the oldest
+            cache.retain(|_, c| c.at.elapsed() < TTL);
+            if cache.len() >= MAX_CACHE {
+                if let Some(oldest) = cache.iter().min_by_key(|(_, c)| c.at).map(|(k, _)| k.clone()) {
+                    cache.remove(&oldest);
+                }
+            }
+        }
+        cache.insert(
             target.clone(),
             Cached {
                 annotations: annotations.clone(),
                 at: Instant::now(),
             },
         );
+        drop(cache);
         annotations
     }
 }

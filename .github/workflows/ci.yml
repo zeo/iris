@@ -41,6 +41,17 @@ jobs:
           # dir has dead absolute paths in its build-script binaries and dep-info files
           # and the build fails on them; cache the cargo registry only, rebuild target
           cache-targets: "false"
+      - name: repair partial cargo source extraction
+        shell: pwsh
+        run: |
+          # this runner shares one cargo home across jobs, and a run cancelled
+          # mid-extraction (cancel-in-progress) can leave a crate source tree
+          # incomplete, e.g. windows_x86_64_msvc missing windows.0.52.0.lib, which
+          # later fails the engine link with LNK1181. drop the extracted sources so
+          # cargo re-expands them from the cached .crate archives; the download
+          # cache (registry/cache) and index are untouched, so this stays cheap.
+          $src = Join-Path $env:USERPROFILE '.cargo\registry\src'
+          if (Test-Path $src) { Remove-Item $src -Recurse -Force }
       - uses: pnpm/action-setup@v4
         with:
           version: 9

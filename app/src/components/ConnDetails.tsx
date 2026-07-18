@@ -32,20 +32,31 @@ export function ConnDetails(props: { app: string; conn: Conn; onClose: () => voi
     if ("Badge" in a.value) return a.value.Badge;
     return a.value.Link.label;
   };
+  // plugin-supplied links are only ever opened as http(s); a plugin cannot drive
+  // the system handler to file:, custom-scheme, or javascript: targets
+  const openExternal = (raw: string) => {
+    try {
+      const url = new URL(raw);
+      if (url.protocol === "http:" || url.protocol === "https:") void openUrl(url.href);
+    } catch {
+      /* not a usable url */
+    }
+  };
   const annClick = (a: Annotation) => {
-    if ("Link" in a.value) openUrl(a.value.Link.url);
+    if ("Link" in a.value) openExternal(a.value.Link.url);
   };
 
   const [killed, setKilled] = createSignal(false);
   const [killErr, setKillErr] = createSignal("");
   const remote = () => `${props.conn.remote.addr}:${props.conn.remote.port}`;
   const copy = () => navigator.clipboard?.writeText(remote()).catch(() => {});
-  const whois = () => openUrl(`https://who.is/whois-ip/ip-address/${props.conn.remote.addr}`);
+  const whois = () =>
+    openUrl(`https://who.is/whois-ip/ip-address/${encodeURIComponent(props.conn.remote.addr)}`);
   const virustotal = () =>
     openUrl(
       props.conn.host
-        ? `https://www.virustotal.com/gui/domain/${props.conn.host}`
-        : `https://www.virustotal.com/gui/ip-address/${props.conn.remote.addr}`,
+        ? `https://www.virustotal.com/gui/domain/${encodeURIComponent(props.conn.host)}`
+        : `https://www.virustotal.com/gui/ip-address/${encodeURIComponent(props.conn.remote.addr)}`,
     );
   const kill = async () => {
     setKillErr("");

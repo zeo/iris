@@ -36,6 +36,11 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # the ephemeral vms use a per-run _work/vm-<id> path, so a restored target
+          # dir has dead absolute paths in its build-script binaries and dep-info files
+          # and the build fails on them; cache the cargo registry only, rebuild target
+          cache-targets: "false"
       - uses: pnpm/action-setup@v4
         with:
           version: 9
@@ -81,6 +86,11 @@ jobs:
           echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
           dirname "$(rustup which cargo)" | tee -a "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # the ephemeral vms use a per-run _work/vm-<id> path, so a restored target
+          # dir has dead absolute paths in its build-script binaries and dep-info files
+          # and the build fails on them; cache the cargo registry only, rebuild target
+          cache-targets: "false"
       - name: system deps
         run: |
           sudo apt-get update -qq
@@ -122,6 +132,11 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # the ephemeral vms use a per-run _work/vm-<id> path, so a restored target
+          # dir has dead absolute paths in its build-script binaries and dep-info files
+          # and the build fails on them; cache the cargo registry only, rebuild target
+          cache-targets: "false"
       - name: install cargo-audit
         uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
         with:

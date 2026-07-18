@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-07-18
+
+### Added
+
+- The Activity table sorts through real buttons that report the current sort to a screen reader, and its connection rows are focusable and open on Enter or Space, so sorting and the per-connection inspect and kill flow work without a mouse.
+- The connection consent prompt is now announced as an alert dialog, and its waiting or failed firewall status is read aloud as it changes.
+- Segmented filter and action toggles report their pressed state, and the app and activity search boxes have accessible names.
+
+### Fixed
+
+- The protect decision menu and the settings number fields show a visible focus ring again when reached by keyboard.
+- Section micro-labels now meet the small-text contrast minimum in both themes.
+
 ## [0.1.4] - 2026-07-16
 
 ### Security

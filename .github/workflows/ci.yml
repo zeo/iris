@@ -42,7 +42,7 @@ jobs:
           # and the build fails on them; cache the cargo registry only, rebuild target
           cache-targets: "false"
       - name: repair partial cargo source extraction
-        shell: pwsh
+        shell: powershell
         run: |
           # this runner shares one cargo home across jobs, and a run cancelled
           # mid-extraction (cancel-in-progress) can leave a crate source tree

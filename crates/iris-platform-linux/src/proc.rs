@@ -54,9 +54,11 @@ pub fn image_path_of(pid: u32) -> Option<String> {
         s = stripped.to_string();
     }
     if let Ok(environ) = fs::read(format!("/proc/{pid}/environ")) {
-        if let Some(appimage) = appimage_from_environ(Path::new(&s), &environ) {
-            if fs::metadata(appimage).is_ok_and(|metadata| metadata.is_file()) {
-                return Some(appimage.to_owned());
+        if let Some(claim) = appimage_from_environ(Path::new(&s), &environ) {
+            if is_appimage_mount(pid, claim.appdir)
+                && fs::metadata(claim.appimage).is_ok_and(|metadata| metadata.is_file())
+            {
+                return Some(claim.appimage.to_owned());
             }
         }
     }
@@ -71,7 +73,15 @@ pub fn image_path_of(pid: u32) -> Option<String> {
     Some(s)
 }
 
-fn appimage_from_environ<'a>(target: &Path, environ: &'a [u8]) -> Option<&'a str> {
+/// an AppImage identity claimed by a process's `APPDIR`/`APPIMAGE` environment.
+/// the values are attacker-controllable, so the caller must still confirm
+/// `appdir` is a real AppImage mount (`is_appimage_mount`) before trusting it.
+struct AppImageClaim<'a> {
+    appdir: &'a Path,
+    appimage: &'a str,
+}
+
+fn appimage_from_environ<'e>(target: &Path, environ: &'e [u8]) -> Option<AppImageClaim<'e>> {
     let variable = |name: &[u8]| {
         environ
             .split(|byte| *byte == 0)
@@ -84,7 +94,30 @@ fn appimage_from_environ<'a>(target: &Path, environ: &'a [u8]) -> Option<&'a str
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with(".mount_"));
-    (mounted && target.starts_with(appdir) && Path::new(appimage).is_absolute()).then_some(appimage)
+    (mounted && target.starts_with(appdir) && Path::new(appimage).is_absolute())
+        .then_some(AppImageClaim { appdir, appimage })
+}
+
+/// whether `dir` is the mount point of an AppImage fuse mount in the target
+/// process's namespace. a process can set `APPDIR`/`APPIMAGE` to borrow a trusted
+/// AppImage's identity (and its firewall rules), so we only trust them when APPDIR
+/// is a genuine fuse mount, not a plain directory any process can mkdir. reading
+/// the target's own mountinfo keeps this correct regardless of the engine
+/// service's mount namespace. forging a fuse mount is a much higher bar than a
+/// bare directory, though not an absolute guarantee.
+fn is_appimage_mount(pid: u32, dir: &Path) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/mountinfo"))
+        .is_ok_and(|mountinfo| mountinfo_declares_fuse_mount(&mountinfo, dir))
+}
+
+fn mountinfo_declares_fuse_mount(mountinfo: &str, dir: &Path) -> bool {
+    mountinfo.lines().any(|line| {
+        // fields: id parent major:minor root MOUNTPOINT opts [optional...] - fstype ..
+        let mount_point = line.split(' ').nth(4);
+        let fstype = line.split(" - ").nth(1).and_then(|tail| tail.split(' ').next());
+        mount_point.is_some_and(|point| Path::new(point) == dir)
+            && fstype.is_some_and(|fstype| fstype.starts_with("fuse"))
+    })
 }
 
 fn appimage_from_ancestors(pid: u32, target: &Path) -> Option<String> {
@@ -92,9 +125,11 @@ fn appimage_from_ancestors(pid: u32, target: &Path) -> Option<String> {
     let mut ancestor = parent_pid(pid)?;
     for _ in 0..12 {
         if let Ok(environ) = fs::read(format!("/proc/{ancestor}/environ")) {
-            if let Some(appimage) = appimage_from_environ(target, &environ) {
-                if fs::metadata(appimage).is_ok_and(|metadata| metadata.is_file()) {
-                    return Some(appimage.to_owned());
+            if let Some(claim) = appimage_from_environ(target, &environ) {
+                if is_appimage_mount(ancestor, claim.appdir)
+                    && fs::metadata(claim.appimage).is_ok_and(|metadata| metadata.is_file())
+                {
+                    return Some(claim.appimage.to_owned());
                 }
             }
         }
@@ -193,39 +228,46 @@ fn parse_socket_inode(link: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{appimage_from_environ, appimage_mount, is_webkit_helper};
+    use super::{
+        appimage_from_environ, appimage_mount, is_webkit_helper, mountinfo_declares_fuse_mount,
+    };
     use std::path::Path;
 
     #[test]
     fn maps_a_mounted_appimage_child_to_the_bundle() {
         let environ =
             b"HOME=/home/user\0APPDIR=/tmp/.mount_SampleAbC\0APPIMAGE=/opt/Sample.AppImage\0";
-        assert_eq!(
-            appimage_from_environ(
-                Path::new("/tmp/.mount_SampleAbC/usr/libexec/WebKitWebProcess"),
-                environ
-            ),
-            Some("/opt/Sample.AppImage")
+        let claim = appimage_from_environ(
+            Path::new("/tmp/.mount_SampleAbC/usr/libexec/WebKitWebProcess"),
+            environ,
         );
+        assert_eq!(claim.map(|claim| claim.appimage), Some("/opt/Sample.AppImage"));
     }
 
     #[test]
     fn ignores_spoofed_or_unrelated_appimage_variables() {
         let outside = b"APPDIR=/tmp/.mount_SampleAbC\0APPIMAGE=/opt/Sample.AppImage\0";
-        assert_eq!(
-            appimage_from_environ(Path::new("/usr/bin/browser"), outside),
-            None
-        );
+        assert!(appimage_from_environ(Path::new("/usr/bin/browser"), outside).is_none());
         let ordinary_dir = b"APPDIR=/opt/sample\0APPIMAGE=/opt/Sample.AppImage\0";
-        assert_eq!(
-            appimage_from_environ(Path::new("/opt/sample/browser"), ordinary_dir),
-            None
-        );
+        assert!(appimage_from_environ(Path::new("/opt/sample/browser"), ordinary_dir).is_none());
         let relative = b"APPDIR=/tmp/.mount_SampleAbC\0APPIMAGE=Sample.AppImage\0";
-        assert_eq!(
-            appimage_from_environ(Path::new("/tmp/.mount_SampleAbC/usr/bin/browser"), relative),
-            None
+        assert!(
+            appimage_from_environ(Path::new("/tmp/.mount_SampleAbC/usr/bin/browser"), relative)
+                .is_none()
         );
+    }
+
+    #[test]
+    fn trusts_only_a_fuse_mount_at_the_appdir() {
+        let dir = Path::new("/tmp/.mount_SampleAbC");
+        let mounts = "36 35 0:32 / /tmp/.mount_SampleAbC ro,nosuid shared:1 - fuse.iris iris ro\n\
+                      22 21 0:21 / /tmp rw shared:2 - tmpfs tmpfs rw\n";
+        assert!(mountinfo_declares_fuse_mount(mounts, dir));
+        // a directory that is not a mount point at all is rejected
+        assert!(!mountinfo_declares_fuse_mount(mounts, Path::new("/tmp/.mount_Fake")));
+        // a non-fuse mount conjured at the path (e.g. a bind mount) is rejected
+        let bind = "40 35 0:33 / /tmp/.mount_SampleAbC rw - ext4 /dev/sda1 rw\n";
+        assert!(!mountinfo_declares_fuse_mount(bind, dir));
     }
 
     #[test]

@@ -259,6 +259,13 @@ async fn handle(
                                     // default) so it is only recorded. on linux the
                                     // root engine holds the connection and applies the
                                     // rule directly for either verdict.
+                                    //
+                                    // deciding a pending prompt is deliberately not gated
+                                    // behind polkit the way general rule edits (the admin
+                                    // pipe) are: it is the interactive answer to a prompt
+                                    // the user is already looking at, bounded to that one
+                                    // pending alert, so a password on every allow/block
+                                    // click would only punish the common path.
                                     #[cfg(windows)]
                                     {
                                         let _ = &direction;

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 /// periodically by the monitor to bound the window in which pid reuse could
 /// misattribute traffic to the wrong app.
 pub struct PidCache {
-    map: HashMap<u32, Option<String>>,
+    map: HashMap<u32, String>,
 }
 
 impl PidCache {
@@ -22,11 +22,20 @@ impl PidCache {
     }
 
     pub fn resolve(&mut self, pid: u32) -> Option<String> {
+        self.resolve_with(pid, image_path_of)
+    }
+
+    fn resolve_with<F>(&mut self, pid: u32, resolve: F) -> Option<String>
+    where
+        F: FnOnce(u32) -> Option<String>,
+    {
         if let Some(hit) = self.map.get(&pid) {
-            return hit.clone();
+            return Some(hit.clone());
         }
-        let path = image_path_of(pid);
-        self.map.insert(pid, path.clone());
+        let path = resolve(pid);
+        if let Some(path) = &path {
+            self.map.insert(pid, path.clone());
+        }
         path
     }
 
@@ -230,8 +239,33 @@ fn parse_socket_inode(link: &str) -> Option<u64> {
 mod tests {
     use super::{
         appimage_from_environ, appimage_mount, is_webkit_helper, mountinfo_declares_fuse_mount,
+        PidCache,
     };
+    use std::cell::Cell;
     use std::path::Path;
+
+    #[test]
+    fn retries_an_executable_that_was_unavailable_during_a_proc_race() {
+        let mut cache = PidCache::new();
+        let calls = Cell::new(0);
+        assert_eq!(
+            cache.resolve_with(42, |_| {
+                calls.set(calls.get() + 1);
+                None
+            }),
+            None
+        );
+        assert_eq!(
+            cache
+                .resolve_with(42, |pid| {
+                    calls.set(calls.get() + 1);
+                    Some(format!("/proc/{pid}/exe"))
+                })
+                .as_deref(),
+            Some("/proc/42/exe")
+        );
+        assert_eq!(calls.get(), 2);
+    }
 
     #[test]
     fn maps_a_mounted_appimage_child_to_the_bundle() {

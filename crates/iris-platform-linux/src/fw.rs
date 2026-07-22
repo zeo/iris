@@ -876,6 +876,8 @@ mod packet_tests {
     use iris_core::Protocol;
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::Duration;
 
     #[test]
@@ -948,5 +950,34 @@ mod packet_tests {
             resolver.cached_exe(local).as_deref(),
             Some(expected.as_str())
         );
+    }
+
+    #[test]
+    fn resolver_attributes_a_live_socket_before_the_next_monitor_tick() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let (ready, local) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let client = thread::spawn(move || {
+            let socket = std::net::TcpStream::connect(endpoint).unwrap();
+            ready.send(socket.local_addr().unwrap()).unwrap();
+            wait.recv().unwrap();
+        });
+        let _server = listener.accept().unwrap().0;
+        let local = local.recv().unwrap();
+
+        let mut resolver = Resolver::new();
+        resolver.refresh_live();
+        let expected = std::fs::read_link(format!("/proc/{}/exe", std::process::id()))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            resolver.cached_exe((local.ip(), local.port())).as_deref(),
+            Some(expected.as_str())
+        );
+
+        release.send(()).unwrap();
+        client.join().unwrap();
     }
 }

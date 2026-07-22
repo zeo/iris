@@ -344,20 +344,25 @@ fn ensure_modules() {
 /// priority just before the standard filter hook lets iris decide before a
 /// distro firewall.
 fn install_table() -> EngineResult<()> {
-    let ruleset = format!(
+    run_nft(&ruleset())
+}
+
+fn ruleset() -> String {
+    format!(
         "table inet {TABLE} {{
     chain output {{
         type filter hook output priority -10; policy accept;
+        oifname \"lo\" accept
         ct state new queue num {QUEUE_OUT}
     }}
     chain input {{
         type filter hook input priority -10; policy accept;
+        iifname \"lo\" accept
         ct state new queue num {QUEUE_IN}
     }}
 }}
 "
-    );
-    run_nft(&ruleset)
+    )
 }
 
 fn remove_table() {
@@ -851,7 +856,10 @@ impl Resolver {
 
 #[cfg(test)]
 mod packet_tests {
-    use super::{attribution_timeout_verdict, parse_tuple, publish_attribution, Resolver};
+    use super::{
+        attribution_timeout_verdict, parse_tuple, publish_attribution, ruleset, Resolver, QUEUE_IN,
+        QUEUE_OUT,
+    };
     use crate::sockets::SockInfo;
     use iris_core::Protocol;
     use std::collections::HashMap;
@@ -861,6 +869,18 @@ mod packet_tests {
     #[test]
     fn unresolved_owner_fails_closed() {
         assert!(matches!(attribution_timeout_verdict(), nfq::Verdict::Drop));
+    }
+
+    #[test]
+    fn loopback_bypasses_both_verdict_queues() {
+        let rules = ruleset();
+        let output_bypass = rules.find("oifname \"lo\" accept").unwrap();
+        let output_queue = rules.find(&format!("queue num {QUEUE_OUT}")).unwrap();
+        let input_bypass = rules.find("iifname \"lo\" accept").unwrap();
+        let input_queue = rules.find(&format!("queue num {QUEUE_IN}")).unwrap();
+
+        assert!(output_bypass < output_queue);
+        assert!(input_bypass < input_queue);
     }
 
     #[test]

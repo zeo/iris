@@ -15,12 +15,13 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterCreateEnumHandle0,
     FwpmFilterDeleteById0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0,
     FwpmGetAppIdFromFileName0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0,
-    FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID, FWPM_DISPLAY_DATA0, FWPM_FILTER0,
-    FWPM_FILTER_CONDITION0, FWPM_FILTER_ENUM_TEMPLATE0, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-    FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0, FWPM_SUBLAYER0, FWP_ACTION_BLOCK,
-    FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0, FWP_EMPTY,
-    FWP_FILTER_ENUM_OVERLAPPING, FWP_MATCH_EQUAL, FWP_VALUE0,
+    FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_FLAGS, FWPM_DISPLAY_DATA0,
+    FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_ENUM_TEMPLATE0,
+    FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0,
+    FWPM_SUBLAYER0, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE,
+    FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0, FWP_EMPTY, FWP_FILTER_ENUM_OVERLAPPING,
+    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_NONE_SET, FWP_UINT32, FWP_VALUE0,
 };
 use windows::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
@@ -195,15 +196,10 @@ impl Wfp {
             let mut ids = Vec::with_capacity(2);
             let mut result = Ok(());
             for layer in Self::layers(direction) {
-                let mut cond: FWPM_FILTER_CONDITION0 = std::mem::zeroed();
-                cond.fieldKey = FWPM_CONDITION_ALE_APP_ID;
-                cond.matchType = FWP_MATCH_EQUAL;
-                cond.conditionValue = FWP_CONDITION_VALUE0 {
-                    r#type: FWP_BYTE_BLOB_TYPE,
-                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                        byteBlob: app_id,
-                    },
-                };
+                let mut conditions = vec![app_condition(app_id)];
+                if action == RuleAction::Block {
+                    conditions.push(non_loopback_condition());
+                }
 
                 let mut name = wide("Iris rule");
                 let mut filter: FWPM_FILTER0 = std::mem::zeroed();
@@ -218,8 +214,8 @@ impl Wfp {
                     r#type: FWP_EMPTY,
                     Anonymous: std::mem::zeroed(),
                 };
-                filter.numFilterConditions = 1;
-                filter.filterCondition = &mut cond;
+                filter.numFilterConditions = conditions.len() as u32;
+                filter.filterCondition = conditions.as_mut_ptr();
                 filter.action = FWPM_ACTION0 {
                     r#type: action_type,
                     Anonymous: std::mem::zeroed(),
@@ -259,10 +255,55 @@ impl Wfp {
     }
 }
 
+fn app_condition(app_id: *mut FWP_BYTE_BLOB) -> FWPM_FILTER_CONDITION0 {
+    FWPM_FILTER_CONDITION0 {
+        fieldKey: FWPM_CONDITION_ALE_APP_ID,
+        matchType: FWP_MATCH_EQUAL,
+        conditionValue: FWP_CONDITION_VALUE0 {
+            r#type: FWP_BYTE_BLOB_TYPE,
+            Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+                byteBlob: app_id,
+            },
+        },
+    }
+}
+
+fn non_loopback_condition() -> FWPM_FILTER_CONDITION0 {
+    FWPM_FILTER_CONDITION0 {
+        fieldKey: FWPM_CONDITION_FLAGS,
+        matchType: FWP_MATCH_FLAGS_NONE_SET,
+        conditionValue: FWP_CONDITION_VALUE0 {
+            r#type: FWP_UINT32,
+            Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+                uint32: FWP_CONDITION_FLAG_IS_LOOPBACK,
+            },
+        },
+    }
+}
+
 impl Drop for Wfp {
     fn drop(&mut self) {
         unsafe {
             let _ = FwpmEngineClose0(self.engine);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_exception_matches_only_non_loopback_traffic() {
+        let condition = non_loopback_condition();
+        assert_eq!(condition.fieldKey, FWPM_CONDITION_FLAGS);
+        assert_eq!(condition.matchType, FWP_MATCH_FLAGS_NONE_SET);
+        assert_eq!(condition.conditionValue.r#type, FWP_UINT32);
+        unsafe {
+            assert_eq!(
+                condition.conditionValue.Anonymous.uint32,
+                FWP_CONDITION_FLAG_IS_LOOPBACK
+            );
         }
     }
 }

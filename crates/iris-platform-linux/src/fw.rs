@@ -428,7 +428,6 @@ fn verdict_loop(
         let _ = ready.send(Err(format!("cannot bind NFQUEUE {queue}: {e}")));
         return;
     }
-    nfq.set_nonblocking(true);
     ready_workers.fetch_add(1, Ordering::Release);
     let _ = ready.send(Ok(()));
     let mut held: Vec<HeldPacket> = Vec::new();
@@ -533,12 +532,22 @@ fn verdict_loop(
                         if nfq.verdict(message).is_err() {
                             worker_failed = true;
                         }
-                    } else if let Some(decision) = decide(
-                        flow,
-                        dir,
-                        &rules,
-                        &mut resolver.lock().unwrap_or_else(|error| error.into_inner()),
-                    ) {
+                    } else if let Some(decision) = {
+                        let mut resolver = resolver
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        let mut decision = decide(flow, dir, &rules, &mut resolver);
+                        // socket ownership can lag the first queued SYN by a few milliseconds
+                        for _ in 0..6 {
+                            if decision.is_some() {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                            resolver.refresh_live();
+                            decision = decide(flow, dir, &rules, &mut resolver);
+                        }
+                        decision
+                    } {
                         decisions.push((message, decision));
                     } else {
                         unresolved.push(UnresolvedPacket {

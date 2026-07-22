@@ -474,6 +474,12 @@ fn verdict_loop(
                     decisions.push((packet.message, decision));
                 } else if now.duration_since(packet.since) >= std::time::Duration::from_millis(1500)
                 {
+                    let local = match dir {
+                        Direction::Outbound => (packet.flow.0, packet.flow.1),
+                        Direction::Inbound => (packet.flow.2, packet.flow.3),
+                    };
+                    let (inode, pid) = resolver.attribution_owner(local);
+                    tracing::warn!(?dir, ?local, ?inode, ?pid, "unable to attribute queued connection");
                     decisions.push((
                         packet.message,
                         PacketDecision::Verdict(attribution_timeout_verdict()),
@@ -864,6 +870,19 @@ impl Resolver {
         let pid = *self.owners.get(&(inode as u64))?;
         self.cache.resolve(pid)
     }
+
+    fn attribution_owner(&self, local: (IpAddr, u16)) -> (Option<u32>, Option<u32>) {
+        let inode = self.by_local.get(&local).copied().or_else(|| {
+            let wild = if local.0.is_ipv4() {
+                IpAddr::from([0, 0, 0, 0])
+            } else {
+                IpAddr::from([0u8; 16])
+            };
+            self.by_local.get(&(wild, local.1)).copied()
+        });
+        let pid = inode.and_then(|inode| self.owners.get(&(inode as u64)).copied());
+        (inode, pid)
+    }
 }
 
 #[cfg(test)]
@@ -980,4 +999,5 @@ mod packet_tests {
         release.send(()).unwrap();
         client.join().unwrap();
     }
+
 }

@@ -424,11 +424,29 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
     let mut next_id: u64 = 1;
     let mut last_tick_emit = 0;
     let mut pending: HashMap<u64, oneshot::Sender<Reply>> = HashMap::new();
+    let (incoming_tx, mut incoming_rx) = mpsc::channel(16);
+    tokio::spawn(async move {
+        loop {
+            let frame = transport::read_frame::<_, ServerMessage>(&mut recv).await;
+            let done = !matches!(frame, Ok(Some(_)));
+            if incoming_tx
+                .send(frame.and_then(|msg| {
+                    msg.ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+                }))
+                .await
+                .is_err()
+                || done
+            {
+                break;
+            }
+        }
+    });
 
     loop {
         tokio::select! {
-            frame = transport::read_frame::<_, ServerMessage>(&mut recv) => {
-                let Some(msg) = frame? else { break };
+            incoming = incoming_rx.recv() => {
+                let Some(incoming) = incoming else { break };
+                let msg = incoming?;
                 match msg {
                     ServerMessage::Tick(mut tick) => {
                         let Some(state) = app.try_state::<TickDetailState>() else {

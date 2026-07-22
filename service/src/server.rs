@@ -14,6 +14,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use tokio::select;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::mpsc;
 
 /// accept clients on the iris pipe until the runtime is cancelled. each
 /// connection is served on its own task.
@@ -130,11 +131,24 @@ async fn handle(
 
     let mut subscribed = false;
     let mut events = engine.subscribe();
+    let (incoming_tx, mut incoming_rx) = mpsc::channel(16);
+    tokio::spawn(async move {
+        loop {
+            let frame = transport::read_frame::<_, ClientMessage>(&mut recv).await;
+            let done = !matches!(frame, Ok(Some(_)));
+            if incoming_tx.send(frame.and_then(|msg| {
+                msg.ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
+            })).await.is_err() || done {
+                break;
+            }
+        }
+    });
 
     loop {
         select! {
-            inbound = transport::read_frame::<_, ClientMessage>(&mut recv) => {
-                let Some(msg) = inbound? else { break };
+            incoming = incoming_rx.recv() => {
+                let Some(incoming) = incoming else { break };
+                let msg = incoming?;
                 match msg {
                     ClientMessage::Hello { .. } => {}
                     ClientMessage::Subscribe => subscribed = true,

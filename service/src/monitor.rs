@@ -74,6 +74,7 @@ fn publish_pending(
     }
     drop(store);
     for alert in fresh {
+        tracing::info!(alert_id = alert.id, "published pending connection alert");
         engine.publish(ServerMessage::Alert(alert));
     }
 }
@@ -88,6 +89,7 @@ fn start_pending_publisher(
         .name("iris-pending-publisher".to_string())
         .spawn(move || {
             for connection in pending {
+                tracing::info!(app = connection.app.as_str(), "received pending connection");
                 publish_pending(vec![connection], &store, &engine);
             }
         })

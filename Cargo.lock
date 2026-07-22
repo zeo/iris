@@ -1945,7 +1945,6 @@ dependencies = [
  "iris-core",
  "libc",
  "nfq",
- "tokio",
  "tracing",
 ]
 

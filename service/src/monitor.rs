@@ -33,19 +33,6 @@ fn target_name(target: &EnrichTarget) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn publish_pending_connections(
-    rules: &Arc<Mutex<RuleStore>>,
-    store: &Arc<Mutex<Store>>,
-    engine: &Engine,
-) {
-    let pending = rules
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take_pending_connections();
-    publish_pending(pending, store, engine);
-}
-
-#[cfg(target_os = "linux")]
 fn publish_pending(
     pending: Vec<crate::platform::PendingConnection>,
     store: &Arc<Mutex<Store>>,
@@ -91,6 +78,22 @@ fn publish_pending(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn start_pending_publisher(
+    pending: std::sync::mpsc::Receiver<crate::platform::PendingConnection>,
+    store: Arc<Mutex<Store>>,
+    engine: Engine,
+) {
+    std::thread::Builder::new()
+        .name("iris-pending-publisher".to_string())
+        .spawn(move || {
+            for connection in pending {
+                publish_pending(vec![connection], &store, &engine);
+            }
+        })
+        .unwrap_or_else(|error| panic!("cannot start pending publisher: {error}"));
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -130,6 +133,37 @@ mod tests {
             } if alerted_app == app
         ));
     }
+
+    #[test]
+    fn pending_receiver_publishes_without_an_async_wakeup() {
+        let engine = Engine::new();
+        let mut events = engine.subscribe();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (send, pending) = std::sync::mpsc::channel();
+        start_pending_publisher(pending, store, engine);
+        send.send(crate::platform::PendingConnection {
+            app: AppId::from_path("/usr/bin/receiver-example"),
+            remote: Endpoint {
+                addr: "203.0.113.7".parse::<IpAddr>().unwrap(),
+                port: 443,
+                protocol: Protocol::Tcp,
+            },
+            direction: Direction::Outbound,
+        })
+        .unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let alert = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_millis(250), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        });
+        assert!(matches!(alert, ServerMessage::Alert(_)));
+    }
 }
 
 /// start monitoring and the flush loop.
@@ -161,20 +195,12 @@ pub fn spawn(
     let mut tracker = Tracker::new(agg);
 
     #[cfg(target_os = "linux")]
-    if let Some(pending_ready) = rules
+    if let Some(pending) = rules
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .pending_notifier()
+        .take_pending_receiver()
     {
-        let engine = engine.clone();
-        let rules = rules.clone();
-        let store = store.clone();
-        tokio::spawn(async move {
-            loop {
-                publish_pending_connections(&rules, &store, &engine);
-                pending_ready.notified().await;
-            }
-        });
+        start_pending_publisher(pending, store.clone(), engine.clone());
     }
 
     tokio::spawn(async move {

@@ -150,18 +150,12 @@ impl RuleStore {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn take_pending_connections(&self) -> Vec<crate::platform::PendingConnection> {
+    pub fn take_pending_receiver(
+        &mut self,
+    ) -> Option<std::sync::mpsc::Receiver<crate::platform::PendingConnection>> {
         self.wfp
-            .as_ref()
-            .map(crate::platform::Wfp::take_pending)
-            .unwrap_or_default()
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn pending_notifier(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
-        self.wfp
-            .as_ref()
-            .map(crate::platform::Wfp::pending_notifier)
+            .as_mut()
+            .and_then(crate::platform::Wfp::take_pending_receiver)
     }
 
     #[cfg(target_os = "linux")]

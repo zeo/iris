@@ -11,7 +11,6 @@ description = "the Linux engine backend for iris: sock_diag monitoring, nftables
 iris-core = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

@@ -32,6 +32,106 @@ fn target_name(target: &EnrichTarget) -> String {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn publish_pending_connections(
+    rules: &Arc<Mutex<RuleStore>>,
+    store: &Arc<Mutex<Store>>,
+    engine: &Engine,
+) {
+    let pending = rules
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take_pending_connections();
+    publish_pending(pending, store, engine);
+}
+
+#[cfg(target_os = "linux")]
+fn publish_pending(
+    pending: Vec<crate::platform::PendingConnection>,
+    store: &Arc<Mutex<Store>>,
+    engine: &Engine,
+) {
+    if pending.is_empty() {
+        return;
+    }
+
+    let now = now_ms();
+    // dedup the whole batch against alerts already awaiting a decision with a
+    // single alert query, not one per connection
+    let store = store.lock().unwrap_or_else(|error| error.into_inner());
+    let mut seen: HashSet<(iris_core::AppId, iris_core::Direction)> = store
+        .list_alerts(true)
+        .into_iter()
+        .filter_map(|alert| match alert.kind {
+            AlertKind::NewApp {
+                app,
+                direction: Some(direction),
+                ..
+            } => Some((app, direction)),
+            _ => None,
+        })
+        .collect();
+    let mut fresh = Vec::new();
+    for connection in pending {
+        store.ensure_app(connection.app.as_str(), None, now);
+        if seen.insert((connection.app.clone(), connection.direction)) {
+            fresh.push(store.insert_alert(
+                &AlertKind::NewApp {
+                    app: connection.app,
+                    remote: Some(connection.remote),
+                    direction: Some(connection.direction),
+                },
+                now,
+            ));
+        }
+    }
+    drop(store);
+    for alert in fresh {
+        engine.publish(ServerMessage::Alert(alert));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use iris_core::{AppId, Direction, Endpoint, Protocol};
+    use std::net::IpAddr;
+
+    #[test]
+    fn pending_connection_publishes_without_waiting_for_a_telemetry_tick() {
+        let engine = Engine::new();
+        let mut events = engine.subscribe();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let app = AppId::from_path("/usr/bin/example");
+
+        publish_pending(
+            vec![crate::platform::PendingConnection {
+                app: app.clone(),
+                remote: Endpoint {
+                    addr: "203.0.113.7".parse::<IpAddr>().unwrap(),
+                    port: 443,
+                    protocol: Protocol::Tcp,
+                },
+                direction: Direction::Outbound,
+            }],
+            &store,
+            &engine,
+        );
+
+        let ServerMessage::Alert(alert) = events.try_recv().unwrap() else {
+            panic!("expected alert");
+        };
+        assert!(matches!(
+            alert.kind,
+            AlertKind::NewApp {
+                app: alerted_app,
+                direction: Some(Direction::Outbound),
+                ..
+            } if alerted_app == app
+        ));
+    }
+}
+
 /// start monitoring and the flush loop.
 pub fn spawn(
     engine: Engine,
@@ -60,6 +160,23 @@ pub fn spawn(
     #[cfg(not(has_platform))]
     let mut tracker = Tracker::new(agg);
 
+    #[cfg(target_os = "linux")]
+    if let Some(pending_ready) = rules
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .pending_notifier()
+    {
+        let engine = engine.clone();
+        let rules = rules.clone();
+        let store = store.clone();
+        tokio::spawn(async move {
+            loop {
+                publish_pending_connections(&rules, &store, &engine);
+                pending_ready.notified().await;
+            }
+        });
+    }
+
     tokio::spawn(async move {
         #[cfg(has_platform)]
         let byte_monitor = byte_monitor;
@@ -74,48 +191,6 @@ pub fn spawn(
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let now = now_ms();
-            #[cfg(target_os = "linux")]
-            {
-                let pending = rules
-                    .lock()
-                    .map(|rules| rules.take_pending_connections())
-                    .unwrap_or_default();
-                if !pending.is_empty() {
-                    // dedup the whole batch against alerts already awaiting a
-                    // decision with a single alert query, not one per connection
-                    let store = store.lock().unwrap_or_else(|error| error.into_inner());
-                    let mut seen: HashSet<(iris_core::AppId, iris_core::Direction)> = store
-                        .list_alerts(true)
-                        .into_iter()
-                        .filter_map(|alert| match alert.kind {
-                            AlertKind::NewApp {
-                                app,
-                                direction: Some(direction),
-                                ..
-                            } => Some((app, direction)),
-                            _ => None,
-                        })
-                        .collect();
-                    let mut fresh = Vec::new();
-                    for connection in pending {
-                        store.ensure_app(connection.app.as_str(), None, now);
-                        if seen.insert((connection.app.clone(), connection.direction)) {
-                            fresh.push(store.insert_alert(
-                                &AlertKind::NewApp {
-                                    app: connection.app,
-                                    remote: Some(connection.remote),
-                                    direction: Some(connection.direction),
-                                },
-                                now,
-                            ));
-                        }
-                    }
-                    drop(store);
-                    for alert in fresh {
-                        engine.publish(ServerMessage::Alert(alert));
-                    }
-                }
-            }
             let tick = tracker.tick(now);
             #[cfg(target_os = "linux")]
             let recent_flows: HashMap<String, crate::platform::RecentFlow> = byte_monitor

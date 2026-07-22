@@ -158,6 +158,13 @@ impl RuleStore {
     }
 
     #[cfg(target_os = "linux")]
+    pub fn pending_notifier(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
+        self.wfp
+            .as_ref()
+            .map(crate::platform::Wfp::pending_notifier)
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn trust_apps(&self, paths: &[String]) {
         if let Some(wfp) = &self.wfp {
             wfp.trust_apps(paths);

@@ -18,6 +18,7 @@ use std::net::IpAddr;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use tokio::sync::Notify;
 
 const TABLE: &str = "iris";
 const QUEUE_OUT: u16 = 17410;
@@ -60,6 +61,7 @@ struct VerdictShared {
     revision: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     ready_workers: Arc<AtomicU8>,
+    pending_ready: Arc<Notify>,
 }
 
 /// one enforced rule: which action applies to an app in a direction
@@ -139,6 +141,7 @@ pub struct Wfp {
     threads: Vec<std::thread::JoinHandle<()>>,
     next_id: AtomicU64,
     pending: std::sync::mpsc::Receiver<PendingConnection>,
+    pending_ready: Arc<Notify>,
     /// whether the nftables queue hook is currently installed
     hooked: bool,
 }
@@ -159,6 +162,7 @@ impl Wfp {
         let mut threads = Vec::new();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (pending_tx, pending) = std::sync::mpsc::channel();
+        let pending_ready = Arc::new(Notify::new());
         for (queue, dir) in [
             (QUEUE_OUT, Direction::Outbound),
             (QUEUE_IN, Direction::Inbound),
@@ -170,6 +174,7 @@ impl Wfp {
             let ready_workers = ready_workers.clone();
             let ready_tx = ready_tx.clone();
             let pending_tx = pending_tx.clone();
+            let pending_ready = pending_ready.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("iris-verdict-{queue}"))
                 .spawn(move || {
@@ -182,6 +187,7 @@ impl Wfp {
                             revision,
                             stop,
                             ready_workers,
+                            pending_ready,
                         },
                         ready_tx,
                         pending_tx,
@@ -214,6 +220,7 @@ impl Wfp {
             threads,
             next_id: AtomicU64::new(1),
             pending,
+            pending_ready,
             hooked: false,
         })
     }
@@ -303,6 +310,10 @@ impl Wfp {
 
     pub fn take_pending(&self) -> Vec<PendingConnection> {
         self.pending.try_iter().collect()
+    }
+
+    pub fn pending_notifier(&self) -> Arc<Notify> {
+        self.pending_ready.clone()
     }
 
     pub fn trust_apps(&self, paths: &[String]) {
@@ -414,6 +425,7 @@ fn verdict_loop(
         revision,
         stop,
         ready_workers,
+        pending_ready,
     } = shared;
     let mut nfq = match nfq::Queue::open() {
         Ok(q) => q,
@@ -570,8 +582,8 @@ fn verdict_loop(
                 }
                 PacketDecision::Pending { connection, flow } => {
                     let app = connection.app.0.clone();
-                    if notified.insert(app.clone()) {
-                        let _ = pending_tx.send(connection);
+                    if notified.insert(app.clone()) && pending_tx.send(connection).is_ok() {
+                        pending_ready.notify_one();
                     }
                     if held.len() < 512 && held_flows.insert(flow) {
                         held.push(HeldPacket {

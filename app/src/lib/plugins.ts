@@ -13,11 +13,30 @@ export interface PluginInfo {
 }
 
 const [plugins, setPlugins] = createSignal<PluginInfo[]>([]);
+const [publishedPanels, setPublishedPanels] = createSignal<Set<string>>(new Set());
+let refreshId = 0;
 export { plugins };
 
 export async function refreshPlugins(): Promise<void> {
+  const currentRefresh = ++refreshId;
   try {
-    setPlugins(await invoke<PluginInfo[]>("list_plugins"));
+    const catalog = await invoke<PluginInfo[]>("list_plugins");
+    if (currentRefresh !== refreshId) return;
+    setPlugins(catalog);
+    const panelIds = await Promise.all(
+      catalog
+        .filter((plugin) => plugin.enabled && plugin.capabilities.includes("ui:panel"))
+        .map(async (plugin) => {
+          try {
+            await invoke<Panel>("get_plugin_panel", { id: plugin.id });
+            return plugin.id;
+          } catch {
+            return null;
+          }
+        }),
+    );
+    if (currentRefresh !== refreshId) return;
+    setPublishedPanels(new Set(panelIds.filter((id): id is string => id !== null)));
   } catch {
     /* engine offline */
   }
@@ -64,9 +83,9 @@ export interface Panel {
   widgets: Widget[];
 }
 
-// enabled plugins the user let show a panel tab
+// enabled plugins with a panel ready to render
 export const panelPlugins = () =>
-  plugins().filter((p) => p.enabled && p.capabilities.includes("ui:panel"));
+  plugins().filter((plugin) => publishedPanels().has(plugin.id));
 
 export async function fetchPanel(id: string): Promise<Panel> {
   return invoke<Panel>("get_plugin_panel", { id });

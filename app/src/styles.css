@@ -2002,13 +2002,17 @@ html {
 .protect-sort.on .protect-sort-mark {
   color: var(--live);
 }
-.protect-table th:nth-child(1) { width: 28%; }
-.protect-table th:nth-child(2),
-.protect-table th:nth-child(3) { width: 100px; }
-.protect-table th:nth-child(4) { width: 24%; }
-.protect-table th:nth-child(5),
+.protect-table th:nth-child(1) { width: 25%; }
+.protect-table th:nth-child(2) { width: 68px; }
+.protect-table th:nth-child(3),
+.protect-table th:nth-child(4) { width: 100px; }
+.protect-table th:nth-child(5) { width: 21%; }
 .protect-table th:nth-child(6),
-.protect-table th:nth-child(7) { width: 92px; }
+.protect-table th:nth-child(7),
+.protect-table th:nth-child(8) { width: 92px; }
+.protect-table .access-heading {
+  text-align: center;
+}
 .protect-table td {
   height: 49px;
   padding-top: 6px;
@@ -2159,6 +2163,15 @@ html {
   box-shadow: 0 0 5px rgba(207, 106, 86, 0.45);
 }
 .decision-select.busy {
+  opacity: 0.55;
+}
+.internet-toggle {
+  display: block;
+  margin: 0 auto;
+  transform: scale(0.88);
+}
+.internet-toggle:disabled {
+  cursor: wait;
   opacity: 0.55;
 }
 .protect-empty {

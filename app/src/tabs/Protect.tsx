@@ -157,6 +157,9 @@ export function Protect() {
     }
   };
 
+  const toggleInternet = (row: AppRow) =>
+    chooseDecision(row, "outbound", decisionFor(row, "outbound") === "block" ? "open" : "block");
+
   const exportRules = async () => {
     if (ioBusy()) return;
     setIoBusy(true);
@@ -338,6 +341,7 @@ export function Protect() {
             <thead>
               <tr>
                 <SortHeader label="Application" value="app" sort={sort()} direction={sortDirection()} choose={chooseSort} />
+                <th class="access-heading">Internet</th>
                 <th>Inbound</th>
                 <th>Outbound</th>
                 <th>Remote field</th>
@@ -370,6 +374,13 @@ export function Protect() {
                         </Show>
                       </div>
                     </td>
+                    <td>
+                      <InternetToggle
+                        row={row()}
+                        changing={changing()}
+                        toggle={toggleInternet}
+                      />
+                    </td>
                     <td><DecisionSelect row={row()} direction="inbound" changing={changing()} choose={chooseDecision} /></td>
                     <td><DecisionSelect row={row()} direction="outbound" changing={changing()} choose={chooseDecision} /></td>
                     <td><span class="remote-field" title={hostsFor(row().sample)}>{hostsFor(row().sample)}</span></td>
@@ -384,6 +395,27 @@ export function Protect() {
         </div>
       </Show>
     </section>
+  );
+}
+
+function InternetToggle(props: {
+  row: AppRow;
+  changing: string;
+  toggle: (row: AppRow) => Promise<void>;
+}) {
+  const allowed = () => decisionFor(props.row, "outbound") !== "block";
+  return (
+    <button
+      class="rocker internet-toggle"
+      role="switch"
+      aria-checked={allowed()}
+      aria-label={`${allowed() ? "disable" : "enable"} internet access for ${fileName(props.row.app)}`}
+      title={`${allowed() ? "Disable" : "Enable"} internet access`}
+      disabled={props.changing !== ""}
+      onClick={() => void props.toggle(props.row)}
+    >
+      <span class="knob" />
+    </button>
   );
 }
 

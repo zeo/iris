@@ -32,10 +32,10 @@ jobs:
           # dir has dead absolute paths in its build-script binaries and dep-info files
           # and the build fails on them; cache the cargo registry only, rebuild target
           cache-targets: "false"
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 9
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
       - name: install frontend deps
@@ -81,10 +81,10 @@ jobs:
           sudo apt-get install -y -qq pkg-config libwebkit2gtk-4.1-dev \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
             libgtk-layer-shell-dev libnetfilter-queue-dev nftables patchelf rpm file xdg-utils
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
           version: 9
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
       - name: install frontend deps

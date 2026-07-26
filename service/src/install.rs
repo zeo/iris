@@ -23,7 +23,7 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 pub fn install() -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
+    let exe = secure_service_exe()?;
     let bin_path = wide(&format!("\"{}\"", exe.display()));
     let name = wide(SERVICE_NAME);
     unsafe {
@@ -71,6 +71,21 @@ pub fn install() -> anyhow::Result<()> {
     }
     tracing::info!("service '{SERVICE_NAME}' installed and started");
     Ok(())
+}
+
+fn secure_service_exe() -> anyhow::Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?.canonicalize()?;
+    let roots: Vec<std::path::PathBuf> = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .filter_map(|root| std::path::PathBuf::from(root).canonicalize().ok())
+        .collect();
+    if roots.iter().any(|root| exe.starts_with(root)) {
+        return Ok(exe);
+    }
+    anyhow::bail!(
+        "refusing to register a SYSTEM service from a user-writable path; install Iris per-machine first"
+    )
 }
 
 /// tell the SCM to restart the engine on failure (5s, 10s, then 30s backoff,

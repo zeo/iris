@@ -151,6 +151,8 @@ pub(crate) fn engine_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 pub(crate) async fn run_engine() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     paths::ensure_runtime_dirs()?;
+    std::fs::create_dir_all(paths::plugins_dir())?;
+    paths::secure_state()?;
     let engine = Engine::new();
     let store = Arc::new(Mutex::new(open_store()));
     let (enrich, panels, supervisor) = plugins::build(store.clone(), engine.clone());

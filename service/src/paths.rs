@@ -92,6 +92,118 @@ pub fn secure_state() -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn secure_state() -> std::io::Result<()> {
+    const STATE_ROOT: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;GX;;;RC)";
+    const PRIVATE: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+    const PLUGINS: &str =
+        "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;RC)";
+
+    let root = data_dir();
+    let plugins = plugins_dir();
+    set_acl(&root, STATE_ROOT)?;
+    for entry in std::fs::read_dir(&root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path == plugins {
+            set_tree_acl(&path, PLUGINS)?;
+        } else {
+            set_tree_acl(&path, PRIVATE)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_tree_acl(path: &std::path::Path, sddl: &str) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    use std::os::windows::fs::MetadataExt;
+    if metadata.file_attributes() & 0x400 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing reparse point in protected state: {}",
+                path.display()
+            ),
+        ));
+    }
+    if metadata.is_file() && has_multiple_links(path)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing hard-linked file in protected state: {}",
+                path.display()
+            ),
+        ));
+    }
+    set_acl(path, sddl)?;
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            set_tree_acl(&entry?.path(), sddl)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn has_multiple_links(path: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let file = std::fs::File::open(path)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe {
+        GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info)
+            .map_err(std::io::Error::other)?;
+    }
+    Ok(info.nNumberOfLinks > 1)
+}
+
+#[cfg(windows)]
+fn set_acl(path: &std::path::Path, sddl: &str) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows::Win32::Security::{
+        SetFileSecurityW, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    };
+
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            1,
+            &mut descriptor,
+            None,
+        )
+        .map_err(std::io::Error::other)?;
+        let applied = SetFileSecurityW(
+            PCWSTR(path.as_ptr()),
+            DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION
+                | OWNER_SECURITY_INFORMATION
+                | GROUP_SECURITY_INFORMATION,
+            descriptor,
+        )
+        .ok()
+        .map_err(std::io::Error::other);
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        applied
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn secure_state() -> std::io::Result<()> {
+    Ok(())
+}
+
 /// create the socket runtime directories with the ownership and modes the
 /// endpoint security depends on: `/run/iris` world-traversable, `/run/iris/admin`
 /// root-only (so only root can reach the admin socket, enforcing elevation), and

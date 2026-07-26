@@ -169,6 +169,9 @@ fn drop_privileges(uid: u32, gid: u32, cgroup_fd: std::os::fd::RawFd) -> io::Res
         if libc::setuid(0) == 0 {
             return Err(io::Error::other("failed to drop root irrevocably"));
         }
+        if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {
+            return Err(io::Error::last_os_error());
+        }
         // PDEATHSIG is cleared by the credential change above, so arm it now: the
         // child gets SIGKILL if the engine exits
         if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {

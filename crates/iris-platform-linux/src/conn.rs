@@ -107,16 +107,16 @@ impl ConnCounter {
 
 /// terminate an established TCP connection matching the tuple. tries the clean
 /// SOCK_DESTROY path and return false when the kernel cannot close the socket
-pub fn kill_connection(local_port: u16, remote: IpAddr, remote_port: u16) -> bool {
+pub fn kill_connection(local_port: u16, remote: IpAddr, remote_port: u16, caller_uid: u32) -> bool {
     // find the live socket so we know its local address, family, and owner
     let Some(target) = sockets::dump().into_iter().find(|s| {
         s.is_tcp() && s.local.1 == local_port && s.remote.0 == remote && s.remote.1 == remote_port
     }) else {
         return false;
     };
-    if target.uid < FIRST_NORMAL_UID {
+    if target.uid < FIRST_NORMAL_UID || target.uid != caller_uid {
         tracing::warn!(
-            "refusing to kill a system-owned connection (uid {})",
+            "refusing to kill a connection owned by uid {}",
             target.uid
         );
         return false;

@@ -8,7 +8,7 @@
 use crate::engine::Engine;
 use crate::plugins::manifest::{self, Manifest};
 use crate::plugins::proxy::{PluginLink, ProxyRequest};
-use iris_core::{AlertKind, Annotation, Panel, TargetKind};
+use iris_core::{AlertKind, Annotation, AnnotationValue, Panel, TargetKind};
 use iris_ipc::plugin::{
     HostMessage, PluginEvent, PluginMessage, StreamKind, PLUGIN_PROTOCOL_VERSION,
 };
@@ -17,8 +17,9 @@ use iris_ipc::ServerMessage;
 use iris_store::{PluginGrant, Store};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::select;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
@@ -30,6 +31,80 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+struct OutputRate {
+    since: Instant,
+    alerts: u32,
+    enrichments: u32,
+    proposals: u32,
+}
+
+impl OutputRate {
+    fn new() -> Self {
+        Self {
+            since: Instant::now(),
+            alerts: 0,
+            enrichments: 0,
+            proposals: 0,
+        }
+    }
+
+    fn refresh(&mut self) {
+        if self.since.elapsed() >= Duration::from_secs(60) {
+            self.since = Instant::now();
+            self.alerts = 0;
+            self.enrichments = 0;
+            self.proposals = 0;
+        }
+    }
+
+    fn allow(counter: &mut u32, limit: u32) -> bool {
+        if *counter >= limit {
+            return false;
+        }
+        *counter += 1;
+        true
+    }
+
+    fn allow_alert(&mut self) -> bool {
+        self.refresh();
+        Self::allow(&mut self.alerts, 60)
+    }
+
+    fn allow_enrichment(&mut self) -> bool {
+        self.refresh();
+        Self::allow(&mut self.enrichments, 120)
+    }
+
+    fn allow_proposal(&mut self) -> bool {
+        self.refresh();
+        Self::allow(&mut self.proposals, 60)
+    }
+}
+
+fn bounded_annotations(annotations: Vec<Annotation>) -> Vec<Annotation> {
+    let mut kept = Vec::new();
+    let mut bytes = 0usize;
+    for annotation in annotations {
+        let value_bytes = match &annotation.value {
+            AnnotationValue::Text(value) | AnnotationValue::Badge(value) => value.len(),
+            AnnotationValue::Link { label, url } => label.len() + url.len(),
+        };
+        let annotation_bytes = annotation.key.len() + annotation.label.len() + value_bytes;
+        if annotation.key.len() <= 128
+            && annotation.label.len() <= 256
+            && value_bytes <= 4096
+            && bytes + annotation_bytes <= 32 * 1024
+        {
+            bytes += annotation_bytes;
+            kept.push(annotation);
+            if kept.len() == 64 {
+                break;
+            }
+        }
+    }
+    kept
+}
+
 /// one consented, enabled plugin: its manifest, the user's grant, the proxy link
 /// the registry enriches through, and its spawn-time auth token.
 pub struct PluginRuntime {
@@ -39,6 +114,7 @@ pub struct PluginRuntime {
     pub dir: PathBuf,
     pub link: Arc<PluginLink>,
     token: String,
+    alerts_emitted: AtomicU32,
     #[cfg(has_platform)]
     child: Mutex<Option<crate::platform::RestrictedChild>>,
 }
@@ -202,6 +278,7 @@ pub fn plan(store: &Arc<Mutex<Store>>) -> Vec<Arc<PluginRuntime>> {
             dir,
             link,
             token,
+            alerts_emitted: AtomicU32::new(0),
             #[cfg(has_platform)]
             child: Mutex::new(None),
         }));
@@ -274,6 +351,7 @@ impl Supervisor {
         #[cfg(target_os = "linux")]
         crate::paths::grant_plugin_socket(iris_ipc::PLUGIN_PIPE_NAME)?;
         tracing::info!(pipe = iris_ipc::PLUGIN_PIPE_NAME, "plugin host listening");
+        let slots = Arc::new(tokio::sync::Semaphore::new(64));
         loop {
             let conn = match transport::accept(&listener).await {
                 Ok(conn) => conn,
@@ -283,8 +361,16 @@ impl Supervisor {
                     continue;
                 }
             };
+            let permit = match Arc::clone(&slots).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::warn!("plugin connection limit reached");
+                    continue;
+                }
+            };
             let this = this.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 if let Err(e) = this.handle(conn).await {
                     tracing::debug!("plugin connection ended: {e}");
                 }
@@ -382,7 +468,14 @@ impl Supervisor {
         let (mut recv, mut send) = transport::split(stream);
 
         // the first frame must authenticate; anything else drops the pipe
-        let rt = match transport::read_frame::<_, PluginMessage>(&mut recv).await? {
+        const MAX_PLUGIN_FRAME: u32 = 1024 * 1024;
+        let first = tokio::time::timeout(
+            Duration::from_secs(5),
+            transport::read_frame_limited::<_, PluginMessage>(&mut recv, MAX_PLUGIN_FRAME),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("plugin registration timed out"))??;
+        let rt = match first {
             Some(PluginMessage::Register {
                 id,
                 protocol,
@@ -463,6 +556,7 @@ impl Supervisor {
         let mut streams: Vec<StreamKind> = Vec::new();
         let mut next_req: u64 = 1;
         let mut pending: HashMap<u64, Pending> = HashMap::new();
+        let mut output_rate = OutputRate::new();
 
         loop {
             select! {
@@ -482,9 +576,15 @@ impl Supervisor {
                     };
                     transport::write_frame(&mut send, &frame).await?;
                 }
-                frame = transport::read_frame::<_, PluginMessage>(&mut recv) => {
+                frame = transport::read_frame_limited::<_, PluginMessage>(&mut recv, 1024 * 1024) => {
                     let Some(msg) = frame? else { break };
-                    self.on_plugin_message(rt, msg, &mut streams, &mut pending).await?;
+                    self.on_plugin_message(
+                        rt,
+                        msg,
+                        &mut streams,
+                        &mut pending,
+                        &mut output_rate,
+                    ).await?;
                 }
                 event = events.recv() => {
                     match event {
@@ -504,11 +604,12 @@ impl Supervisor {
         msg: PluginMessage,
         streams: &mut Vec<StreamKind>,
         pending: &mut HashMap<u64, Pending>,
+        output_rate: &mut OutputRate,
     ) -> anyhow::Result<()> {
         match msg {
             PluginMessage::EnrichReply { req, annotations } => {
                 if let Some(Pending::Enrich(reply)) = pending.remove(&req) {
-                    let _ = reply.send(annotations);
+                    let _ = reply.send(bounded_annotations(annotations));
                 }
             }
             PluginMessage::PanelReply { req, panel } => {
@@ -522,7 +623,8 @@ impl Supervisor {
             } => {
                 // an unsolicited push from a stream-watching plugin; surface it
                 // to the UI the same way a resolved lookup would
-                if !annotations.is_empty() {
+                let annotations = bounded_annotations(annotations);
+                if !annotations.is_empty() && output_rate.allow_enrichment() {
                     self.engine.publish(ServerMessage::Enrichment {
                         target,
                         annotations,
@@ -530,7 +632,11 @@ impl Supervisor {
                 }
             }
             PluginMessage::RaiseAlert { message } => {
-                if rt.effective_caps().iter().any(|c| c == "emit:alerts") {
+                if rt.effective_caps().iter().any(|c| c == "emit:alerts")
+                    && message.len() <= 4096
+                    && output_rate.allow_alert()
+                    && rt.alerts_emitted.fetch_add(1, Ordering::Relaxed) < 1000
+                {
                     // the source is the authenticated plugin name, never trusted
                     // from the wire
                     let kind = AlertKind::Plugin {
@@ -546,10 +652,12 @@ impl Supervisor {
                 }
             }
             PluginMessage::ProposeRule { rule, reason } => {
-                if rt
-                    .effective_caps()
-                    .iter()
-                    .any(|c| c == "emit:rule-proposals")
+                if reason.len() <= 4096
+                    && output_rate.allow_proposal()
+                    && rt
+                        .effective_caps()
+                        .iter()
+                        .any(|c| c == "emit:rule-proposals")
                 {
                     // recorded for review only; enforcement stays behind the
                     // elevated accept on the admin pipe
@@ -600,5 +708,48 @@ impl Supervisor {
             transport::write_frame(send, &HostMessage::Event(event)).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bounded_annotations, OutputRate};
+    use iris_core::{Annotation, Severity};
+
+    #[test]
+    fn bounds_plugin_annotations() {
+        let mut annotations = vec![Annotation::text(
+            "x",
+            "label",
+            "ok",
+            Severity::Info,
+        )];
+        annotations.push(Annotation::text(
+            "x".repeat(129).as_str(),
+            "label",
+            "rejected",
+            Severity::Info,
+        ));
+        annotations.extend(
+            (0..130).map(|index| {
+                Annotation::text(
+                    &format!("key-{index}"),
+                    "label",
+                    "value",
+                    Severity::Info,
+                )
+            }),
+        );
+
+        let bounded = bounded_annotations(annotations);
+        assert_eq!(bounded.len(), 64);
+        assert_eq!(bounded[0].key, "x");
+    }
+
+    #[test]
+    fn rate_limits_plugin_alerts() {
+        let mut rate = OutputRate::new();
+        assert!((0..60).all(|_| rate.allow_alert()));
+        assert!(!rate.allow_alert());
     }
 }

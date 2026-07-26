@@ -1,3 +1,40 @@
 fn main() {
-    tauri_build::build();
+    const COMMANDS: &[&str] = &[
+        "engine_status",
+        "set_tick_details",
+        "list_rules",
+        "list_apps",
+        "forget_app",
+        "list_alerts",
+        "restore_connection_prompts",
+        "resize_connection_prompts",
+        "report_display_scale",
+        "ack_alert",
+        "decide_alert",
+        "get_usage",
+        "get_adapter_usage",
+        "kill_connection",
+        "get_enrichment",
+        "list_plugins",
+        "grant_plugin",
+        "set_plugin_enabled",
+        "list_proposals",
+        "reject_proposal",
+        "get_plugin_panel",
+        "reverse_dns",
+        "install_service",
+        "uninstall_service",
+        "rule_add",
+        "rule_remove",
+        "rule_set_enabled",
+        "rule_import",
+        "proposal_accept",
+        "get_launch_at_login",
+        "set_launch_at_login",
+        "save_download",
+        "app_icon",
+    ];
+    let attributes = tauri_build::Attributes::new()
+        .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));
+    tauri_build::try_build(attributes).expect("tauri build failed");
 }

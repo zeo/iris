@@ -19,21 +19,22 @@ use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 // connection down
 const DELETE_TCB: u32 = 12;
 
-// true if the pid runs in session 0 (system services) or its session cannot be
-// determined. used to keep the kill primitive off system-owned connections;
-// failing closed (treat unknown as system) is the safe choice for a teardown.
-unsafe fn in_system_session(pid: u32) -> bool {
+unsafe fn process_session(pid: u32) -> Option<u32> {
     use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
     let mut session: u32 = 0;
-    match ProcessIdToSessionId(pid, &mut session) {
-        Ok(()) => session == 0,
-        Err(_) => true,
-    }
+    ProcessIdToSessionId(pid, &mut session)
+        .ok()
+        .map(|()| session)
 }
 
 /// terminate an established TCP connection matching the tuple. IPv4 only, since
 /// SetTcpEntry has no v6 form. returns true if a matching connection was killed.
-pub fn kill_connection(local_port: u16, remote: IpAddr, remote_port: u16) -> bool {
+pub fn kill_connection(
+    local_port: u16,
+    remote: IpAddr,
+    remote_port: u16,
+    caller_session: u32,
+) -> bool {
     let IpAddr::V4(rip) = remote else {
         return false;
     };
@@ -50,11 +51,7 @@ pub fn kill_connection(local_port: u16, remote: IpAddr, remote_port: u16) -> boo
                 && r.dwRemoteAddr == want_remote
                 && port(r.dwRemotePort) == remote_port
             {
-                // refuse to tear down a system-service connection (session 0):
-                // the engine runs as LocalSystem, so without this an unprivileged
-                // caller could kill Defender/EDR/svchost uplinks it could never
-                // touch on its own. interactive-session connections stay killable.
-                if in_system_session(r.dwOwningPid) {
+                if process_session(r.dwOwningPid) != Some(caller_session) {
                     return false;
                 }
                 let mut row: MIB_TCPROW_LH = std::mem::zeroed();

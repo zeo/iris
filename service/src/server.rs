@@ -48,21 +48,13 @@ pub async fn serve(
                 continue;
             }
         };
-        #[cfg(target_os = "linux")]
-        match authorized_linux_peer(&conn) {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::warn!(uid = ?transport::peer_euid(&conn).ok(), "refusing unauthorized client");
-                continue;
-            }
+        let peer_scope = match authorize_peer(&conn) {
+            Ok(scope) => scope,
             Err(e) => {
-                // a peer we cannot authorize (unreadable creds, or the desktop-uid
-                // file missing/corrupt) is denied, never fatal: propagating here
-                // would drop the whole engine and crash-loop it under systemd
                 tracing::warn!("refusing client, authorization check failed: {e}");
                 continue;
             }
-        }
+        };
         let permit = match Arc::clone(&slots).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -78,7 +70,7 @@ pub async fn serve(
         let panels = panels.clone();
         tokio::spawn(async move {
             let _permit = permit; // held for the session, released on disconnect
-            if let Err(e) = handle(conn, engine, rules, store, enrich, panels).await {
+            if let Err(e) = handle(conn, peer_scope, engine, rules, store, enrich, panels).await {
                 tracing::debug!("client disconnected: {e}");
             }
         });
@@ -103,20 +95,64 @@ mod linux_auth_tests {
 }
 
 #[cfg(target_os = "linux")]
-fn authorized_linux_peer(stream: &transport::Stream) -> io::Result<bool> {
-    let uid = transport::peer_euid(stream)?;
-    Ok(authorized_linux_uid(uid, crate::paths::desktop_uid()?))
+fn authorized_linux_uid(peer: u32, desktop: u32) -> bool {
+    peer == 0 || peer == desktop
 }
 
 #[cfg(target_os = "linux")]
-fn authorized_linux_uid(peer: u32, desktop: u32) -> bool {
-    peer == 0 || peer == desktop
+fn authorize_peer(stream: &transport::Stream) -> io::Result<u32> {
+    let desktop = crate::paths::desktop_uid()?;
+    let peer = transport::peer_euid(stream)?;
+    if authorized_linux_uid(peer, desktop) {
+        Ok(desktop)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("uid {peer} is not the desktop account"),
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn authorize_peer(stream: &transport::Stream) -> io::Result<u32> {
+    use windows::Win32::System::RemoteDesktop::{
+        ProcessIdToSessionId, WTSGetActiveConsoleSessionId,
+    };
+
+    let pid = transport::peer_pid(stream)?;
+    let mut session = u32::MAX;
+    unsafe { ProcessIdToSessionId(pid, &mut session) }.map_err(io::Error::other)?;
+    let active = unsafe { WTSGetActiveConsoleSessionId() };
+    if active == u32::MAX || session != active {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "client is outside the active desktop session",
+        ));
+    }
+    Ok(session)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn authorize_peer(_stream: &transport::Stream) -> io::Result<u32> {
+    Ok(0)
+}
+
+#[cfg(windows)]
+fn peer_scope_is_active(scope: u32) -> bool {
+    use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
+    (unsafe { WTSGetActiveConsoleSessionId() }) == scope
+}
+
+#[cfg(not(windows))]
+fn peer_scope_is_active(_scope: u32) -> bool {
+    true
 }
 
 /// one client session: negotiate, then multiplex inbound commands against the
 /// outbound tick/alert stream on a single duplex connection.
 async fn handle(
     stream: transport::Stream,
+    peer_scope: u32,
     engine: Engine,
     rules: Arc<Mutex<RuleStore>>,
     store: Arc<Mutex<Store>>,
@@ -136,9 +172,14 @@ async fn handle(
         loop {
             let frame = transport::read_frame::<_, ClientMessage>(&mut recv).await;
             let done = !matches!(frame, Ok(Some(_)));
-            if incoming_tx.send(frame.and_then(|msg| {
-                msg.ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
-            })).await.is_err() || done {
+            if incoming_tx
+                .send(frame.and_then(|msg| {
+                    msg.ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
+                }))
+                .await
+                .is_err()
+                || done
+            {
                 break;
             }
         }
@@ -148,6 +189,12 @@ async fn handle(
         select! {
             incoming = incoming_rx.recv() => {
                 let Some(incoming) = incoming else { break };
+                if !peer_scope_is_active(peer_scope) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "desktop session is no longer active",
+                    ));
+                }
                 let msg = incoming?;
                 match msg {
                     ClientMessage::Hello { .. } => {}
@@ -329,7 +376,7 @@ async fn handle(
                         reply(&mut send, req, result).await?;
                     }
                     ClientMessage::KillConnection { req, local_port, remote_addr, remote_port } => {
-                        let killed = kill_conn(local_port, &remote_addr, remote_port);
+                        let killed = kill_conn(local_port, &remote_addr, remote_port, peer_scope);
                         let result = if killed {
                             Reply::Ok
                         } else {
@@ -455,6 +502,12 @@ async fn handle(
                 }
             }
             outbound = events.recv() => {
+                if !peer_scope_is_active(peer_scope) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "desktop session is no longer active",
+                    ));
+                }
                 match outbound {
                     // ticks only go to subscribers; alerts always go out
                     Ok(msg) => {
@@ -594,7 +647,13 @@ async fn negotiate(
     recv: &mut transport::RecvHalf,
     send: &mut transport::SendHalf,
 ) -> io::Result<bool> {
-    match transport::read_frame::<_, ClientMessage>(recv).await? {
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        transport::read_frame::<_, ClientMessage>(recv),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "client handshake timed out"))??;
+    match first {
         Some(ClientMessage::Hello { protocol }) => {
             transport::write_frame(
                 send,
@@ -655,17 +714,17 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn kill_conn(local_port: u16, remote_addr: &str, remote_port: u16) -> bool {
+fn kill_conn(local_port: u16, remote_addr: &str, remote_port: u16, peer_scope: u32) -> bool {
     #[cfg(has_platform)]
     {
         match remote_addr.parse() {
-            Ok(ip) => crate::platform::kill_connection(local_port, ip, remote_port),
+            Ok(ip) => crate::platform::kill_connection(local_port, ip, remote_port, peer_scope),
             Err(_) => false,
         }
     }
     #[cfg(not(has_platform))]
     {
-        let _ = (local_port, remote_addr, remote_port);
+        let _ = (local_port, remote_addr, remote_port, peer_scope);
         false
     }
 }

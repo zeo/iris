@@ -47,6 +47,18 @@ const KNOWN_CAPS: &[&str] = &[
     "ui:panel",
 ];
 
+fn is_link(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 impl Manifest {
     /// parse and validate a manifest's JSON. rejects unknown capabilities,
     /// malformed egress, and an id that would escape the plugins directory.
@@ -88,6 +100,14 @@ impl Manifest {
 
     /// load and validate the manifest in a plugin directory
     pub fn load(dir: &Path) -> Result<Manifest, String> {
+        let dir_metadata = std::fs::symlink_metadata(dir)
+            .map_err(|e| format!("cannot inspect {}: {e}", dir.display()))?;
+        if is_link(&dir_metadata) || !dir_metadata.is_dir() {
+            return Err(format!(
+                "plugin path is not a real directory: {}",
+                dir.display()
+            ));
+        }
         let path = dir.join("plugin.json");
         let json = std::fs::read_to_string(&path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -101,6 +121,15 @@ impl Manifest {
                     m.id
                 ));
             }
+        }
+        let entry = m.entry_path(dir);
+        let entry_metadata = std::fs::symlink_metadata(&entry)
+            .map_err(|e| format!("cannot inspect {}: {e}", entry.display()))?;
+        if is_link(&entry_metadata) || !entry_metadata.is_file() {
+            return Err(format!(
+                "plugin entry is not a real file: {}",
+                entry.display()
+            ));
         }
         Ok(m)
     }
@@ -127,7 +156,11 @@ pub fn discover() -> Vec<(PathBuf, Manifest)> {
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let dir = entry.path();
-        if !dir.is_dir() {
+        if !entry
+            .file_type()
+            .map(|kind| kind.is_dir() && !kind.is_symlink())
+            .unwrap_or(false)
+        {
             continue;
         }
         match Manifest::load(&dir) {

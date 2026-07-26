@@ -439,6 +439,15 @@ impl Store {
                  (SELECT id FROM alerts WHERE acknowledged = 1 ORDER BY id DESC LIMIT ?1)",
                 params![KEEP_ACKED_ALERTS],
             );
+            if matches!(kind, AlertKind::Plugin { .. }) {
+                const KEEP_PLUGIN_ALERTS: i64 = 1000;
+                let _ = self.conn.execute(
+                    "DELETE FROM alerts WHERE kind LIKE '{\"kind\":\"plugin\",%' AND id NOT IN \
+                     (SELECT id FROM alerts WHERE kind LIKE '{\"kind\":\"plugin\",%' \
+                      ORDER BY id DESC LIMIT ?1)",
+                    params![KEEP_PLUGIN_ALERTS],
+                );
+            }
         }
         Alert {
             id,
@@ -873,5 +882,28 @@ mod tests {
         s.ack_alert(a.id);
         assert_eq!(s.list_alerts(true).len(), 0);
         assert_eq!(s.list_alerts(false).len(), 1);
+    }
+
+    #[test]
+    fn plugin_alert_history_is_bounded() {
+        let s = Store::open_in_memory().unwrap();
+        for index in 0..1001 {
+            s.insert_alert(
+                &AlertKind::Plugin {
+                    source: "plugin".into(),
+                    message: index.to_string(),
+                },
+                index,
+            );
+        }
+        let count: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM alerts WHERE kind LIKE '{\"kind\":\"plugin\",%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1000);
     }
 }

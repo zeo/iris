@@ -30,11 +30,10 @@ const TELEMETRY_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)S:(ML;;NW;
 // code on the service side.
 #[cfg_attr(not(windows), allow(dead_code))]
 const ADMIN_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)";
-// the plugin pipe: SYSTEM only in the DACL, with a low integrity label so the
-// restricted plugin children (SYSTEM user, privileges stripped, low IL) can
-// still open it. per-plugin identity is the spawn-time token, not the pipe.
+// the plugin pipe requires both the child's normal SYSTEM SID and its restricting
+// SID, with a low integrity label so the sandbox can open it
 #[cfg_attr(not(windows), allow(dead_code))]
-const PLUGIN_SDDL: &str = "D:(A;;GA;;;SY)S:(ML;;NW;;;LW)";
+const PLUGIN_SDDL: &str = "D:(A;;GA;;;SY)(A;;GRGW;;;RC)S:(ML;;NW;;;LW)";
 
 // on non-Windows the endpoints are unix sockets; access is enforced by the mode
 // of the socket file and its parent directory, set after bind
@@ -144,6 +143,17 @@ pub fn peer_euid(stream: &Stream) -> io::Result<u32> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "peer uid unavailable"))
 }
 
+/// return the process id attached to a Windows named-pipe peer
+#[cfg(windows)]
+pub fn peer_pid(stream: &Stream) -> io::Result<u32> {
+    use interprocess::local_socket::traits::StreamCommon;
+
+    stream
+        .peer_creds()?
+        .pid()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "peer pid unavailable"))
+}
+
 /// write one length-prefixed bincode frame.
 pub async fn write_frame<W, T>(w: &mut W, msg: &T) -> io::Result<()>
 where
@@ -170,6 +180,15 @@ where
     R: AsyncReadExt + Unpin,
     T: DeserializeOwned,
 {
+    read_frame_limited(r, MAX_FRAME_LEN).await
+}
+
+/// read one frame with a caller-specific size ceiling
+pub async fn read_frame_limited<R, T>(r: &mut R, max_len: u32) -> io::Result<Option<T>>
+where
+    R: AsyncReadExt + Unpin,
+    T: DeserializeOwned,
+{
     let mut len_buf = [0u8; 4];
     match r.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -177,7 +196,7 @@ where
         Err(e) => return Err(e),
     }
     let len = u32::from_le_bytes(len_buf);
-    if len > MAX_FRAME_LEN {
+    if len > max_len.min(MAX_FRAME_LEN) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "frame too large",

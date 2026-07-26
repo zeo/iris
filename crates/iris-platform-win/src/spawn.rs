@@ -1,9 +1,8 @@
 //! launch a child process under a restricted, low-integrity token. iris uses
 //! this to run out-of-process plugins: the service is LocalSystem, but a plugin
-//! must never be. the child keeps the SYSTEM user (so it can open the plugin
-//! pipe by its SDDL) yet has every privilege stripped, the Administrators SID
-//! demoted to deny-only, and its integrity dropped to Low, so it holds no power
-//! to touch the system, other processes, or iris's own handles.
+//! must never be. the child keeps the SYSTEM user, but every access check must
+//! also pass through a restricted-code SID. privileges are stripped, the
+//! administrators SID is deny-only, and integrity is low
 
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -13,9 +12,9 @@ use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Security::{
     CreateRestrictedToken, CreateWellKnownSid, GetLengthSid, SetTokenInformation,
-    TokenIntegrityLevel, WinBuiltinAdministratorsSid, WinLowLabelSid, DISABLE_MAX_PRIVILEGE,
-    LUA_TOKEN, PSID, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY,
-    TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    TokenIntegrityLevel, WinBuiltinAdministratorsSid, WinLowLabelSid, WinRestrictedCodeSid,
+    DISABLE_MAX_PRIVILEGE, LUA_TOKEN, PSID, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT,
+    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows::Win32::System::SystemServices::{SE_GROUP_INTEGRITY, SE_GROUP_USE_FOR_DENY_ONLY};
 use windows::Win32::System::Threading::{
@@ -127,21 +126,27 @@ pub fn spawn_restricted(exe: &Path, extra_env: &[(String, String)]) -> io::Resul
         let mut admin_buf = vec![0u8; 68];
         let mut admin_len = admin_buf.len() as u32;
         let admin = PSID(admin_buf.as_mut_ptr() as *mut _);
-        let create_admin = CreateWellKnownSid(
+        CreateWellKnownSid(
             WinBuiltinAdministratorsSid,
             None,
             Some(admin),
             &mut admin_len,
-        );
+        )
+        .map_err(io::Error::other)?;
         let deny = [SID_AND_ATTRIBUTES {
             Sid: admin,
             Attributes: SE_GROUP_USE_FOR_DENY_ONLY as u32,
         }];
-        let sids_to_disable = if create_admin.is_ok() {
-            Some(&deny[..])
-        } else {
-            None
-        };
+
+        let mut code_buf = vec![0u8; 68];
+        let mut code_len = code_buf.len() as u32;
+        let code = PSID(code_buf.as_mut_ptr() as *mut _);
+        CreateWellKnownSid(WinRestrictedCodeSid, None, Some(code), &mut code_len)
+            .map_err(io::Error::other)?;
+        let restricting = [SID_AND_ATTRIBUTES {
+            Sid: code,
+            Attributes: 0,
+        }];
 
         // DISABLE_MAX_PRIVILEGE strips every privilege; LUA_TOKEN marks it a
         // limited-user token
@@ -152,9 +157,9 @@ pub fn spawn_restricted(exe: &Path, extra_env: &[(String, String)]) -> io::Resul
         if let Err(e) = CreateRestrictedToken(
             base,
             DISABLE_MAX_PRIVILEGE | LUA_TOKEN,
-            sids_to_disable,
+            Some(&deny),
             None,
-            None,
+            Some(&restricting),
             &mut restricted,
         ) {
             close_base();
@@ -209,10 +214,15 @@ pub fn spawn_restricted(exe: &Path, extra_env: &[(String, String)]) -> io::Resul
         let _ = CloseHandle(restricted);
         result.map_err(io::Error::other)?;
 
-        // confine the child to a kill-on-close job, then let it run. resuming
-        // happens even if the job could not be set up, so a jobless child still
-        // starts (restricted by its token) rather than hanging suspended.
-        let job = confine_to_job(pi.hProcess);
+        let job = match confine_to_job(pi.hProcess) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = TerminateProcess(pi.hProcess, 1);
+                let _ = CloseHandle(pi.hThread);
+                let _ = CloseHandle(pi.hProcess);
+                return Err(error);
+            }
+        };
         ResumeThread(pi.hThread);
 
         Ok(RestrictedChild {
@@ -224,41 +234,40 @@ pub fn spawn_restricted(exe: &Path, extra_env: &[(String, String)]) -> io::Resul
 }
 
 /// place `process` in a job object that kills its members when the last handle
-/// closes and on an unhandled exception. returns the job handle to keep alive
-/// for the child's lifetime, or an invalid handle if the job could not be built
-/// or assigned (the child then runs jobless, still restricted by its token).
-unsafe fn confine_to_job(process: HANDLE) -> HANDLE {
+/// closes and on an unhandled exception. resource caps keep a plugin from
+/// exhausting the host through child processes or committed memory
+unsafe fn confine_to_job(process: HANDLE) -> io::Result<HANDLE> {
     use windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
+        JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY,
     };
-    let job = match CreateJobObjectW(None, PCWSTR::null()) {
-        Ok(job) => job,
-        Err(e) => {
-            tracing::warn!("could not create the plugin job object: {e}");
-            return HANDLE::default();
-        }
-    };
+    let job = CreateJobObjectW(None, PCWSTR::null()).map_err(io::Error::other)?;
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    limits.BasicLimitInformation.LimitFlags =
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+        | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        | JOB_OBJECT_LIMIT_JOB_MEMORY;
+    limits.BasicLimitInformation.ActiveProcessLimit = 16;
+    limits.ProcessMemoryLimit = 512 * 1024 * 1024;
+    limits.JobMemoryLimit = 768 * 1024 * 1024;
     if let Err(e) = SetInformationJobObject(
         job,
         JobObjectExtendedLimitInformation,
         &limits as *const _ as *const core::ffi::c_void,
         std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
     ) {
-        tracing::warn!("could not set plugin job limits: {e}");
         let _ = CloseHandle(job);
-        return HANDLE::default();
+        return Err(io::Error::other(e));
     }
     if let Err(e) = AssignProcessToJobObject(job, process) {
-        tracing::warn!("could not assign the plugin to its job: {e}");
         let _ = CloseHandle(job);
-        return HANDLE::default();
+        return Err(io::Error::other(e));
     }
-    job
+    Ok(job)
 }
 
 /// label the process's own window station and desktop Low so a low-integrity
@@ -364,8 +373,10 @@ const KEEP_ENV: &[&str] = &[
 /// variables plus `extra` merged in (extras win on a name clash)
 fn build_environment(extra: &[(String, String)]) -> Vec<u16> {
     use std::collections::BTreeMap;
-    let keep: std::collections::HashSet<String> =
-        KEEP_ENV.iter().map(|name| name.to_ascii_lowercase()).collect();
+    let keep: std::collections::HashSet<String> = KEEP_ENV
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
     let mut vars: BTreeMap<String, String> = std::env::vars()
         .filter(|(name, _)| keep.contains(&name.to_ascii_lowercase()))
         .collect();

@@ -29,14 +29,17 @@ jobs:
   windows:
     if: github.actor == 'zeo'
     runs-on: [self-hosted, windows-vm]
-    env:
-      CARGO_HOME: ${{ runner.temp }}/iris-cargo-home
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
           components: clippy
+      - name: isolate cargo source extraction
+        shell: powershell
+        run: |
+          $cargoHome = Join-Path $env:RUNNER_TEMP 'iris-cargo-home'
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "CARGO_HOME=$cargoHome" -Encoding utf8
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # the ephemeral vms use a per-run _work/vm-<id> path, so a restored target

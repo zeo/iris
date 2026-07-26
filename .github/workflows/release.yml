@@ -61,7 +61,9 @@ jobs:
         run: |
           cargo build --release --locked --manifest-path .rot-installer\Cargo.toml --bin rot-installer --bin rot-pack
           if ($LASTEXITCODE -ne 0) { throw "shared installer build failed" }
-          $installer = '.rot-installer\target\release\rot-installer.exe'
+          New-Item -ItemType Directory -Force bridge | Out-Null
+          $installer = 'bridge\rot-installer.exe'
+          Copy-Item '.rot-installer\target\release\rot-installer.exe' $installer
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
             Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { throw "signtool is unavailable" }
@@ -73,8 +75,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "engine build failed" }
           & $signtool.FullName sign /sha1 $env:CERTIFICATE_THUMBPRINT /fd sha256 /tr $timestamp /td sha256 target\release\iris-engine.exe
           if ($LASTEXITCODE -ne 0) { throw "engine signing failed" }
-          New-Item -ItemType Directory -Force bridge | Out-Null
-          Copy-Item $installer bridge\rot-installer.exe
       - name: build and release
         uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
         env:

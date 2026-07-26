@@ -11,6 +11,7 @@ mod report;
 mod rulectl;
 mod startup;
 mod svcctl;
+mod updater;
 
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
@@ -43,7 +44,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(ipc::StatusState::default())
         .manage(ipc::TickDetailState::default())
         .manage(ipc::Commander(cmd_tx))
@@ -82,7 +82,9 @@ pub fn run() {
             startup::get_launch_at_login,
             startup::set_launch_at_login,
             report::save_download,
-            icon::app_icon
+            icon::app_icon,
+            updater::check_installer_update,
+            updater::install_installer_update
         ])
         .setup(move |app| {
             ipc::spawn(app.handle().clone(), cmd_rx);

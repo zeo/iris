@@ -21,7 +21,6 @@
     "opener:allow-open-url",
     "opener:allow-reveal-item-in-dir",
     "notification:default",
-    "updater:default",
     "process:default",
     "process:allow-restart",
     "allow-engine-status",
@@ -56,6 +55,8 @@
     "allow-get-launch-at-login",
     "allow-set-launch-at-login",
     "allow-save-download",
-    "allow-app-icon"
+    "allow-app-icon",
+    "allow-check-installer-update",
+    "allow-install-installer-update"
   ]
 }

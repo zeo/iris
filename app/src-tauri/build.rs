@@ -33,6 +33,8 @@ fn main() {
         "set_launch_at_login",
         "save_download",
         "app_icon",
+        "check_installer_update",
+        "install_installer_update",
     ];
     let attributes = tauri_build::Attributes::new()
         .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));

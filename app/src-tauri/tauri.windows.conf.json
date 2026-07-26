@@ -3,6 +3,9 @@
   "bundle": {
     "targets": ["msi", "nsis"],
     "windows": {
+      "certificateThumbprint": "6EC3EDE3956F6F4B7423C723397AF66BC9D596BA",
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
       "nsis": {
         "installMode": "perMachine"
       }

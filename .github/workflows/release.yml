@@ -23,6 +23,12 @@ jobs:
     runs-on: [self-hosted, windows-vm]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ vars.ROT_INSTALLER_REPOSITORY }}
+          path: .rot-installer
+          ssh-key: ${{ secrets.ROT_INSTALLER_DEPLOY_KEY }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
@@ -46,6 +52,29 @@ jobs:
       - name: install frontend deps
         working-directory: app
         run: pnpm install --frozen-lockfile
+      - name: build bridge installer
+        shell: powershell
+        env:
+          TERMIE_INSTALLER_PUBLIC_KEY: ${{ vars.TERMIE_INSTALLER_PUBLIC_KEY }}
+          CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          cargo build --release --locked --manifest-path .rot-installer\Cargo.toml --bin rot-installer --bin rot-pack
+          if ($LASTEXITCODE -ne 0) { throw "shared installer build failed" }
+          $installer = '.rot-installer\target\release\rot-installer.exe'
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool is unavailable" }
+          if ([string]::IsNullOrWhiteSpace($env:CERTIFICATE_THUMBPRINT)) { throw "certificate thumbprint is unavailable" }
+          $timestamp = if ($env:TIMESTAMP_URL) { $env:TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
+          & $signtool.FullName sign /sha1 $env:CERTIFICATE_THUMBPRINT /fd sha256 /tr $timestamp /td sha256 $installer
+          if ($LASTEXITCODE -ne 0) { throw "installer signing failed" }
+          cargo build --release --locked -p iris-service
+          if ($LASTEXITCODE -ne 0) { throw "engine build failed" }
+          & $signtool.FullName sign /sha1 $env:CERTIFICATE_THUMBPRINT /fd sha256 /tr $timestamp /td sha256 target\release\iris-engine.exe
+          if ($LASTEXITCODE -ne 0) { throw "engine signing failed" }
+          New-Item -ItemType Directory -Force bridge | Out-Null
+          Copy-Item $installer bridge\rot-installer.exe
       - name: build and release
         uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
         env:
@@ -60,6 +89,55 @@ jobs:
           prerelease: false
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
+          args: --config src-tauri/tauri.bridge.conf.json
+
+      - name: pack shared installer release
+        shell: powershell
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ver = $env:GITHUB_REF_NAME -replace '^v',''
+          $stage = Join-Path $env:RUNNER_TEMP 'iris-rpack'
+          New-Item -ItemType Directory -Force "$stage\engine","$stage\resources\geo" | Out-Null
+          Copy-Item target\release\iris.exe $stage\
+          Copy-Item target\release\iris-engine.exe "$stage\engine\"
+          Copy-Item app\src-tauri\resources\geo\dbip-country.mmdb "$stage\resources\geo\"
+          $pack = '.rot-installer\target\release\rot-pack.exe'
+          $installer = '.rot-installer\target\release\rot-installer.exe'
+          function Invoke-RotPack {
+            & $pack @args
+            if ($LASTEXITCODE -ne 0) { throw "rot-pack failed with exit code $LASTEXITCODE" }
+          }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $package = "dist\iris-$ver-windows-x86_64.rpack"
+          Invoke-RotPack pack $stage $package --app iris --version $ver
+          Invoke-RotPack sign $package "$package.minisig"
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$(Split-Path $package -Leaf)"
+          Invoke-RotPack manifest $package dist\installer.json --url $url --signature "$package.minisig" --published-at ([DateTime]::UtcNow.ToString('o')) --target windows-x86_64
+          Invoke-RotPack sign dist\installer.json dist\installer.json.minisig
+          Invoke-RotPack online $installer "dist\iris-$ver-online-setup.exe"
+          Invoke-RotPack offline $installer $package "$package.minisig" "dist\iris-$ver-offline-setup.exe" --app iris
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          $timestamp = if ($env:TIMESTAMP_URL) { $env:TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
+          foreach ($file in @("dist\iris-$ver-online-setup.exe", "dist\iris-$ver-offline-setup.exe")) {
+            & $signtool.FullName sign /sha1 $env:CERTIFICATE_THUMBPRINT /fd sha256 /tr $timestamp /td sha256 $file
+            if ($LASTEXITCODE -ne 0) { throw "signing failed for $file" }
+          }
+
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: |
+            dist/iris-*.rpack
+            dist/iris-*.rpack.minisig
+            dist/iris-*-online-setup.exe
+            dist/iris-*-offline-setup.exe
+            dist/installer.json
+            dist/installer.json.minisig
+          fail_on_unmatched_files: true
 
   build-linux:
     if: github.actor == 'zeo'
@@ -67,6 +145,12 @@ jobs:
     runs-on: [self-hosted, linux-vm]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ vars.ROT_INSTALLER_REPOSITORY }}
+          path: .rot-installer
+          ssh-key: ${{ secrets.ROT_INSTALLER_DEPLOY_KEY }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
@@ -108,3 +192,45 @@ jobs:
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true
+
+      - name: build shared installer tools
+        env:
+          TERMIE_INSTALLER_PUBLIC_KEY: ${{ vars.TERMIE_INSTALLER_PUBLIC_KEY }}
+        run: cargo build --release --locked --manifest-path .rot-installer/Cargo.toml --bin rot-installer --bin rot-pack
+
+      - name: pack shared installer release
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          stage="$RUNNER_TEMP/iris-rpack"
+          mkdir -p "$stage/engine" "$stage/resources/geo" dist
+          install -m755 target/release/iris "$stage/iris"
+          install -m755 target/release/iris-engine "$stage/engine/iris-engine"
+          install -m644 app/src-tauri/resources/geo/dbip-country.mmdb "$stage/resources/geo/"
+          pack=.rot-installer/target/release/rot-pack
+          installer=.rot-installer/target/release/rot-installer
+          package="dist/iris-$ver-linux-x86_64.rpack"
+          "$pack" pack "$stage" "$package" --app iris --version "$ver"
+          "$pack" sign "$package" "$package.minisig"
+          curl --proto '=https' --tlsv1.2 --retry 5 --location --fail \
+            -o dist/installer.json \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/installer.json"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$(basename "$package")"
+          "$pack" manifest "$package" dist/installer.json --url "$url" --signature "$package.minisig" --published-at "$(date --utc --iso-8601=seconds)" --target linux-x86_64
+          "$pack" sign dist/installer.json dist/installer.json.minisig
+          "$pack" online "$installer" "dist/iris-$ver-linux-x86_64-setup"
+          "$pack" offline "$installer" "$package" "$package.minisig" "dist/iris-$ver-linux-x86_64-offline-setup" --app iris
+          chmod 755 dist/iris-*-setup
+
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: |
+            dist/iris-*.rpack
+            dist/iris-*.rpack.minisig
+            dist/iris-*-setup
+            dist/installer.json
+            dist/installer.json.minisig
+          overwrite_files: true
+          fail_on_unmatched_files: true

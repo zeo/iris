@@ -6,8 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+## [0.1.6] - 2026-07-26
+
 ### Changed
 
+- Updates now use the shared signed installer; this release carries the one-time bridge from the existing NSIS and MSI channels.
 - Allow and Block answers from a live connection prompt now apply through the running engine on both platforms. Windows no longer opens a UAC dialog for that bounded decision.
 
 ### Fixed

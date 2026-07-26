@@ -1,0 +1,12 @@
+{
+  "build": {
+    "beforeBuildCommand": "pnpm build"
+  },
+  "bundle": {
+    "resources": {
+      "resources/geo/dbip-country.mmdb": "resources/geo/dbip-country.mmdb",
+      "../../target/release/iris-engine.exe": "engine/iris-engine.exe",
+      "../../bridge/rot-installer.exe": "rot-installer.exe"
+    }
+  }
+}

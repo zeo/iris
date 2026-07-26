@@ -16,12 +16,21 @@ pub struct Update {
 #[tauri::command]
 pub fn check_installer_update() -> Result<Option<Update>, String> {
     let installer = installer_path().ok_or_else(|| "shared updater is not installed".to_string())?;
-    let status = Command::new(&installer)
+    let mut status = Command::new(&installer)
         .args(["status", "iris", "--json"])
         .output()
         .map_err(|error| format!("read installer status: {error}"))?;
-    let receipts: Vec<serde_json::Value> = serde_json::from_slice(&status.stdout)
+    let mut receipts: Vec<serde_json::Value> = serde_json::from_slice(&status.stdout)
         .map_err(|error| format!("read installer status: {error}"))?;
+    if status.status.success() && receipts.is_empty() && installer_is_bundled(&installer) {
+        adopt_bundled_installer(&installer)?;
+        status = Command::new(&installer)
+            .args(["status", "iris", "--json"])
+            .output()
+            .map_err(|error| format!("read installer status: {error}"))?;
+        receipts = serde_json::from_slice(&status.stdout)
+            .map_err(|error| format!("read installer status: {error}"))?;
+    }
     if !status.status.success() || receipts.is_empty() {
         return Err("Iris is still owned by its legacy or system package".into());
     }
@@ -80,6 +89,30 @@ fn installer_path() -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|path| path.is_file())
+}
+
+fn installer_is_bundled(installer: &std::path::Path) -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .is_some_and(|parent| installer.parent() == Some(parent.as_path()))
+}
+
+fn adopt_bundled_installer(installer: &std::path::Path) -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let root = executable
+        .parent()
+        .ok_or_else(|| "application path has no parent".to_string())?;
+    let status = Command::new(installer)
+        .args(["adopt", "iris", "--scope", "machine", "--root"])
+        .arg(root)
+        .args(["--version", env!("CARGO_PKG_VERSION")])
+        .status()
+        .map_err(|error| format!("start installer migration: {error}"))?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("installer migration exited with {status}"))
 }
 
 fn version_tuple(version: &str) -> Vec<u64> {

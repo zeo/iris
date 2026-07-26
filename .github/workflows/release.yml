@@ -102,6 +102,11 @@ jobs:
           $ver = $env:GITHUB_REF_NAME -replace '^v',''
           $stage = Join-Path $env:RUNNER_TEMP 'iris-rpack'
           New-Item -ItemType Directory -Force "$stage\engine","$stage\resources\geo" | Out-Null
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          $timestamp = if ($env:TIMESTAMP_URL) { $env:TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
+          & $signtool.FullName sign /sha1 $env:CERTIFICATE_THUMBPRINT /fd sha256 /tr $timestamp /td sha256 target\release\iris.exe
+          if ($LASTEXITCODE -ne 0) { throw "signing failed for iris.exe" }
           Copy-Item target\release\iris.exe $stage\
           Copy-Item target\release\iris-engine.exe "$stage\engine\"
           Copy-Item app\src-tauri\resources\geo\dbip-country.mmdb "$stage\resources\geo\"
@@ -120,9 +125,6 @@ jobs:
           Invoke-RotPack sign dist\installer.json dist\installer.json.minisig
           Invoke-RotPack online $installer "dist\iris-$ver-online-setup.exe"
           Invoke-RotPack offline $installer $package "$package.minisig" "dist\iris-$ver-offline-setup.exe" --app iris
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          $timestamp = if ($env:TIMESTAMP_URL) { $env:TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
           foreach ($file in @("dist\iris-$ver-online-setup.exe", "dist\iris-$ver-offline-setup.exe")) {
             & $signtool.FullName sign /sha1 $env:CERTIFICATE_THUMBPRINT /fd sha256 /tr $timestamp /td sha256 $file
             if ($LASTEXITCODE -ne 0) { throw "signing failed for $file" }

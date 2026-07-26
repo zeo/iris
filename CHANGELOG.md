@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+## [0.1.7] - 2026-07-26
+
+### Fixed
+
+- Sign the application executable before building shared installer packages.
+
 ## [0.1.6] - 2026-07-26
 
 ### Changed

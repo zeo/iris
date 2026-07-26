@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  decisionAlreadySettled,
   needsDecision,
   needsNativeNotification,
   visibleDecisionPrompts,
@@ -19,6 +20,11 @@ const pending = {
 } satisfies Alert;
 
 describe("needsDecision", () => {
+  it("recognizes a decision settled by another prompt", () => {
+    expect(decisionAlreadySettled("connection decision is no longer pending")).toBe(true);
+    expect(decisionAlreadySettled("the engine is offline")).toBe(false);
+  });
+
   it("keeps live connection requests actionable until they are decided", () => {
     expect(needsDecision(pending)).toBe(true);
     expect(needsDecision({ ...pending, acknowledged: true })).toBe(false);

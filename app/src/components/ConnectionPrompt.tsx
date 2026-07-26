@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   type Alert,
   type AlertKind,
+  decisionAlreadySettled,
   fileName,
   needsDecision,
   visibleDecisionPrompts,
@@ -83,7 +84,12 @@ export function ConnectionPrompt() {
       await invoke("decide_alert", { id: alert.id, action });
       setAlerts((current) => current.filter((candidate) => candidate.id !== alert.id));
     } catch (reason) {
-      setError({ id: alert.id, message: String(reason) });
+      if (decisionAlreadySettled(reason)) {
+        setAlerts((current) => current.filter((candidate) => candidate.id !== alert.id));
+        void refresh();
+      } else {
+        setError({ id: alert.id, message: String(reason) });
+      }
     } finally {
       setBusy((current) => {
         const next = new Set(current);

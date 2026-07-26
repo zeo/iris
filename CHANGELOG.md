@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+## [0.1.8] - 2026-07-26
+
+### Fixed
+
+- A connection prompt already answered by another Iris window now closes instead of showing a stale-decision error.
+
 ## [0.1.7] - 2026-07-26
 
 ### Fixed

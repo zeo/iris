@@ -39,6 +39,9 @@ export const needsDecision = (alert: Alert): boolean =>
 
 export const needsNativeNotification = (alert: Alert): boolean => !needsDecision(alert);
 
+export const decisionAlreadySettled = (reason: unknown): boolean =>
+  String(reason).includes("connection decision is no longer pending");
+
 export const visibleDecisionPrompts = (
   alerts: Alert[],
   dismissed: ReadonlySet<number>,

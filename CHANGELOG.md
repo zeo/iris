@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- Allow and Block answers from a live connection prompt now apply through the running engine on both platforms. Windows no longer opens a UAC dialog for that bounded decision.
+
+### Fixed
+
+- A saved Windows rule for an uninstalled application no longer leaves the service marked as running with no working engine. The rule stays enabled and is applied when the executable returns.
+- The Windows service reports startup failures to the Service Control Manager, waits for the Base Filtering Engine at boot, reapplies protected state permissions, and reports service-start failures to the installer.
+
 ## [0.1.5] - 2026-07-18
 
 ### Added

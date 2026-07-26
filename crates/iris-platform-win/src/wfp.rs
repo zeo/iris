@@ -10,7 +10,9 @@
 use iris_core::{Direction, EngineError, EngineResult, RuleAction};
 use std::ptr;
 use windows::core::{GUID, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
+use windows::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, HANDLE,
+};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterCreateEnumHandle0,
     FwpmFilterDeleteById0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0,
@@ -185,7 +187,7 @@ impl Wfp {
             let mut app_id: *mut FWP_BYTE_BLOB = ptr::null_mut();
             let rc = FwpmGetAppIdFromFileName0(PCWSTR(file.as_ptr()), &mut app_id);
             if !ok(rc) || app_id.is_null() {
-                return Err(EngineError::NotFound(format!("app id for {path}: {rc:#x}")));
+                return Err(app_id_error(path, rc));
             }
 
             let action_type = match action {
@@ -255,6 +257,15 @@ impl Wfp {
     }
 }
 
+fn app_id_error(path: &str, code: u32) -> EngineError {
+    let message = format!("app id for {path}: {code:#x}");
+    if code == ERROR_FILE_NOT_FOUND.0 || code == ERROR_PATH_NOT_FOUND.0 {
+        EngineError::NotFound(message)
+    } else {
+        EngineError::Os(message)
+    }
+}
+
 fn app_condition(app_id: *mut FWP_BYTE_BLOB) -> FWPM_FILTER_CONDITION0 {
     FWPM_FILTER_CONDITION0 {
         fieldKey: FWPM_CONDITION_ALE_APP_ID,
@@ -305,5 +316,21 @@ mod tests {
                 FWP_CONDITION_FLAG_IS_LOOPBACK
             );
         }
+    }
+
+    #[test]
+    fn defers_only_missing_application_paths() {
+        assert!(matches!(
+            app_id_error("c:\\gone.exe", ERROR_FILE_NOT_FOUND.0),
+            EngineError::NotFound(_)
+        ));
+        assert!(matches!(
+            app_id_error("c:\\gone\\app.exe", ERROR_PATH_NOT_FOUND.0),
+            EngineError::NotFound(_)
+        ));
+        assert!(matches!(
+            app_id_error("c:\\private\\app.exe", 5),
+            EngineError::Os(_)
+        ));
     }
 }

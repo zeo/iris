@@ -2,11 +2,7 @@ use crate::engine::Engine;
 use crate::plugins::registry::EnrichmentRegistry;
 use crate::plugins::PanelHub;
 use crate::rules::RuleStore;
-use iris_core::AlertKind;
-#[cfg(windows)]
-use iris_core::RuleAction;
-#[cfg(not(windows))]
-use iris_core::{Direction, Rule};
+use iris_core::{AlertKind, Direction, Rule, RuleAction};
 use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
 use iris_store::Store;
@@ -297,10 +293,7 @@ async fn handle(
                         reply(&mut send, req, Reply::Ok).await?;
                     }
                     ClientMessage::DecideAlert { req, id, action } => {
-                        // the linux accept path spawns and waits on nft, so run the
-                        // whole decision on the blocking pool, off the reactor
                         let store = store.clone();
-                        #[cfg(not(windows))]
                         let rules = rules.clone();
                         let result = tokio::task::spawn_blocking(move || {
                             let alert = store
@@ -312,58 +305,37 @@ async fn handle(
                             match alert.map(|alert| alert.kind) {
                                 Some(AlertKind::NewApp { app, direction, .. }) => {
                                     let path = app.0.clone();
-                                    // on windows a block is a SYSTEM wfp filter, the
-                                    // same privileged change as AddRule, so it is not
-                                    // accepted on this unprivileged pipe: the UI routes
-                                    // a block through the elevated admin channel. an
-                                    // allow needs no filter (enforcement is allow by
-                                    // default) so it is only recorded. on linux the
-                                    // root engine holds the connection and applies the
-                                    // rule directly for either verdict.
-                                    //
-                                    // deciding a pending prompt is deliberately not gated
-                                    // behind polkit the way general rule edits (the admin
-                                    // pipe) are: it is the interactive answer to a prompt
-                                    // the user is already looking at, bounded to that one
-                                    // pending alert, so a password on every allow/block
-                                    // click would only punish the common path.
-                                    #[cfg(windows)]
-                                    {
-                                        let _ = &direction;
-                                        match action {
-                                            RuleAction::Block => Reply::Error(
-                                                "blocking a connection requires elevation".into(),
-                                            ),
-                                            RuleAction::Allow => {
-                                                let store =
-                                                    store.lock().unwrap_or_else(|e| e.into_inner());
-                                                store.set_app_decision(&path, action);
-                                                store.ack_alert(id);
-                                                Reply::Ok
-                                            }
-                                        }
-                                    }
-                                    #[cfg(not(windows))]
-                                    {
+                                    // this command is bounded to one pending alert and
+                                    // the active desktop session. manual rule changes
+                                    // still use the admin endpoint.
+                                    let needs_rule =
+                                        !cfg!(windows) || matches!(action, RuleAction::Block);
+                                    let applied = if needs_rule {
                                         let rule = Rule {
                                             app,
                                             direction: direction.unwrap_or(Direction::Outbound),
                                             action,
                                             label: None,
                                         };
-                                        match rules.lock().unwrap_or_else(|e| e.into_inner()).add(rule)
-                                        {
-                                            Ok(_) => {
-                                                let store =
-                                                    store.lock().unwrap_or_else(|e| e.into_inner());
-                                                store.set_app_decision(&path, action);
-                                                store.ack_alert(id);
-                                                Reply::Ok
-                                            }
-                                            Err(error) => Reply::Error(format!(
-                                                "could not apply decision: {error}"
-                                            )),
+                                        rules
+                                            .lock()
+                                            .unwrap_or_else(|error| error.into_inner())
+                                            .add(rule)
+                                            .map(|_| ())
+                                    } else {
+                                        Ok(())
+                                    };
+                                    match applied {
+                                        Ok(()) => {
+                                            let store =
+                                                store.lock().unwrap_or_else(|e| e.into_inner());
+                                            store.set_app_decision(&path, action);
+                                            store.ack_alert(id);
+                                            Reply::Ok
                                         }
+                                        Err(error) => Reply::Error(format!(
+                                            "could not apply decision: {error}"
+                                        )),
                                     }
                                 }
                                 _ => Reply::Error("connection decision is no longer pending".into()),

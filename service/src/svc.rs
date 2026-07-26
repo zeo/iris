@@ -32,13 +32,18 @@ fn status(
     accepted: ServiceControlAccept,
     exit_code: ServiceExitCode,
 ) -> ServiceStatus {
+    let starting = state == ServiceState::StartPending;
     ServiceStatus {
         service_type: SERVICE_TYPE,
         current_state: state,
         controls_accepted: accepted,
         exit_code,
-        checkpoint: 0,
-        wait_hint: Duration::default(),
+        checkpoint: u32::from(starting),
+        wait_hint: if starting {
+            Duration::from_secs(15)
+        } else {
+            Duration::default()
+        },
         process_id: None,
     }
 }
@@ -59,13 +64,37 @@ fn run_service() -> anyhow::Result<()> {
     let status_handle = service_control_handler::register(SERVICE_NAME, handler)?;
 
     status_handle.set_service_status(status(
+        ServiceState::StartPending,
+        ServiceControlAccept::empty(),
+        ServiceExitCode::Win32(0),
+    ))?;
+
+    let initialized = (|| -> anyhow::Result<_> {
+        std::fs::create_dir_all(crate::paths::plugins_dir())?;
+        crate::paths::secure_state()?;
+        let rt = crate::engine_runtime()?;
+        let rules = std::sync::Arc::new(std::sync::Mutex::new(crate::rules::RuleStore::new()?));
+        Ok((rt, rules))
+    })();
+    let (rt, rules) = match initialized {
+        Ok(initialized) => initialized,
+        Err(error) => {
+            tracing::error!("service initialization failed: {error}");
+            status_handle.set_service_status(status(
+                ServiceState::Stopped,
+                ServiceControlAccept::empty(),
+                ServiceExitCode::ServiceSpecific(1),
+            ))?;
+            return Ok(());
+        }
+    };
+
+    status_handle.set_service_status(status(
         ServiceState::Running,
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
         ServiceExitCode::Win32(0),
     ))?;
 
-    let rt = crate::engine_runtime()?;
-    let rules = std::sync::Arc::new(std::sync::Mutex::new(crate::rules::RuleStore::new()?));
     let failed = rt.block_on(async {
         let engine = Engine::new();
         let store = std::sync::Arc::new(std::sync::Mutex::new(crate::open_store()));
@@ -90,8 +119,12 @@ fn run_service() -> anyhow::Result<()> {
                     }
                 }
             }
-            r = server::serve_admin(rules, store) => {
+            r = server::serve_admin(rules.clone(), store) => {
                 tracing::error!("admin serve loop ended: {r:?}");
+                true
+            }
+            r = crate::watch_rules(rules) => {
+                tracing::error!("firewall watcher ended: {r:?}");
                 true
             }
             _ = wait_for_stop(stop_rx) => {

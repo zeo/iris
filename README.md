@@ -15,17 +15,18 @@ talking to, and a running history of how much each one uses.
 Built native: a small privileged engine (a Windows service, or a systemd unit on
 Linux) does the real work with the OS filtering layer and kernel network events,
 and an unprivileged Tauri UI drives it over a local, access-controlled socket.
-Monitoring and rules keep running with the window closed. Changing a firewall
-rule prompts for elevation over a separate admin-only channel (a UAC prompt on
-Windows, a polkit prompt on Linux), so no unprivileged process can rewrite what
-the system enforces.
+Monitoring and rules keep running with the window closed. General rule editing
+prompts for elevation over a separate admin-only channel (a UAC prompt on
+Windows, a polkit prompt on Linux). A live connection prompt can decide only its
+own pending alert through the active desktop session.
 
 ## What it does
 
 - **Protect**: per-app allow and block rules, so a blocked app stays blocked
   whether or not the UI is open. Windows enforces them at the Filtering Platform;
   Linux decides each new connection in the engine behind an nftables queue.
-  Adding, removing, or toggling a rule asks for elevation.
+  Decisions made from a live connection prompt apply immediately. General rule
+  editing asks for elevation.
 - **Activity**: a live table of every app's up and down rate, open connections,
   and the remote endpoints it is talking to. Open a connection for its host name,
   network scope, country, and a one-click kill.

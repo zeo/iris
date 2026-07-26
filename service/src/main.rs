@@ -170,25 +170,39 @@ pub(crate) async fn run_engine() -> anyhow::Result<()> {
         r = server::serve(engine, rules.clone(), store.clone(), enrich, panels) => r,
         r = server::serve_admin(rules.clone(), store) => r,
         r = supervisor.serve() => r,
-        r = watch_enforcement(rules) => r,
+        r = watch_rules(rules) => r,
     }
 }
 
-#[cfg(target_os = "linux")]
-async fn watch_enforcement(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) async fn watch_rules(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
     loop {
+        #[cfg(windows)]
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        #[cfg(target_os = "linux")]
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let healthy = rules
+        #[cfg(windows)]
+        let mut rules = rules
             .lock()
-            .map(|rules| rules.enforcement_healthy())
-            .unwrap_or(false);
-        if !healthy {
+            .map_err(|_| anyhow::anyhow!("rule store unavailable"))?;
+        #[cfg(target_os = "linux")]
+        let rules = rules
+            .lock()
+            .map_err(|_| anyhow::anyhow!("rule store unavailable"))?;
+        #[cfg(target_os = "linux")]
+        if !rules.enforcement_healthy() {
             anyhow::bail!("firewall enforcement worker stopped");
+        }
+        #[cfg(windows)]
+        match rules.retry_deferred() {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(count, "restored deferred firewall rules"),
+            Err(error) => tracing::warn!("could not retry deferred firewall rules: {error}"),
         }
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-async fn watch_enforcement(_rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
+#[cfg(not(any(windows, target_os = "linux")))]
+pub(crate) async fn watch_rules(_rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
     std::future::pending().await
 }

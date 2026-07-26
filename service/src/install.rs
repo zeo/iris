@@ -5,7 +5,8 @@
 use std::ffi::{c_void, OsStr};
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
-use windows::core::{BOOL, PCWSTR, PWSTR};
+use windows::core::{BOOL, HRESULT, PCWSTR, PWSTR};
+use windows::Win32::Foundation::ERROR_SERVICE_ALREADY_RUNNING;
 use windows::Win32::System::Services::{
     ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
     CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, StartServiceW, SC_ACTION,
@@ -26,6 +27,7 @@ pub fn install() -> anyhow::Result<()> {
     let exe = secure_service_exe()?;
     let bin_path = wide(&format!("\"{}\"", exe.display()));
     let name = wide(SERVICE_NAME);
+    let dependencies = wide("BFE\0");
     unsafe {
         let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)?;
         // reuse an existing registration (a reinstall or upgrade) by repointing
@@ -41,7 +43,7 @@ pub fn install() -> anyhow::Result<()> {
                     PCWSTR(bin_path.as_ptr()),
                     PCWSTR::null(),
                     None,
-                    PCWSTR::null(),
+                    PCWSTR(dependencies.as_ptr()),
                     PCWSTR::null(),
                     PCWSTR::null(),
                     PCWSTR(wide(DISPLAY_NAME).as_ptr()),
@@ -59,13 +61,19 @@ pub fn install() -> anyhow::Result<()> {
                 PCWSTR(bin_path.as_ptr()),
                 PCWSTR::null(),
                 None,
-                PCWSTR::null(),
+                PCWSTR(dependencies.as_ptr()),
                 PCWSTR::null(),
                 PCWSTR::null(),
             )?,
         };
         configure_recovery(svc);
-        let _ = StartServiceW(svc, None);
+        if let Err(error) = StartServiceW(svc, None) {
+            if error.code() != HRESULT::from_win32(ERROR_SERVICE_ALREADY_RUNNING.0) {
+                let _ = CloseServiceHandle(svc);
+                let _ = CloseServiceHandle(scm);
+                return Err(error.into());
+            }
+        }
         let _ = CloseServiceHandle(svc);
         let _ = CloseServiceHandle(scm);
     }
@@ -142,4 +150,16 @@ pub fn uninstall() -> anyhow::Result<()> {
     }
     tracing::info!("service '{SERVICE_NAME}' removed");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bfe_dependency_is_a_double_null_terminated_multistring() {
+        let dependencies = wide("BFE\0");
+        assert_eq!(&dependencies[..3], &[b'B' as u16, b'F' as u16, b'E' as u16]);
+        assert_eq!(&dependencies[3..], &[0, 0]);
+    }
 }

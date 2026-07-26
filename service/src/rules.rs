@@ -3,7 +3,7 @@
 //! on startup it wipes any leftover iris filters and re-applies the enabled
 //! rules, so the JSON file is the single source of truth.
 
-use iris_core::{Rule, StoredRule};
+use iris_core::{EngineError, Rule, StoredRule};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -112,7 +112,17 @@ impl RuleStore {
             let filter_ids = if p.enabled {
                 #[cfg(has_platform)]
                 {
-                    apply(wfp.as_mut(), &p.rule)?
+                    match apply(wfp.as_mut(), &p.rule) {
+                        Ok(ids) => ids,
+                        Err(EngineError::NotFound(error)) => {
+                            tracing::warn!(
+                                app = %p.rule.app.0,
+                                "rule deferred until the application returns: {error}"
+                            );
+                            Vec::new()
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 #[cfg(not(has_platform))]
                 {
@@ -140,6 +150,29 @@ impl RuleStore {
 
     pub fn list(&self) -> Vec<StoredRule> {
         self.rules.clone()
+    }
+
+    #[cfg(windows)]
+    pub fn retry_deferred(&mut self) -> anyhow::Result<usize> {
+        let pending: Vec<(usize, Rule)> = self
+            .rules
+            .iter()
+            .enumerate()
+            .filter(|(_, stored)| stored.enabled && stored.filter_ids.is_empty())
+            .map(|(index, stored)| (index, stored.rule.clone()))
+            .collect();
+        let mut restored = 0;
+        for (index, rule) in pending {
+            match apply(self.wfp.as_mut(), &rule) {
+                Ok(ids) => {
+                    self.rules[index].filter_ids = ids;
+                    restored += 1;
+                }
+                Err(EngineError::NotFound(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(restored)
     }
 
     #[cfg(target_os = "linux")]

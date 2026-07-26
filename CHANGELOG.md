@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+## [0.1.10] - 2026-07-26
+
+### Fixed
+
+- Shared package signing resolves release artifacts from the repository root.
+
 ## [0.1.9] - 2026-07-26
 
 ### Fixed

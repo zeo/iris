@@ -117,9 +117,10 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "rot-pack failed with exit code $LASTEXITCODE" }
           }
           function Invoke-TauriSign([string]$path, [string]$output) {
-            pnpm --dir app exec tauri signer sign $path
+            $resolved = (Resolve-Path -LiteralPath $path).Path
+            pnpm --dir app exec tauri signer sign $resolved
             if ($LASTEXITCODE -ne 0) { throw "tauri signer failed with exit code $LASTEXITCODE" }
-            Copy-Item "$path.sig" $output
+            Copy-Item "$resolved.sig" $output
           }
           New-Item -ItemType Directory -Force dist | Out-Null
           $package = "dist\iris-$ver-windows-x86_64.rpack"
@@ -220,15 +221,17 @@ jobs:
           installer=.rot-installer/target/release/rot-installer
           package="dist/iris-$ver-linux-x86_64.rpack"
           "$pack" pack "$stage" "$package" --app iris --version "$ver"
-          pnpm --dir app exec tauri signer sign "$package"
-          cp "$package.sig" "$package.minisig"
+          package_path="$(realpath "$package")"
+          pnpm --dir app exec tauri signer sign "$package_path"
+          cp "$package_path.sig" "$package.minisig"
           curl --proto '=https' --tlsv1.2 --retry 5 --location --fail \
             -o dist/installer.json \
             "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/installer.json"
           url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$(basename "$package")"
           "$pack" manifest "$package" dist/installer.json --url "$url" --signature "$package.minisig" --published-at "$(date --utc --iso-8601=seconds)" --target linux-x86_64
-          pnpm --dir app exec tauri signer sign dist/installer.json
-          cp dist/installer.json.sig dist/installer.json.minisig
+          manifest_path="$(realpath dist/installer.json)"
+          pnpm --dir app exec tauri signer sign "$manifest_path"
+          cp "$manifest_path.sig" dist/installer.json.minisig
           "$pack" online "$installer" "dist/iris-$ver-linux-x86_64-setup"
           "$pack" offline "$installer" "$package" "$package.minisig" "dist/iris-$ver-linux-x86_64-offline-setup" --app iris
           chmod 755 dist/iris-*-setup

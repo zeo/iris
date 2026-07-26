@@ -116,13 +116,18 @@ jobs:
             & $pack @args
             if ($LASTEXITCODE -ne 0) { throw "rot-pack failed with exit code $LASTEXITCODE" }
           }
+          function Invoke-TauriSign([string]$path, [string]$output) {
+            pnpm --dir app exec tauri signer sign $path
+            if ($LASTEXITCODE -ne 0) { throw "tauri signer failed with exit code $LASTEXITCODE" }
+            Copy-Item "$path.sig" $output
+          }
           New-Item -ItemType Directory -Force dist | Out-Null
           $package = "dist\iris-$ver-windows-x86_64.rpack"
           Invoke-RotPack pack $stage $package --app iris --version $ver
-          Invoke-RotPack sign $package "$package.minisig"
+          Invoke-TauriSign $package "$package.minisig"
           $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$(Split-Path $package -Leaf)"
           Invoke-RotPack manifest $package dist\installer.json --url $url --signature "$package.minisig" --published-at ([DateTime]::UtcNow.ToString('o')) --target windows-x86_64
-          Invoke-RotPack sign dist\installer.json dist\installer.json.minisig
+          Invoke-TauriSign dist\installer.json dist\installer.json.minisig
           Invoke-RotPack online $installer "dist\iris-$ver-online-setup.exe"
           Invoke-RotPack offline $installer $package "$package.minisig" "dist\iris-$ver-offline-setup.exe" --app iris
           foreach ($file in @("dist\iris-$ver-online-setup.exe", "dist\iris-$ver-offline-setup.exe")) {
@@ -215,13 +220,15 @@ jobs:
           installer=.rot-installer/target/release/rot-installer
           package="dist/iris-$ver-linux-x86_64.rpack"
           "$pack" pack "$stage" "$package" --app iris --version "$ver"
-          "$pack" sign "$package" "$package.minisig"
+          pnpm --dir app exec tauri signer sign "$package"
+          cp "$package.sig" "$package.minisig"
           curl --proto '=https' --tlsv1.2 --retry 5 --location --fail \
             -o dist/installer.json \
             "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/installer.json"
           url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$(basename "$package")"
           "$pack" manifest "$package" dist/installer.json --url "$url" --signature "$package.minisig" --published-at "$(date --utc --iso-8601=seconds)" --target linux-x86_64
-          "$pack" sign dist/installer.json dist/installer.json.minisig
+          pnpm --dir app exec tauri signer sign dist/installer.json
+          cp dist/installer.json.sig dist/installer.json.minisig
           "$pack" online "$installer" "dist/iris-$ver-linux-x86_64-setup"
           "$pack" offline "$installer" "$package" "$package.minisig" "dist/iris-$ver-linux-x86_64-offline-setup" --app iris
           chmod 755 dist/iris-*-setup

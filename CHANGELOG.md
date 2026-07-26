@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+## [0.1.9] - 2026-07-26
+
+### Fixed
+
+- Shared installer packages use Iris's existing updater signer, including legacy keys that the standalone pack tool cannot open.
+
 ## [0.1.8] - 2026-07-26
 
 ### Fixed

@@ -101,6 +101,7 @@ export function Settings() {
             class="rocker"
             role="switch"
             aria-checked={showNotifications()}
+            aria-label="Desktop notifications"
             onClick={() => setShowNotifications(!showNotifications())}
           >
             <span class="knob" />
@@ -120,6 +121,7 @@ export function Settings() {
               type="number"
               min="0"
               step="1"
+              aria-label="Monthly data cap in gigabytes"
               value={dataCapGb()}
               onInput={(e) => setDataCapGb(Math.max(0, Number(e.currentTarget.value) || 0))}
             />
@@ -137,6 +139,7 @@ export function Settings() {
               min="1"
               max="28"
               step="1"
+              aria-label="Billing reset day"
               value={billingResetDay()}
               onInput={(e) =>
                 setBillingResetDay(Math.min(28, Math.max(1, Math.round(Number(e.currentTarget.value) || 1))))
@@ -153,7 +156,13 @@ export function Settings() {
             <span class="set-name">Launch at login</span>
             <span class="set-desc">Start Iris in the tray when you sign in.</span>
           </div>
-          <button class="rocker" role="switch" aria-checked={atLogin()} onClick={toggleLogin}>
+          <button
+            class="rocker"
+            role="switch"
+            aria-checked={atLogin()}
+            aria-label="Launch at login"
+            onClick={toggleLogin}
+          >
             <span class="knob" />
           </button>
         </div>

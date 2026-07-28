@@ -35,6 +35,9 @@ const TABS: Tab[] = [
   { id: "settings", label: "Settings", icon: "settings", view: Settings },
 ];
 
+const tabId = (id: string) => `tab-${encodeURIComponent(id)}`;
+const panelId = (id: string) => `panel-${encodeURIComponent(id)}`;
+
 export function App() {
   const theme = createTheme();
   const [tab, setTab] = createSignal("protect");
@@ -51,7 +54,24 @@ export function App() {
     const base = TABS.slice(0, -1);
     return [...base, ...dynamic, TABS[TABS.length - 1]];
   };
-  const current = () => allTabs().find((t) => t.id === tab()) ?? TABS[1];
+  const current = () => allTabs().find((t) => t.id === tab()) ?? TABS[0];
+  const moveTabFocus = (event: KeyboardEvent, id: string) => {
+    const tabs = allTabs();
+    const index = tabs.findIndex((t) => t.id === id);
+    if (index < 0) return;
+
+    let next = index;
+    if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = tabs.length - 1;
+    else return;
+
+    event.preventDefault();
+    const nextTab = tabs[next];
+    setTab(nextTab.id);
+    document.getElementById(tabId(nextTab.id))?.focus();
+  };
 
   createEffect(() => {
     const liveView = tab() === "activity" || tab() === "graph";
@@ -111,15 +131,19 @@ export function App() {
         up={engine.up()}
       />
 
-      <nav class="bar tabs" role="tablist" aria-label="sections">
+      <nav class="bar tabs" role="tablist" aria-label="sections" aria-orientation="horizontal">
         <For each={allTabs()}>
           {(t) => (
             <button
+              id={tabId(t.id)}
               class="tab"
               classList={{ on: tab() === t.id }}
               role="tab"
               aria-selected={tab() === t.id}
+              aria-controls={panelId(t.id)}
+              tabindex={tab() === t.id ? 0 : -1}
               onClick={() => setTab(t.id)}
+              onKeyDown={(event) => moveTabFocus(event, t.id)}
             >
               <Icon name={t.icon} class="ti" />
               {t.label}
@@ -147,10 +171,16 @@ export function App() {
         </div>
       </Show>
 
-      <main class="content" role="tabpanel">
+      <main class="content">
         <Show when={current()} keyed>
           {(t) => (
-            <div class="view">
+            <div
+              id={panelId(t.id)}
+              class="view"
+              role="tabpanel"
+              aria-labelledby={tabId(t.id)}
+              tabindex={0}
+            >
               <t.view />
             </div>
           )}

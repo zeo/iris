@@ -102,6 +102,7 @@ export function Plugins() {
                     class="rocker"
                     role="switch"
                     aria-checked={p.enabled}
+                    aria-label={`${p.name} plugin`}
                     disabled={toggling().has(p.id)}
                     onClick={() => toggle(p, !p.enabled)}
                     title={p.enabled ? "enabled" : "disabled"}

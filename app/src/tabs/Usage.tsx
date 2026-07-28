@@ -130,7 +130,13 @@ export function Usage() {
           <div class="seg" role="group" aria-label="period">
             <For each={SPANS}>
               {(s) => (
-                <button classList={{ on: span() === s }} onClick={() => setSpan(s)}>{s}</button>
+                <button
+                  classList={{ on: span() === s }}
+                  aria-pressed={span() === s}
+                  onClick={() => setSpan(s)}
+                >
+                  {s}
+                </button>
               )}
             </For>
           </div>

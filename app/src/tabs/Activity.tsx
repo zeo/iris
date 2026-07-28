@@ -29,6 +29,8 @@ export function Activity() {
   const [openApps, setOpenApps] = createSignal<Set<string>>(new Set());
   const [openProcs, setOpenProcs] = createSignal<Set<number>>(new Set());
   const [sel, setSel] = createSignal<{ app: string; conn: Conn } | null>(null);
+  const [pendingRules, setPendingRules] = createSignal<Set<string>>(new Set());
+  const [ruleError, setRuleError] = createSignal("");
 
   const toggleApp = (app: string) =>
     setOpenApps((s) => {
@@ -42,6 +44,25 @@ export function Activity() {
       n.has(pid) ? n.delete(pid) : n.add(pid);
       return n;
     });
+  const toggleBlock = async (sample: AppSample) => {
+    if (pendingRules().has(sample.app)) return;
+    const blocked = isBlocked(sample.app);
+    setPendingRules((paths) => new Set(paths).add(sample.app));
+    setRuleError("");
+    try {
+      await (blocked ? unblockApp(sample.app) : blockApp(sample.app));
+    } catch (error) {
+      setRuleError(
+        `Could not ${blocked ? "unblock" : "block"} ${label(sample)}: ${String(error)}`,
+      );
+    } finally {
+      setPendingRules((paths) => {
+        const next = new Set(paths);
+        next.delete(sample.app);
+        return next;
+      });
+    }
+  };
 
   const rows = createMemo(() => {
     const needle = q().trim().toLowerCase();
@@ -105,6 +126,10 @@ export function Activity() {
         <div class="tile"><div class="k">upload</div><div class="v">{rate(engine.up())}</div></div>
       </div>
 
+      <Show when={ruleError()}>
+        <div class="tool-err" role="alert">{ruleError()}</div>
+      </Show>
+
       <Show
         when={rows().length > 0}
         fallback={
@@ -146,9 +171,12 @@ export function Activity() {
                             class="block-btn"
                             classList={{ on: isBlocked(app().app) }}
                             title={isBlocked(app().app) ? "unblock" : "block"}
+                            aria-label={`${isBlocked(app().app) ? "Unblock" : "Block"} ${label(app())}`}
+                            aria-busy={pendingRules().has(app().app)}
+                            disabled={pendingRules().has(app().app)}
                             onClick={(e) => {
                               e.stopPropagation();
-                              isBlocked(app().app) ? unblockApp(app().app) : blockApp(app().app);
+                              void toggleBlock(app());
                             }}
                           >
                             <Icon name="block" size={13} />

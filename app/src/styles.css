@@ -1750,8 +1750,14 @@ html {
   flex: none;
   transition: opacity var(--t-fast), color var(--t-fast), background var(--t-fast);
 }
-.app-row:hover .block-btn {
+.app-row:hover .block-btn,
+.app-row:focus-within .block-btn,
+.block-btn:focus-visible {
   opacity: 1;
+}
+.block-btn:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 .block-btn:hover {
   color: var(--err);

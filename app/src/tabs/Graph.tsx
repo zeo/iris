@@ -92,7 +92,13 @@ export function Graph() {
           <div class="seg" role="group" aria-label="time range">
             <For each={RANGES}>
               {(r) => (
-                <button classList={{ on: range() === r }} onClick={() => setRange(r)}>{r}</button>
+                <button
+                  classList={{ on: range() === r }}
+                  aria-pressed={range() === r}
+                  onClick={() => setRange(r)}
+                >
+                  {r}
+                </button>
               )}
             </For>
           </div>

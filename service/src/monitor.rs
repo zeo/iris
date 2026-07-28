@@ -236,23 +236,11 @@ pub fn spawn(
             // poisoned guard so one panicking tick never silently ends all
             // history and alerting
             {
-                let store = store.lock().unwrap_or_else(|e| e.into_inner());
+                let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
                 let alerting = now > baseline_until;
-                for adapter in &tick.adapters {
-                    store.add_adapter_usage(
-                        adapter.kind,
-                        now,
-                        adapter.rate_sent,
-                        adapter.rate_recv,
-                    );
-                }
+                let fresh_apps = store.record_tick(&tick);
                 for app in &tick.apps {
-                    // rate over a ~1s window is close enough to bytes this second
-                    store.add_usage(app.app.as_str(), now, app.rate_sent, app.rate_recv);
-                    if app.online
-                        && store.ensure_app(app.app.as_str(), app.name.as_deref(), now)
-                        && alerting
-                    {
+                    if app.online && fresh_apps.contains(&app.app) && alerting {
                         let connection = app
                             .processes
                             .iter()

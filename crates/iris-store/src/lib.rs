@@ -5,10 +5,12 @@
 
 use iris_core::{
     AdapterKind, Alert, AlertKind, AppId, Granularity, KnownApp, ProposalState, Rule, RuleAction,
-    RuleProposal, UsageBucket, UsageQuery,
+    RuleProposal, StatsTick, UsageBucket, UsageQuery,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
+
+const LAST_SEEN_WRITE_INTERVAL_MS: u64 = 60_000;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS apps (
@@ -262,6 +264,93 @@ impl Store {
             )
             .map(|count| count > 0)
             .unwrap_or(false)
+    }
+
+    /// persist one monitor tick in a single transaction and return newly seen apps
+    pub fn record_tick(&mut self, tick: &StatsTick) -> Vec<AppId> {
+        match self.record_tick_transaction(tick) {
+            Ok(apps) => apps,
+            Err(error) => {
+                tracing::warn!("could not record monitor tick: {error}");
+                Vec::new()
+            }
+        }
+    }
+
+    fn record_tick_transaction(&mut self, tick: &StatsTick) -> rusqlite::Result<Vec<AppId>> {
+        let transaction = self.conn.transaction()?;
+        let bucket = Granularity::Minute.bucket_start(tick.at_ms) as i64;
+
+        {
+            let mut statement = transaction.prepare_cached(
+                "INSERT INTO adapter_usage(kind, bucket, sent, recv) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(kind, bucket) DO UPDATE SET sent = sent + ?3, recv = recv + ?4",
+            )?;
+            for adapter in &tick.adapters {
+                if adapter.rate_sent != 0 || adapter.rate_recv != 0 {
+                    statement.execute(params![
+                        adapter.kind.as_str(),
+                        bucket,
+                        adapter.rate_sent as i64,
+                        adapter.rate_recv as i64
+                    ])?;
+                }
+            }
+        }
+
+        {
+            let mut statement = transaction.prepare_cached(
+                "INSERT INTO usage(path, bucket, sent, recv) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(path, bucket) DO UPDATE SET sent = sent + ?3, recv = recv + ?4",
+            )?;
+            for app in &tick.apps {
+                if app.rate_sent != 0 || app.rate_recv != 0 {
+                    statement.execute(params![
+                        app.app.as_str(),
+                        bucket,
+                        app.rate_sent as i64,
+                        app.rate_recv as i64
+                    ])?;
+                }
+            }
+        }
+
+        let mut fresh = Vec::new();
+        let stale_before = tick.at_ms.saturating_sub(LAST_SEEN_WRITE_INTERVAL_MS) as i64;
+        {
+            let mut insert = transaction.prepare_cached(
+                "INSERT OR IGNORE INTO apps(path, first_seen, name, last_seen)
+                 VALUES (?1, ?2, ?3, ?2)",
+            )?;
+            let mut refresh = transaction.prepare_cached(
+                "UPDATE apps SET
+                     last_seen = CASE WHEN last_seen <= ?4 THEN ?3 ELSE last_seen END,
+                     name = COALESCE(?2, name)
+                 WHERE path = ?1 AND (
+                     last_seen <= ?4 OR (?2 IS NOT NULL AND name IS NOT ?2)
+                 )",
+            )?;
+            for app in tick.apps.iter().filter(|app| app.online) {
+                let inserted = insert.execute(params![
+                    app.app.as_str(),
+                    tick.at_ms as i64,
+                    app.name.as_deref()
+                ])?;
+                if inserted > 0 {
+                    fresh.push(app.app.clone());
+                } else {
+                    refresh.execute(params![
+                        app.app.as_str(),
+                        app.name.as_deref(),
+                        tick.at_ms as i64,
+                        stale_before
+                    ])?;
+                }
+            }
+        }
+
+        transaction.commit()?;
+        Ok(fresh)
     }
 
     /// add bytes to an app's current-minute usage bucket
@@ -762,6 +851,49 @@ impl Store {
 mod tests {
     use super::*;
 
+    fn tick(
+        at_ms: u64,
+        apps: Vec<iris_core::AppSample>,
+        adapters: Vec<iris_core::AdapterSample>,
+    ) -> StatsTick {
+        StatsTick {
+            at_ms,
+            total_rate_sent: apps.iter().map(|app| app.rate_sent).sum(),
+            total_rate_recv: apps.iter().map(|app| app.rate_recv).sum(),
+            apps,
+            adapters,
+        }
+    }
+
+    fn app(
+        path: &str,
+        name: Option<&str>,
+        online: bool,
+        sent: u64,
+        recv: u64,
+    ) -> iris_core::AppSample {
+        iris_core::AppSample {
+            app: AppId::from_path(path),
+            name: name.map(str::to_owned),
+            rate_sent: sent,
+            rate_recv: recv,
+            total: iris_core::ByteCounts { sent, recv },
+            connections: 0,
+            online,
+            hosts: Vec::new(),
+            processes: Vec::new(),
+        }
+    }
+
+    fn adapter(kind: AdapterKind, sent: u64, recv: u64) -> iris_core::AdapterSample {
+        iris_core::AdapterSample {
+            kind,
+            rate_sent: sent,
+            rate_recv: recv,
+            total: iris_core::ByteCounts { sent, recv },
+        }
+    }
+
     #[test]
     fn first_seen_fires_once() {
         let s = Store::open_in_memory().unwrap();
@@ -806,6 +938,142 @@ mod tests {
         assert_eq!(totals[1].0, AdapterKind::Vpn);
         // outside the window
         assert!(s.adapter_usage_totals(120_000, 240_000).is_empty());
+    }
+
+    #[test]
+    fn record_tick_keeps_exact_totals_and_online_app_inventory() {
+        let mut s = Store::open_in_memory().unwrap();
+        let first = tick(
+            1_000,
+            vec![
+                app("c:/online.exe", Some("Online"), true, 100, 200),
+                app("c:/offline.exe", None, false, 10, 20),
+            ],
+            vec![
+                adapter(AdapterKind::Wifi, 110, 220),
+                adapter(AdapterKind::Vpn, 3, 4),
+            ],
+        );
+        assert_eq!(
+            s.record_tick(&first),
+            vec![AppId::from_path("c:/online.exe")]
+        );
+
+        let second = tick(
+            2_000,
+            vec![
+                app("c:/online.exe", Some("Online"), true, 5, 7),
+                app("c:/offline.exe", Some("Now online"), true, 11, 13),
+            ],
+            vec![
+                adapter(AdapterKind::Wifi, 16, 20),
+                adapter(AdapterKind::Ethernet, 30, 40),
+            ],
+        );
+        assert_eq!(
+            s.record_tick(&second),
+            vec![AppId::from_path("c:/offline.exe")]
+        );
+
+        assert_eq!(
+            s.usage_totals(0, 60_000),
+            vec![
+                (
+                    AppId::from_path("c:/online.exe"),
+                    iris_core::ByteCounts {
+                        sent: 105,
+                        recv: 207
+                    }
+                ),
+                (
+                    AppId::from_path("c:/offline.exe"),
+                    iris_core::ByteCounts { sent: 21, recv: 33 }
+                )
+            ]
+        );
+        assert_eq!(
+            s.adapter_usage_totals(0, 60_000),
+            vec![
+                (
+                    AdapterKind::Wifi,
+                    iris_core::ByteCounts {
+                        sent: 126,
+                        recv: 240
+                    }
+                ),
+                (
+                    AdapterKind::Ethernet,
+                    iris_core::ByteCounts { sent: 30, recv: 40 }
+                ),
+                (AdapterKind::Vpn, iris_core::ByteCounts { sent: 3, recv: 4 })
+            ]
+        );
+        assert_eq!(
+            s.list_apps(),
+            vec![
+                KnownApp {
+                    app: AppId::from_path("c:/offline.exe"),
+                    name: Some("Now online".to_string()),
+                    last_seen: 2_000
+                },
+                KnownApp {
+                    app: AppId::from_path("c:/online.exe"),
+                    name: Some("Online".to_string()),
+                    last_seen: 1_000
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn record_tick_throttles_last_seen_without_delaying_name_changes() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.record_tick(&tick(
+            1_000,
+            vec![app("c:/x.exe", Some("Old"), true, 0, 0)],
+            Vec::new(),
+        ));
+        s.record_tick(&tick(
+            2_000,
+            vec![app("c:/x.exe", Some("Current"), true, 0, 0)],
+            Vec::new(),
+        ));
+        let known = s.list_apps();
+        assert_eq!(known[0].last_seen, 1_000);
+        assert_eq!(known[0].name.as_deref(), Some("Current"));
+
+        s.record_tick(&tick(
+            61_000,
+            vec![app("c:/x.exe", Some("Current"), true, 0, 0)],
+            Vec::new(),
+        ));
+        assert_eq!(s.list_apps()[0].last_seen, 61_000);
+    }
+
+    #[test]
+    fn record_tick_rolls_back_the_whole_batch_on_error() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.conn
+            .execute_batch(
+                "CREATE TRIGGER reject_usage BEFORE INSERT ON usage
+                 WHEN NEW.path = 'c:/reject.exe'
+                 BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+            )
+            .unwrap();
+
+        let fresh = s.record_tick(&tick(
+            1_000,
+            vec![
+                app("c:/first.exe", None, true, 10, 20),
+                app("c:/reject.exe", None, true, 30, 40),
+            ],
+            vec![adapter(AdapterKind::Wifi, 40, 60)],
+        ));
+
+        assert!(fresh.is_empty());
+        assert!(s.usage_totals(0, 60_000).is_empty());
+        assert!(s.adapter_usage_totals(0, 60_000).is_empty());
+        assert!(s.list_apps().is_empty());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! plugin never stalls enrichment.
 
 use iris_core::{Annotation, EnrichTarget, Enricher, Panel, TargetKind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -33,7 +33,8 @@ pub struct PluginLink {
     id: String,
     targets: Vec<TargetKind>,
     connected: AtomicBool,
-    sender: Mutex<Option<mpsc::Sender<ProxyRequest>>>,
+    next_session: AtomicU64,
+    sender: Mutex<Option<(u64, mpsc::Sender<ProxyRequest>)>>,
 }
 
 impl PluginLink {
@@ -42,20 +43,36 @@ impl PluginLink {
             id,
             targets,
             connected: AtomicBool::new(false),
+            next_session: AtomicU64::new(1),
             sender: Mutex::new(None),
         }
     }
 
-    /// bind the proxy to a freshly-connected plugin's request channel
-    pub fn attach(&self, sender: mpsc::Sender<ProxyRequest>) {
-        *self.sender.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender);
+    /// bind the proxy to one plugin session
+    pub fn attach(&self, sender: mpsc::Sender<ProxyRequest>) -> Option<u64> {
+        let mut active = self.sender.lock().unwrap_or_else(|e| e.into_inner());
+        if active.is_some() {
+            return None;
+        }
+        let session = self.next_session.fetch_add(1, Ordering::Relaxed);
+        *active = Some((session, sender));
         self.connected.store(true, Ordering::Release);
+        Some(session)
     }
 
-    /// detach on disconnect, so further enrich calls return empty immediately
-    pub fn detach(&self) {
+    /// detach this session without disturbing a newer connection
+    pub fn detach(&self, session: u64) {
+        let mut active = self.sender.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(active.as_ref(), Some((current, _)) if *current == session) {
+            return;
+        }
+        *active = None;
         self.connected.store(false, Ordering::Release);
+    }
+
+    pub fn detach_current(&self) {
         *self.sender.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.connected.store(false, Ordering::Release);
     }
 
     pub fn is_connected(&self) -> bool {
@@ -66,7 +83,8 @@ impl PluginLink {
         self.sender
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .as_ref()
+            .map(|(_, sender)| sender.clone())
     }
 
     /// fetch the plugin's panel view-model. blocking (a pipe round-trip); run
@@ -79,7 +97,7 @@ impl PluginLink {
         let sender = self.sender()?;
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         if sender
-            .blocking_send(ProxyRequest::Panel { reply: reply_tx })
+            .try_send(ProxyRequest::Panel { reply: reply_tx })
             .is_err()
         {
             return None;
@@ -120,12 +138,33 @@ impl Enricher for OutOfProcEnricher {
             target: target.clone(),
             reply: reply_tx,
         };
-        // the actor lives on the async runtime; blocking_send hands the request
-        // over from this blocking resolve thread. a full or closed channel means
-        // the plugin cannot keep up or is gone, so answer empty.
-        if sender.blocking_send(request).is_err() {
+        // a full or closed channel means the plugin cannot keep up or is gone
+        if sender.try_send(request).is_err() {
             return Vec::new();
         }
         reply_rx.recv_timeout(REQUEST_TIMEOUT).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_session_owns_a_bounded_request_queue() {
+        let link = PluginLink::new("test".into(), Vec::new());
+        let (sender, _receiver) = mpsc::channel(1);
+        let (reply, _) = std::sync::mpsc::channel();
+        sender
+            .try_send(ProxyRequest::Panel { reply })
+            .expect("queue has room");
+
+        let session = link.attach(sender).expect("first session");
+        let (second, _) = mpsc::channel(1);
+        assert!(link.attach(second).is_none());
+        assert!(link.panel().is_none());
+
+        link.detach(session);
+        assert!(!link.is_connected());
     }
 }

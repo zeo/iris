@@ -234,8 +234,8 @@ pub fn spawn_restricted(exe: &Path, extra_env: &[(String, String)]) -> io::Resul
 }
 
 /// place `process` in a job object that kills its members when the last handle
-/// closes and on an unhandled exception. resource caps keep a plugin from
-/// exhausting the host through child processes or committed memory
+/// closes and on an unhandled exception. child creation is denied and memory
+/// caps keep a plugin from exhausting the host
 unsafe fn confine_to_job(process: HANDLE) -> io::Result<HANDLE> {
     use windows::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -251,7 +251,7 @@ unsafe fn confine_to_job(process: HANDLE) -> io::Result<HANDLE> {
         | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
         | JOB_OBJECT_LIMIT_PROCESS_MEMORY
         | JOB_OBJECT_LIMIT_JOB_MEMORY;
-    limits.BasicLimitInformation.ActiveProcessLimit = 16;
+    limits.BasicLimitInformation.ActiveProcessLimit = 1;
     limits.ProcessMemoryLimit = 512 * 1024 * 1024;
     limits.JobMemoryLimit = 768 * 1024 * 1024;
     if let Err(e) = SetInformationJobObject(

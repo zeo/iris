@@ -1,13 +1,14 @@
 //! network pinning for out-of-process plugin children. every plugin binary is
 //! default-blocked at the four ALE connect / recv-accept layers, then granted
 //! narrow permits for exactly the remote address:port pairs the user consented
-//! to, plus remote port 53 when the grant names hosts the child must resolve
-//! itself. the filters live in a dynamic WFP session, so they vanish with the
+//! to, plus port 53 at the machine's active resolvers when the grant names
+//! hosts. the filters live in a dynamic WFP session, so they vanish with the
 //! service process and can never outlive a crash, and in their own sublayer so
-//! the rules sublayer's startup reset never touches them.
+//! the rules sublayer's startup reset never touches them
 
 use iris_core::{EngineError, EngineResult};
-use std::net::SocketAddr;
+use std::collections::BTreeSet;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::ptr;
 use windows::core::{GUID, PCWSTR, PWSTR};
@@ -41,10 +42,6 @@ const PIN_SUBLAYER: GUID = GUID::from_values(
     [0xa1, 0x77, 0x3c, 0x88, 0x12, 0x44, 0x9e, 0x04],
 );
 
-const CONNECT_LAYERS: [GUID; 2] = [
-    FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-    FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-];
 const ALL_LAYERS: [GUID; 4] = [
     FWPM_LAYER_ALE_AUTH_CONNECT_V4,
     FWPM_LAYER_ALE_AUTH_CONNECT_V6,
@@ -128,8 +125,8 @@ impl PluginNet {
     }
 
     /// pin one plugin binary: block everything in and out, then permit the
-    /// allowed remote endpoints (and port 53 when the plugin resolves names).
-    /// an empty `allowed` with no dns is a total network cut.
+    /// allowed remote endpoints plus configured resolvers when names are used
+    /// an empty `allowed` with no dns is a total network cut
     pub fn pin(
         &mut self,
         exe: &Path,
@@ -201,8 +198,16 @@ impl PluginNet {
         allowed: &[SocketAddr],
         allow_dns: bool,
     ) -> EngineResult<Vec<u64>> {
+        let mut endpoints: BTreeSet<SocketAddr> = allowed.iter().copied().collect();
+        if allow_dns {
+            endpoints.extend(
+                resolver_addrs()?
+                    .into_iter()
+                    .map(|ip| SocketAddr::new(ip, 53)),
+            );
+        }
         let mut ids = Vec::new();
-        for addr in allowed {
+        for addr in endpoints {
             let added = match addr {
                 SocketAddr::V4(v4) => {
                     let mut conds = [
@@ -239,18 +244,6 @@ impl PluginNet {
                 Err(e) => {
                     self.delete_all(&ids);
                     return Err(e);
-                }
-            }
-        }
-        if allow_dns {
-            for layer in CONNECT_LAYERS {
-                let mut conds = [cond_app(app_id), cond_port(53)];
-                match self.add_filter(layer, &mut conds, FWP_ACTION_PERMIT, WEIGHT_PERMIT) {
-                    Ok(id) => ids.push(id),
-                    Err(e) => {
-                        self.delete_all(&ids);
-                        return Err(e);
-                    }
                 }
             }
         }
@@ -296,6 +289,80 @@ impl PluginNet {
         for id in ids {
             let _ = FwpmFilterDeleteById0(self.engine, *id);
         }
+    }
+}
+
+fn resolver_addrs() -> EngineResult<Vec<IpAddr>> {
+    use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST,
+        IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    use windows::Win32::Networking::WinSock::{
+        AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6,
+    };
+
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST;
+    let mut buf: Vec<u64> = Vec::new();
+    let mut size = 16 * 1024;
+    unsafe {
+        loop {
+            buf.resize((size as usize).div_ceil(8), 0);
+            let status = GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                flags,
+                None,
+                Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+                &mut size,
+            );
+            if status == ERROR_BUFFER_OVERFLOW.0 {
+                continue;
+            }
+            if status != NO_ERROR.0 {
+                return Err(EngineError::Os(format!(
+                    "GetAdaptersAddresses failed: {status}"
+                )));
+            }
+            break;
+        }
+
+        let mut addrs = BTreeSet::new();
+        let mut adapter = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+        while !adapter.is_null() {
+            let current = &*adapter;
+            adapter = current.Next;
+            if current.OperStatus != IfOperStatusUp {
+                continue;
+            }
+            let mut server = current.FirstDnsServerAddress;
+            while !server.is_null() {
+                let sockaddr = (*server).Address.lpSockaddr;
+                server = (*server).Next;
+                if sockaddr.is_null() {
+                    continue;
+                }
+                let family = (*sockaddr).sa_family;
+                let ip = if family == AF_INET {
+                    let address = &*(sockaddr as *const SOCKADDR_IN);
+                    Some(IpAddr::from(address.sin_addr.S_un.S_addr.to_ne_bytes()))
+                } else if family == AF_INET6 {
+                    let address = &*(sockaddr as *const SOCKADDR_IN6);
+                    Some(IpAddr::from(address.sin6_addr.u.Byte))
+                } else {
+                    None
+                };
+                if let Some(ip) = ip.filter(|ip| !ip.is_unspecified()) {
+                    addrs.insert(ip);
+                }
+            }
+        }
+        if addrs.is_empty() {
+            return Err(EngineError::NotFound(
+                "no active DNS resolver is configured".into(),
+            ));
+        }
+        Ok(addrs.into_iter().collect())
     }
 }
 

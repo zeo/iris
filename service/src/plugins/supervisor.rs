@@ -8,7 +8,7 @@
 use crate::engine::Engine;
 use crate::plugins::manifest::{self, Manifest};
 use crate::plugins::proxy::{PluginLink, ProxyRequest};
-use iris_core::{AlertKind, Annotation, AnnotationValue, Panel, TargetKind};
+use iris_core::{AlertKind, Annotation, AnnotationValue, EnrichTarget, Panel, TargetKind};
 use iris_ipc::plugin::{
     HostMessage, PluginEvent, PluginMessage, StreamKind, PLUGIN_PROTOCOL_VERSION,
 };
@@ -24,11 +24,21 @@ use tokio::select;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
+const PLUGIN_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_PENDING_REQUESTS: usize = 64;
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn enrich_cap(target: &EnrichTarget) -> &'static str {
+    match target {
+        EnrichTarget::Endpoint(_) => "enrich:endpoint",
+        EnrichTarget::App(_) => "enrich:app",
+    }
 }
 
 struct OutputRate {
@@ -236,12 +246,13 @@ pub fn set_enabled(store: &Arc<Mutex<Store>>, id: &str, enabled: bool) -> bool {
 }
 
 /// maps a manifest's enrich capabilities to the target kinds the proxy declares
-fn target_kinds(manifest: &Manifest) -> Vec<TargetKind> {
+fn target_kinds(manifest: &Manifest, grant: &PluginGrant) -> Vec<TargetKind> {
     let mut kinds = Vec::new();
-    if manifest.declares("enrich:endpoint") {
+    if manifest.declares("enrich:endpoint") && grant.caps.iter().any(|cap| cap == "enrich:endpoint")
+    {
         kinds.push(TargetKind::Endpoint);
     }
-    if manifest.declares("enrich:app") {
+    if manifest.declares("enrich:app") && grant.caps.iter().any(|cap| cap == "enrich:app") {
         kinds.push(TargetKind::App);
     }
     kinds
@@ -265,7 +276,7 @@ pub fn plan(store: &Arc<Mutex<Store>>) -> Vec<Arc<PluginRuntime>> {
         };
         let link = Arc::new(PluginLink::new(
             manifest.id.clone(),
-            target_kinds(&manifest),
+            target_kinds(&manifest, &grant),
         ));
         #[cfg(has_platform)]
         let token = crate::platform::random_token();
@@ -288,8 +299,23 @@ pub fn plan(store: &Arc<Mutex<Store>>) -> Vec<Arc<PluginRuntime>> {
 
 /// an outstanding request to a plugin, keyed by wire id in the actor
 enum Pending {
-    Enrich(std::sync::mpsc::Sender<Vec<Annotation>>),
-    Panel(std::sync::mpsc::Sender<Option<Panel>>),
+    Enrich {
+        reply: std::sync::mpsc::Sender<Vec<Annotation>>,
+        since: Instant,
+    },
+    Panel {
+        reply: std::sync::mpsc::Sender<Option<Panel>>,
+        since: Instant,
+    },
+}
+
+impl Pending {
+    fn expired(&self) -> bool {
+        let since = match self {
+            Self::Enrich { since, .. } | Self::Panel { since, .. } => since,
+        };
+        since.elapsed() >= PLUGIN_IO_TIMEOUT
+    }
 }
 
 /// the running host: owns the runtimes and serves the plugin pipe
@@ -449,7 +475,7 @@ impl Supervisor {
                     }
                     continue;
                 }
-                rt.link.detach();
+                rt.link.detach_current();
                 failures += 1;
                 if failures > MAX_QUICK_FAILURES {
                     tracing::error!(plugin = %rt.id, "quarantined after repeated crashes");
@@ -475,7 +501,7 @@ impl Supervisor {
         )
         .await
         .map_err(|_| anyhow::anyhow!("plugin registration timed out"))??;
-        let rt = match first {
+        let (rt, granted) = match first {
             Some(PluginMessage::Register {
                 id,
                 protocol,
@@ -485,25 +511,52 @@ impl Supervisor {
                 Ok(rt) => rt,
                 Err(reason) => {
                     tracing::warn!(plugin = %id, "plugin registration rejected: {reason}");
-                    let _ =
-                        transport::write_frame(&mut send, &HostMessage::Rejected { reason }).await;
+                    let _ = tokio::time::timeout(
+                        PLUGIN_IO_TIMEOUT,
+                        transport::write_frame(&mut send, &HostMessage::Rejected { reason }),
+                    )
+                    .await;
                     return Ok(());
                 }
             },
             _ => return Ok(()),
         };
 
-        transport::write_frame(
-            &mut send,
-            &HostMessage::Registered {
-                granted: rt.effective_caps(),
-                engine_version: env!("CARGO_PKG_VERSION").to_string(),
-            },
+        let (req_tx, req_rx) = mpsc::channel::<ProxyRequest>(MAX_PENDING_REQUESTS);
+        let Some(session) = rt.link.attach(req_tx) else {
+            let reason = "plugin is already connected".to_string();
+            let _ = tokio::time::timeout(
+                PLUGIN_IO_TIMEOUT,
+                transport::write_frame(&mut send, &HostMessage::Rejected { reason }),
+            )
+            .await;
+            return Ok(());
+        };
+        let registered = tokio::time::timeout(
+            PLUGIN_IO_TIMEOUT,
+            transport::write_frame(
+                &mut send,
+                &HostMessage::Registered {
+                    granted: granted.clone(),
+                    engine_version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+            ),
         )
-        .await?;
+        .await;
+        match registered {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                rt.link.detach(session);
+                return Err(error.into());
+            }
+            Err(_) => {
+                rt.link.detach(session);
+                return Err(anyhow::anyhow!("plugin registration write timed out"));
+            }
+        }
 
-        let result = self.actor(&rt, recv, send).await;
-        rt.link.detach();
+        let result = self.actor(&rt, &granted, req_rx, recv, send).await;
+        rt.link.detach(session);
         result
     }
 
@@ -514,7 +567,7 @@ impl Supervisor {
         protocol: u32,
         token: &str,
         caps: &[String],
-    ) -> Result<Arc<PluginRuntime>, String> {
+    ) -> Result<(Arc<PluginRuntime>, Vec<String>), String> {
         let rt = self
             .runtimes
             .iter()
@@ -532,12 +585,16 @@ impl Supervisor {
             return Err("bad token".to_string());
         }
         let granted = rt.effective_caps();
+        let mut negotiated = Vec::new();
         for cap in caps {
             if !granted.contains(cap) {
                 return Err(format!("capability not granted: {cap}"));
             }
+            if !negotiated.contains(cap) {
+                negotiated.push(cap.clone());
+            }
         }
-        Ok(rt)
+        Ok((rt, negotiated))
     }
 
     /// the per-connection message loop: forward enrich and panel requests to
@@ -546,40 +603,62 @@ impl Supervisor {
     async fn actor(
         &self,
         rt: &Arc<PluginRuntime>,
+        granted: &[String],
+        mut req_rx: mpsc::Receiver<ProxyRequest>,
         mut recv: transport::RecvHalf,
         mut send: transport::SendHalf,
     ) -> anyhow::Result<()> {
-        let (req_tx, mut req_rx) = mpsc::channel::<ProxyRequest>(64);
-        rt.link.attach(req_tx);
-
         let mut events = self.engine.subscribe();
         let mut streams: Vec<StreamKind> = Vec::new();
         let mut next_req: u64 = 1;
         let mut pending: HashMap<u64, Pending> = HashMap::new();
         let mut output_rate = OutputRate::new();
+        let mut reap_pending = tokio::time::interval(Duration::from_secs(1));
+        reap_pending.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             select! {
                 request = req_rx.recv() => {
                     let Some(request) = request else { break };
+                    if pending.len() >= MAX_PENDING_REQUESTS {
+                        continue;
+                    }
                     let req = next_req;
                     next_req += 1;
                     let frame = match request {
                         ProxyRequest::Enrich { target, reply } => {
-                            pending.insert(req, Pending::Enrich(reply));
+                            if !granted.iter().any(|cap| cap == enrich_cap(&target)) {
+                                continue;
+                            }
+                            pending.insert(req, Pending::Enrich {
+                                reply,
+                                since: Instant::now(),
+                            });
                             HostMessage::EnrichRequest { req, target }
                         }
                         ProxyRequest::Panel { reply } => {
-                            pending.insert(req, Pending::Panel(reply));
+                            if !granted.iter().any(|cap| cap == "ui:panel") {
+                                continue;
+                            }
+                            pending.insert(req, Pending::Panel {
+                                reply,
+                                since: Instant::now(),
+                            });
                             HostMessage::PanelRequest { req }
                         }
                     };
-                    transport::write_frame(&mut send, &frame).await?;
+                    tokio::time::timeout(
+                        PLUGIN_IO_TIMEOUT,
+                        transport::write_frame(&mut send, &frame),
+                    )
+                    .await
+                    .map_err(|_| anyhow::anyhow!("plugin request write timed out"))??;
                 }
                 frame = transport::read_frame_limited::<_, PluginMessage>(&mut recv, 1024 * 1024) => {
                     let Some(msg) = frame? else { break };
                     self.on_plugin_message(
                         rt,
+                        granted,
                         msg,
                         &mut streams,
                         &mut pending,
@@ -593,6 +672,9 @@ impl Supervisor {
                         Err(RecvError::Closed) => break,
                     }
                 }
+                _ = reap_pending.tick() => {
+                    pending.retain(|_, request| !request.expired());
+                }
             }
         }
         Ok(())
@@ -601,6 +683,7 @@ impl Supervisor {
     async fn on_plugin_message(
         &self,
         rt: &Arc<PluginRuntime>,
+        granted: &[String],
         msg: PluginMessage,
         streams: &mut Vec<StreamKind>,
         pending: &mut HashMap<u64, Pending>,
@@ -608,12 +691,12 @@ impl Supervisor {
     ) -> anyhow::Result<()> {
         match msg {
             PluginMessage::EnrichReply { req, annotations } => {
-                if let Some(Pending::Enrich(reply)) = pending.remove(&req) {
+                if let Some(Pending::Enrich { reply, .. }) = pending.remove(&req) {
                     let _ = reply.send(bounded_annotations(annotations));
                 }
             }
             PluginMessage::PanelReply { req, panel } => {
-                if let Some(Pending::Panel(reply)) = pending.remove(&req) {
+                if let Some(Pending::Panel { reply, .. }) = pending.remove(&req) {
                     let _ = reply.send(panel);
                 }
             }
@@ -624,7 +707,10 @@ impl Supervisor {
                 // an unsolicited push from a stream-watching plugin; surface it
                 // to the UI the same way a resolved lookup would
                 let annotations = bounded_annotations(annotations);
-                if !annotations.is_empty() && output_rate.allow_enrichment() {
+                if granted.iter().any(|cap| cap == enrich_cap(&target))
+                    && !annotations.is_empty()
+                    && output_rate.allow_enrichment()
+                {
                     self.engine.publish(ServerMessage::Enrichment {
                         target,
                         annotations,
@@ -632,7 +718,7 @@ impl Supervisor {
                 }
             }
             PluginMessage::RaiseAlert { message } => {
-                if rt.effective_caps().iter().any(|c| c == "emit:alerts")
+                if granted.iter().any(|cap| cap == "emit:alerts")
                     && message.len() <= 4096
                     && output_rate.allow_alert()
                     && rt.alerts_emitted.fetch_add(1, Ordering::Relaxed) < 1000
@@ -654,10 +740,7 @@ impl Supervisor {
             PluginMessage::ProposeRule { rule, reason } => {
                 if reason.len() <= 4096
                     && output_rate.allow_proposal()
-                    && rt
-                        .effective_caps()
-                        .iter()
-                        .any(|c| c == "emit:rule-proposals")
+                    && granted.iter().any(|cap| cap == "emit:rule-proposals")
                 {
                     // recorded for review only; enforcement stays behind the
                     // elevated accept on the admin pipe
@@ -672,14 +755,13 @@ impl Supervisor {
                 }
             }
             PluginMessage::Subscribe { streams: requested } => {
-                let granted = rt.effective_caps();
                 streams.clear();
                 for s in requested {
                     let cap = match s {
                         StreamKind::Ticks => "observe:ticks",
                         StreamKind::Alerts => "observe:alerts",
                     };
-                    if granted.iter().any(|c| c == cap) {
+                    if granted.iter().any(|granted| granted == cap) {
                         streams.push(s);
                     }
                 }
@@ -705,7 +787,12 @@ impl Supervisor {
             _ => None,
         };
         if let Some(event) = event {
-            transport::write_frame(send, &HostMessage::Event(event)).await?;
+            tokio::time::timeout(
+                PLUGIN_IO_TIMEOUT,
+                transport::write_frame(send, &HostMessage::Event(event)),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("plugin event write timed out"))??;
         }
         Ok(())
     }
@@ -713,33 +800,23 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_annotations, OutputRate};
-    use iris_core::{Annotation, Severity};
+    use super::{bounded_annotations, target_kinds, OutputRate};
+    use crate::plugins::manifest::Manifest;
+    use iris_core::{Annotation, Severity, TargetKind};
+    use iris_store::PluginGrant;
 
     #[test]
     fn bounds_plugin_annotations() {
-        let mut annotations = vec![Annotation::text(
-            "x",
-            "label",
-            "ok",
-            Severity::Info,
-        )];
+        let mut annotations = vec![Annotation::text("x", "label", "ok", Severity::Info)];
         annotations.push(Annotation::text(
             "x".repeat(129).as_str(),
             "label",
             "rejected",
             Severity::Info,
         ));
-        annotations.extend(
-            (0..130).map(|index| {
-                Annotation::text(
-                    &format!("key-{index}"),
-                    "label",
-                    "value",
-                    Severity::Info,
-                )
-            }),
-        );
+        annotations.extend((0..130).map(|index| {
+            Annotation::text(&format!("key-{index}"), "label", "value", Severity::Info)
+        }));
 
         let bounded = bounded_annotations(annotations);
         assert_eq!(bounded.len(), 64);
@@ -751,5 +828,27 @@ mod tests {
         let mut rate = OutputRate::new();
         assert!((0..60).all(|_| rate.allow_alert()));
         assert!(!rate.allow_alert());
+    }
+
+    #[test]
+    fn proxy_targets_stay_inside_the_user_grant() {
+        let manifest = Manifest {
+            id: "test".into(),
+            name: "Test".into(),
+            version: "1".into(),
+            description: String::new(),
+            entry: "test.exe".into(),
+            capabilities: vec!["enrich:endpoint".into(), "enrich:app".into()],
+            egress: Vec::new(),
+        };
+        let grant = PluginGrant {
+            id: "test".into(),
+            caps: vec!["enrich:endpoint".into()],
+            egress: Vec::new(),
+            enabled: true,
+            granted_at: 0,
+        };
+
+        assert_eq!(target_kinds(&manifest, &grant), vec![TargetKind::Endpoint]);
     }
 }

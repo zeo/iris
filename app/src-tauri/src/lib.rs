@@ -40,6 +40,11 @@ pub fn run() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if !args.iter().any(|arg| arg == "--tray") {
+                reveal(app);
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -89,6 +94,9 @@ pub fn run() {
         .setup(move |app| {
             ipc::spawn(app.handle().clone(), cmd_rx);
             build_tray(app.handle())?;
+            if let Err(error) = startup::repair_launch_at_login() {
+                tracing::warn!("could not refresh launch at login: {error}");
+            }
             // best startup guess before the webview reports its real ratio: the
             // fractional-scaling env hint if we set one, else the window's own
             // gtk scale factor. keeps the first paint from flashing under-sized.

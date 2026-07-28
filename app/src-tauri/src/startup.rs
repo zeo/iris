@@ -129,3 +129,10 @@ pub fn get_launch_at_login() -> bool {
 pub fn set_launch_at_login(_enabled: bool) -> Result<(), String> {
     Err("launch at login is not supported on this platform".into())
 }
+
+pub(crate) fn repair_launch_at_login() -> Result<(), String> {
+    if get_launch_at_login() {
+        set_launch_at_login(true)?;
+    }
+    Ok(())
+}

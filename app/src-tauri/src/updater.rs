@@ -14,7 +14,13 @@ pub struct Update {
 }
 
 #[tauri::command]
-pub fn check_installer_update() -> Result<Option<Update>, String> {
+pub async fn check_installer_update() -> Result<Option<Update>, String> {
+    tauri::async_runtime::spawn_blocking(check_installer_update_blocking)
+        .await
+        .map_err(|error| format!("updater task failed: {error}"))?
+}
+
+fn check_installer_update_blocking() -> Result<Option<Update>, String> {
     let installer = installer_path().ok_or_else(|| "shared updater is not installed".to_string())?;
     let mut status = Command::new(&installer)
         .args(["status", "iris", "--json"])

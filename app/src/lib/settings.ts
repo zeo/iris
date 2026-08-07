@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { persisted } from "./persist";
 
 // user preferences that live only in the UI. anything the engine must enforce
@@ -9,11 +10,26 @@ export type RateUnits = "bytes" | "bits";
 // usually quoted). totals always stay in bytes.
 const [rateUnits, setRateUnits] = persisted<RateUnits>("settings.rateUnits", "bytes");
 
-// whether a first-seen / blocked alert also raises a desktop notification
-const [showNotifications, setShowNotifications] = persisted<boolean>(
+// whether a first-seen / blocked alert also raises a desktop notification.
+// the toast is raised by the Rust host so it fires even while this webview is
+// hidden in the tray, so the preference is mirrored there on load and on change.
+const [showNotifications, setShowNotificationsSignal] = persisted<boolean>(
   "settings.notifications",
   true,
 );
+const syncNotifications = (enabled: boolean) => {
+  try {
+    void invoke("set_notifications_enabled", { enabled }).catch(() => {});
+  } catch {
+    /* host command unavailable (tests, plain browser) */
+  }
+};
+const setShowNotifications = (enabled: boolean): boolean => {
+  setShowNotificationsSignal(enabled);
+  syncNotifications(enabled);
+  return enabled;
+};
+syncNotifications(showNotifications());
 
 // optional monthly data plan: a cap in GB (0 = no plan) and the day of the month
 // the billing period resets. drives the quota meter and quota notifications.

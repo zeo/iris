@@ -6,6 +6,7 @@ mod elevate;
 mod icon;
 mod ipc;
 mod net;
+mod notify;
 mod prompt;
 mod report;
 mod rulectl;
@@ -54,6 +55,7 @@ pub fn run() {
         .manage(ipc::Commander(cmd_tx))
         .manage(DisplayScale(Mutex::new(1.0)))
         .manage(prompt::PromptCount::default())
+        .manage(notify::NotifyState::default())
         .invoke_handler(tauri::generate_handler![
             ipc::engine_status,
             ipc::set_tick_details,
@@ -63,6 +65,7 @@ pub fn run() {
             ipc::list_alerts,
             ipc::restore_connection_prompts,
             prompt::resize_connection_prompts,
+            notify::set_notifications_enabled,
             report_display_scale,
             ipc::ack_alert,
             ipc::decide_alert,

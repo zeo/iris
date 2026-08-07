@@ -1,12 +1,6 @@
 import { createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
-import { showNotifications } from "./settings";
 import { fileName } from "./path";
 
 export type AlertKind =
@@ -37,6 +31,10 @@ export const needsDecision = (alert: Alert): boolean =>
   alert.kind.remote !== null &&
   alert.kind.direction !== null;
 
+// which alerts get a generic desktop toast rather than the actionable prompt.
+// the toast itself is raised by the Rust host (notify.rs), which stays alive
+// even when this webview is hidden, throttled, or suspended in the tray; this
+// predicate is kept here as the single documented mirror of that logic.
 export const needsNativeNotification = (alert: Alert): boolean => !needsDecision(alert);
 
 export const decisionAlreadySettled = (reason: unknown): boolean =>
@@ -61,7 +59,6 @@ export function initAlerts() {
   void restoreDecisionPrompts();
   listen<Alert>("engine-alert", (e) => {
     setAlerts((a) => [e.payload, ...a.filter((x) => x.id !== e.payload.id)].slice(0, 500));
-    void toast(e.payload);
   });
 }
 
@@ -112,26 +109,4 @@ export async function decideAlert(id: number, action: "allow" | "block"): Promis
   setAlerts((current) =>
     current.map((alert) => (alert.id === id ? { ...alert, acknowledged: true } : alert)),
   );
-}
-
-async function toast(a: Alert): Promise<void> {
-  if (!showNotifications() || !needsNativeNotification(a)) return;
-  let title: string;
-  let body: string;
-  if (a.kind.kind === "plugin") {
-    title = a.kind.source;
-    body = a.kind.message;
-  } else {
-    const name = fileName(a.kind.app);
-    const isNew = a.kind.kind === "new_app";
-    title = isNew ? "New app on the network" : "Connection blocked";
-    body = isNew ? `${name} connected for the first time` : `Blocked ${name}`;
-  }
-  try {
-    let granted = await isPermissionGranted();
-    if (!granted) granted = (await requestPermission()) === "granted";
-    if (granted) sendNotification({ title, body });
-  } catch {
-    /* notifications unavailable */
-  }
 }

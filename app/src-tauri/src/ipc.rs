@@ -160,15 +160,12 @@ pub async fn list_alerts(app: AppHandle, unacked_only: bool) -> Result<Vec<Alert
 
 #[tauri::command]
 pub async fn restore_connection_prompts(app: AppHandle) -> Result<(), String> {
-    for alert in list_alerts(app.clone(), true).await? {
-        if matches!(
-            &alert.kind,
-            iris_core::AlertKind::NewApp {
-                remote: Some(_),
-                direction: Some(_),
-                ..
-            }
-        ) {
+    let alerts = list_alerts(app.clone(), true).await?;
+    // anything unacknowledged that is not an actionable prompt fired while the
+    // UI was not running; surface it as one summary toast rather than silence
+    crate::notify::announce_backlog(&app, &alerts);
+    for alert in alerts {
+        if crate::notify::needs_decision(&alert) {
             crate::prompt::show(&app, &alert);
         }
     }
@@ -439,6 +436,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     }
                     ServerMessage::Alert(alert) => {
                         crate::prompt::show(app, &alert);
+                        crate::notify::alert_toast(app, &alert);
                         let _ = app.emit("engine-alert", alert);
                     }
                     ServerMessage::Enrichment { target, annotations } => {

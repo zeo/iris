@@ -90,35 +90,29 @@ pub fn set(account: &Account, granted: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-/// the account of the caller performing an elevated grant. on Windows the
-/// elevated one-shot runs as the same user with a full token, so its own SID is
-/// the account being authorized; on Linux pkexec runs it as root, so the
-/// invoking user arrives in PKEXEC_UID.
+/// the account a grant should name: the one sitting at the desktop, which is the
+/// identity the telemetry peer will present later.
+///
+/// this deliberately does not use the caller's own identity. when the user is
+/// not a local administrator, UAC elevates over the shoulder as a *different*
+/// account, so the elevated one-shot's SID belongs to whoever approved the
+/// prompt rather than whoever is using the machine, and the grant would name an
+/// account that never connects. resolving the console session inside the
+/// service, which runs as SYSTEM, also means the account cannot be chosen by the
+/// unprivileged caller through argv.
 #[cfg(windows)]
 pub fn calling_account() -> std::io::Result<Account> {
-    current_sid()
-}
-
-#[cfg(not(windows))]
-pub fn calling_account() -> std::io::Result<Account> {
-    if let Ok(uid) = std::env::var("PKEXEC_UID") {
-        if let Ok(uid) = uid.trim().parse() {
-            return Ok(uid);
-        }
-    }
-    crate::paths::desktop_uid()
-}
-
-/// the SID of the process's own user, as a string
-#[cfg(windows)]
-pub fn current_sid() -> std::io::Result<String> {
-    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_USER};
+    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 
     unsafe {
+        let session = WTSGetActiveConsoleSessionId();
+        if session == u32::MAX {
+            return Err(std::io::Error::other("no active desktop session"));
+        }
         let mut token = windows::Win32::Foundation::HANDLE::default();
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
-            .map_err(std::io::Error::other)?;
+        WTSQueryUserToken(session, &mut token).map_err(std::io::Error::other)?;
         let mut needed = 0u32;
         let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
         let mut buffer = vec![0u8; needed as usize];
@@ -129,11 +123,21 @@ pub fn current_sid() -> std::io::Result<String> {
             needed,
             &mut needed,
         );
-        let _ = windows::Win32::Foundation::CloseHandle(token);
+        let _ = CloseHandle(token);
         result.map_err(std::io::Error::other)?;
         let user = &*(buffer.as_ptr() as *const TOKEN_USER);
         sid_to_string(user.User.Sid)
     }
+}
+
+#[cfg(not(windows))]
+pub fn calling_account() -> std::io::Result<Account> {
+    if let Ok(uid) = std::env::var("PKEXEC_UID") {
+        if let Ok(uid) = uid.trim().parse() {
+            return Ok(uid);
+        }
+    }
+    crate::paths::desktop_uid()
 }
 
 /// the SID of the user owning `pid`, for identifying a pipe peer. the engine

@@ -146,6 +146,40 @@ pub(crate) fn engine_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
+/// load the rules and bring enforcement up to its intended state.
+///
+/// every host has to go through here, not just `RuleStore::new`: the apps the
+/// user already accepted must be carried forward before ask-before-connect is
+/// switched on, or the catch-all deny would cut off a machine's worth of
+/// software that was working a moment ago.
+pub(crate) fn open_rules(store: &Arc<Mutex<Store>>) -> anyhow::Result<Arc<Mutex<RuleStore>>> {
+    #[cfg(windows)]
+    let mut rules = RuleStore::new()?;
+    #[cfg(not(windows))]
+    let rules = RuleStore::new()?;
+
+    #[cfg(has_platform)]
+    rules.trust_apps(
+        &store
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .trusted_apps(),
+    );
+    #[cfg(not(has_platform))]
+    let _ = store;
+
+    // ask-before-connect: an application with no decision is denied until the
+    // user answers, the same guarantee the Linux nfqueue hook gives structurally.
+    // a failure here must not take the engine down, or a WFP problem would leave
+    // the machine with no monitoring at all.
+    #[cfg(windows)]
+    if let Err(error) = rules.set_ask_mode(true) {
+        tracing::error!("ask-before-connect unavailable, new apps stay allowed: {error}");
+    }
+
+    Ok(Arc::new(Mutex::new(rules)))
+}
+
 /// the engine's async main: monitor, plugin host, and both IPC servers, run to
 /// the first one that ends. shared by the console path and the platform service
 /// hosts (SCM on Windows, systemd on Linux).
@@ -157,28 +191,7 @@ pub(crate) async fn run_engine() -> anyhow::Result<()> {
     let engine = Engine::new();
     let store = Arc::new(Mutex::new(open_store()));
     let (enrich, panels, supervisor) = plugins::build(store.clone(), engine.clone());
-    #[cfg(windows)]
-    let mut rules = RuleStore::new()?;
-    #[cfg(not(windows))]
-    let rules = RuleStore::new()?;
-    #[cfg(has_platform)]
-    rules.trust_apps(
-        &store
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .trusted_apps(),
-    );
-    // ask-before-connect: an application with no decision is denied until the
-    // user answers, the same guarantee the Linux nfqueue hook gives structurally.
-    // this must come after the trusted apps are seeded, or the catch-all would
-    // be in force for a moment with nothing permitted underneath it. a failure
-    // here must not take the engine down, or a WFP problem would leave the
-    // machine with no monitoring at all.
-    #[cfg(windows)]
-    if let Err(error) = rules.set_ask_mode(true) {
-        tracing::error!("ask-before-connect unavailable, new apps stay allowed: {error}");
-    }
-    let rules = Arc::new(Mutex::new(rules));
+    let rules = open_rules(&store)?;
     monitor::spawn(engine.clone(), rules.clone(), store.clone(), enrich.clone());
     tokio::select! {
         r = server::serve(engine, rules.clone(), store.clone(), enrich, panels) => r,

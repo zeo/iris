@@ -73,10 +73,14 @@ fn run_service() -> anyhow::Result<()> {
         std::fs::create_dir_all(crate::paths::plugins_dir())?;
         crate::paths::secure_state()?;
         let rt = crate::engine_runtime()?;
-        let rules = std::sync::Arc::new(std::sync::Mutex::new(crate::rules::RuleStore::new()?));
-        Ok((rt, rules))
+        // the history store has to exist before the rules do: seeding the apps
+        // the user already accepted reads from it, and that has to happen before
+        // ask-before-connect starts denying anything
+        let store = std::sync::Arc::new(std::sync::Mutex::new(crate::open_store()));
+        let rules = crate::open_rules(&store)?;
+        Ok((rt, store, rules))
     })();
-    let (rt, rules) = match initialized {
+    let (rt, store, rules) = match initialized {
         Ok(initialized) => initialized,
         Err(error) => {
             tracing::error!("service initialization failed: {error}");
@@ -97,7 +101,6 @@ fn run_service() -> anyhow::Result<()> {
 
     let failed = rt.block_on(async {
         let engine = Engine::new();
-        let store = std::sync::Arc::new(std::sync::Mutex::new(crate::open_store()));
         let (enrich, panels, supervisor) = crate::plugins::build(store.clone(), engine.clone());
         crate::monitor::spawn(engine.clone(), rules.clone(), store.clone(), enrich.clone());
         tokio::select! {

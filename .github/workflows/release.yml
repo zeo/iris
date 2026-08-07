@@ -8,6 +8,10 @@ on:
   push:
     tags: ['v*']
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -20,7 +24,7 @@ env:
 jobs:
   build-windows:
     if: github.actor == 'zeo'
-    runs-on: [self-hosted, windows-vm]
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -39,11 +43,6 @@ jobs:
           $cargoHome = Join-Path $env:RUNNER_TEMP 'iris-cargo-home'
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "CARGO_HOME=$cargoHome" -Encoding utf8
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          # the ephemeral vms use a per-run _work/vm-<id> path, so a restored target
-          # dir has dead absolute paths in its build-script binaries and dep-info files
-          # and the build fails on them; cache the cargo registry only, rebuild target
-          cache-targets: "false"
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 20
@@ -151,7 +150,7 @@ jobs:
   build-linux:
     if: github.actor == 'zeo'
     needs: build-windows
-    runs-on: [self-hosted, linux-vm]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -169,11 +168,6 @@ jobs:
           echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
           dirname "$(rustup which cargo)" | tee -a "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          # the ephemeral vms use a per-run _work/vm-<id> path, so a restored target
-          # dir has dead absolute paths in its build-script binaries and dep-info files
-          # and the build fails on them; cache the cargo registry only, rebuild target
-          cache-targets: "false"
       - name: system deps
         run: |
           sudo apt-get update -qq

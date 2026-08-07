@@ -87,6 +87,10 @@ pub struct KnownApp {
     pub app: AppId,
     pub name: Option<String>,
     pub last_seen: u64,
+    /// whether the executable is still on disk. a rule cannot be enforced for an
+    /// image that no longer exists, so the UI needs this to explain itself
+    /// rather than show a block that enforces nothing.
+    pub installed: bool,
 }
 
 #[cfg(test)]

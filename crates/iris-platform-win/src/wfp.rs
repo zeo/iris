@@ -22,8 +22,8 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
     FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0,
     FWPM_SUBLAYER0, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE,
-    FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0, FWP_EMPTY, FWP_FILTER_ENUM_OVERLAPPING,
-    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_NONE_SET, FWP_UINT32, FWP_VALUE0,
+    FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0, FWP_FILTER_ENUM_OVERLAPPING,
+    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_NONE_SET, FWP_UINT32, FWP_UINT64, FWP_VALUE0,
 };
 use windows::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
@@ -42,9 +42,33 @@ const IRIS_SUBLAYER: GUID = GUID::from_values(
     [0xa1, 0x77, 0x3c, 0x88, 0x12, 0x44, 0x9e, 0x02],
 );
 
+/// filter weights inside iris's sublayer. WFP evaluates the highest weight
+/// first and stops at the first permit or block, so a per-app decision must
+/// outrank the ask-mode catch-all that sits underneath everything.
+/// see: Filter Arbitration, learn.microsoft.com/windows/win32/fwp/filter-arbitration
+/// an explicit decision the user made, which must win over everything below
+const WEIGHT_APP_RULE: u64 = 0x2000;
+/// a permit seeded for an app the user had already accepted before ask mode
+/// existed. it has to beat the catch-all deny but lose to a real block rule, or
+/// a block could be shadowed by the app's own grandfathered permit.
+const WEIGHT_SEEDED_TRUST: u64 = 0x1000;
+/// the ask-mode catch-all, underneath every decision
+const WEIGHT_ASK_FALLBACK: u64 = 0x0100;
+
 /// an open WFP engine session with iris's provider + sublayer provisioned
 pub struct Wfp {
     engine: HANDLE,
+    /// the catch-all filters backing ask mode, empty when ask mode is off, each
+    /// paired with the direction its layer represents
+    ask_filters: Vec<(u64, Direction)>,
+    /// the live classify-drop subscription that turns ask-mode denials into
+    /// prompts; present only while ask mode is on
+    events: Option<crate::netevent::NetEvents>,
+    /// the receiving end of that subscription, handed to the service once
+    denied: Option<std::sync::mpsc::Receiver<crate::netevent::DeniedConnection>>,
+    /// permits seeded for apps accepted before ask mode existed, so turning it
+    /// on does not retroactively cut off the whole machine
+    trusted_filters: Vec<u64>,
 }
 
 // a WFP engine handle is safe to use from any thread; the rule store guards all
@@ -68,7 +92,13 @@ impl Wfp {
             if !ok(rc) {
                 return Err(EngineError::Os(format!("FwpmEngineOpen0 failed: {rc:#x}")));
             }
-            let mut wfp = Wfp { engine };
+            let mut wfp = Wfp {
+                engine,
+                ask_filters: Vec::new(),
+                events: None,
+                denied: None,
+                trusted_filters: Vec::new(),
+            };
             wfp.ensure_objects()?;
             Ok(wfp)
         }
@@ -106,6 +136,7 @@ impl Wfp {
     pub fn reset(&mut self) -> EngineResult<()> {
         unsafe {
             self.clear_filters();
+            self.ask_filters.clear();
             // now that the sublayer is empty this succeeds; a fresh install
             // reports FWP_E_SUBLAYER_NOT_FOUND, which ensure_objects then fixes
             let _ = FwpmSubLayerDeleteByKey0(self.engine, &IRIS_SUBLAYER);
@@ -182,6 +213,16 @@ impl Wfp {
         direction: Direction,
         action: RuleAction,
     ) -> EngineResult<Vec<u64>> {
+        self.apply_weighted(path, direction, action, &WEIGHT_APP_RULE)
+    }
+
+    fn apply_weighted(
+        &mut self,
+        path: &str,
+        direction: Direction,
+        action: RuleAction,
+        rule_weight: &u64,
+    ) -> EngineResult<Vec<u64>> {
         unsafe {
             let file = wide(path);
             let mut app_id: *mut FWP_BYTE_BLOB = ptr::null_mut();
@@ -212,10 +253,7 @@ impl Wfp {
                 filter.providerKey = &IRIS_PROVIDER as *const _ as *mut _;
                 filter.layerKey = layer;
                 filter.subLayerKey = IRIS_SUBLAYER;
-                filter.weight = FWP_VALUE0 {
-                    r#type: FWP_EMPTY,
-                    Anonymous: std::mem::zeroed(),
-                };
+                filter.weight = weight(rule_weight);
                 filter.numFilterConditions = conditions.len() as u32;
                 filter.filterCondition = conditions.as_mut_ptr();
                 filter.action = FWPM_ACTION0 {
@@ -254,6 +292,152 @@ impl Wfp {
             }
         }
         Ok(())
+    }
+
+    pub fn ask_mode_active(&self) -> bool {
+        !self.ask_filters.is_empty()
+    }
+
+    /// permit the applications the user has already decided about, so switching
+    /// ask mode on does not retroactively deny everything that was working.
+    ///
+    /// without this the catch-all would deny every app that predates ask mode,
+    /// and the user would face a prompt for their whole machine at once. these
+    /// filters are not stored rules: they are re-seeded from the app inventory
+    /// on every start, and an explicit block rule still outranks them because
+    /// WFP takes the first block within a sublayer at equal weight.
+    pub fn trust_apps(&mut self, paths: &[String]) {
+        let mut seeded = 0usize;
+        for path in paths {
+            for direction in [Direction::Outbound, Direction::Inbound] {
+                match self.apply_weighted(
+                    path,
+                    direction,
+                    RuleAction::Allow,
+                    &WEIGHT_SEEDED_TRUST,
+                ) {
+                    Ok(ids) => {
+                        seeded += 1;
+                        self.trusted_filters.extend(ids);
+                    }
+                    // an app that has been uninstalled has nothing to permit
+                    Err(EngineError::NotFound(_)) => {}
+                    Err(error) => tracing::debug!(app = %path, "could not pre-trust: {error}"),
+                }
+            }
+        }
+        tracing::info!(
+            seeded,
+            offered = paths.len(),
+            "pre-trusted already-accepted applications"
+        );
+    }
+
+    /// switch ask-before-connect on or off.
+    ///
+    /// on: a catch-all block filter goes in underneath every per-app rule, so an
+    /// application iris has no decision for is denied at the ALE layer instead of
+    /// connecting first and being noticed after. loopback is exempt, and the
+    /// per-app permit filters added by `apply` carry a heavier weight, so an
+    /// allowed app still wins inside the sublayer.
+    ///
+    /// this is the piece that makes a decision arrive before the connection
+    /// rather than after it.
+    pub fn set_ask_mode(&mut self, enabled: bool) -> EngineResult<()> {
+        if enabled == self.ask_mode_active() {
+            return Ok(());
+        }
+        if !enabled {
+            self.events = None;
+            let ids: Vec<u64> = std::mem::take(&mut self.ask_filters)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            return self.remove(&ids);
+        }
+        unsafe {
+            const LAYERS: [(GUID, Direction); 4] = [
+                (FWPM_LAYER_ALE_AUTH_CONNECT_V4, Direction::Outbound),
+                (FWPM_LAYER_ALE_AUTH_CONNECT_V6, Direction::Outbound),
+                (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, Direction::Inbound),
+                (FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, Direction::Inbound),
+            ];
+            let mut ids = Vec::with_capacity(LAYERS.len());
+            for (layer, direction) in LAYERS {
+                let mut conditions = vec![non_loopback_condition()];
+                let mut name = wide("Iris ask mode");
+                let mut filter: FWPM_FILTER0 = std::mem::zeroed();
+                filter.displayData = FWPM_DISPLAY_DATA0 {
+                    name: PWSTR(name.as_mut_ptr()),
+                    description: PWSTR(name.as_mut_ptr()),
+                };
+                filter.providerKey = &IRIS_PROVIDER as *const _ as *mut _;
+                filter.layerKey = layer;
+                filter.subLayerKey = IRIS_SUBLAYER;
+                filter.weight = weight(&WEIGHT_ASK_FALLBACK);
+                filter.numFilterConditions = conditions.len() as u32;
+                filter.filterCondition = conditions.as_mut_ptr();
+                filter.action = FWPM_ACTION0 {
+                    r#type: FWP_ACTION_BLOCK,
+                    Anonymous: std::mem::zeroed(),
+                };
+                let mut id: u64 = 0;
+                let rc = FwpmFilterAdd0(self.engine, &filter, None, Some(&mut id));
+                if !ok(rc) {
+                    // never leave a half-installed default-deny in place: it would
+                    // block one address family and not the other
+                    for (id, _) in &ids {
+                        let _ = FwpmFilterDeleteById0(self.engine, *id);
+                    }
+                    return Err(EngineError::Os(format!(
+                        "could not install ask mode: {rc:#x}"
+                    )));
+                }
+                ids.push((id, direction));
+            }
+
+            // the prompt source has to be live before the deny takes effect, or
+            // the first denied connection is silent
+            match self.events.as_ref() {
+                Some(_) => crate::netevent::set_ask_filters(&ids),
+                None => {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    match crate::netevent::NetEvents::subscribe(self.engine, &ids, tx) {
+                        Ok(events) => {
+                            self.events = Some(events);
+                            self.denied = Some(rx);
+                        }
+                        Err(error) => {
+                            for (id, _) in &ids {
+                                let _ = FwpmFilterDeleteById0(self.engine, *id);
+                            }
+                            return Err(EngineError::Os(error));
+                        }
+                    }
+                }
+            }
+            self.ask_filters = ids;
+        }
+        Ok(())
+    }
+
+    /// the stream of connections ask mode denied, taken once by the service
+    pub fn take_denied_receiver(
+        &mut self,
+    ) -> Option<std::sync::mpsc::Receiver<crate::netevent::DeniedConnection>> {
+        self.denied.take()
+    }
+}
+
+/// an explicit filter weight. BFE takes a UINT64 as-is, which is what lets a
+/// per-app decision outrank the ask-mode catch-all in the same sublayer. the
+/// value is passed by pointer, so `value` must outlive the FwpmFilterAdd0 call.
+fn weight(value: &u64) -> FWP_VALUE0 {
+    FWP_VALUE0 {
+        r#type: FWP_UINT64,
+        Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0_0 {
+            uint64: value as *const u64 as *mut u64,
+        },
     }
 }
 
@@ -316,6 +500,43 @@ mod tests {
                 FWP_CONDITION_FLAG_IS_LOOPBACK
             );
         }
+    }
+
+    /// read a weight back out the way BFE would, so the test checks the value
+    /// actually handed to WFP rather than the constant next to it
+    fn weight_value(value: &FWP_VALUE0) -> u64 {
+        assert_eq!(value.r#type, FWP_UINT64);
+        unsafe { *value.Anonymous.uint64 }
+    }
+
+    #[test]
+    fn a_block_rule_outranks_a_grandfathered_permit_which_outranks_the_deny() {
+        // the ordering that keeps ask mode safe to switch on: apps the user had
+        // already accepted keep working, but an explicit block still wins, and
+        // anything with no decision at all falls through to the catch-all
+        let rule = weight_value(&weight(&WEIGHT_APP_RULE));
+        let seeded = weight_value(&weight(&WEIGHT_SEEDED_TRUST));
+        let fallback = weight_value(&weight(&WEIGHT_ASK_FALLBACK));
+        assert!(rule > seeded, "a user rule {rule} must outweigh seeded trust {seeded}");
+        assert!(
+            seeded > fallback,
+            "seeded trust {seeded} must outweigh the catch-all {fallback}"
+        );
+    }
+
+    #[test]
+    fn a_per_app_decision_outranks_the_ask_mode_catch_all() {
+        // WFP evaluates a sublayer's filters from heaviest to lightest and stops
+        // at the first permit or block, so an allowed app only survives ask mode
+        // if its own filter is heavier than the default deny
+        let app = weight_value(&weight(&WEIGHT_APP_RULE));
+        let fallback = weight_value(&weight(&WEIGHT_ASK_FALLBACK));
+        assert!(app > fallback, "app rule {app} must outweigh ask mode {fallback}");
+    }
+
+    #[test]
+    fn the_ask_mode_weight_survives_the_round_trip_into_wfp() {
+        assert_eq!(weight_value(&weight(&WEIGHT_ASK_FALLBACK)), WEIGHT_ASK_FALLBACK);
     }
 
     #[test]

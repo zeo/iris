@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 /// the per-adapter breakdown carried in every tick; v4 added plugin management;
 /// v5 added rule proposals and plugin panels.
 /// v6 added durable app inventory and compact host summaries.
-pub const PROTOCOL_VERSION: u32 = 6;
+/// v7 added bulk app forget, install state on the inventory, and the delegated
+/// rule-management grant that replaces a UAC prompt per rule change.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// what the UI shows for one installed plugin: its declared identity and
 /// capabilities, plus whether the user has consented and enabled it
@@ -54,6 +56,21 @@ pub enum ClientMessage {
     ForgetApp {
         req: u64,
         path: String,
+    },
+    /// drop several apps from the inventory at once (the inactive-app sweep)
+    ForgetApps {
+        req: u64,
+        paths: Vec<String>,
+    },
+    /// whether the calling desktop account may change rules without elevating
+    GetRuleGrant {
+        req: u64,
+    },
+    /// record or revoke the delegated rule-management grant. only honored on the
+    /// admin channel, so establishing it costs one elevation.
+    SetRuleGrant {
+        req: u64,
+        granted: bool,
     },
     AddRule {
         req: u64,
@@ -190,4 +207,8 @@ pub enum Reply {
     Proposals(Vec<RuleProposal>),
     /// a plugin's panel view-model
     Panel(Panel),
+    /// how many apps a bulk forget actually removed
+    Forgotten(usize),
+    /// whether the delegated rule-management grant is in force
+    RuleGrant(bool),
 }

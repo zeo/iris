@@ -54,6 +54,11 @@ pub enum EngineCmd {
     ListRules,
     ListApps,
     ForgetApp(String),
+    ForgetApps(Vec<String>),
+    AddRule(iris_core::Rule),
+    RemoveRule(i64),
+    SetRuleEnabled(i64, bool),
+    GetRuleGrant,
     GetUsage(UsageQuery),
     GetAdapterUsage(u64, u64),
     ListAlerts(bool),
@@ -65,9 +70,10 @@ pub enum EngineCmd {
     GrantPlugin(String, Vec<String>, Vec<String>),
     SetPluginEnabled(String, bool),
     ListProposals,
-    // rejecting is unprivileged; accepting enforces a rule and goes over the
-    // admin pipe (see rulectl), never through here
+    // rejecting is unprivileged; accepting enforces a rule, so it needs the
+    // delegated grant or an elevated run (see rulectl)
     RejectProposal(i64),
+    ResolveProposal(i64, bool),
     GetPluginPanel(String),
 }
 pub struct Command {
@@ -148,6 +154,42 @@ pub async fn forget_app(app: AppHandle, path: String) -> Result<(), String> {
         _ => Err("unexpected reply".into()),
     }
 }
+
+#[tauri::command]
+pub async fn forget_apps(app: AppHandle, paths: Vec<String>) -> Result<usize, String> {
+    match dispatch(&app, EngineCmd::ForgetApps(paths)).await? {
+        Reply::Forgotten(count) => Ok(count),
+        Reply::Error(error) => Err(error),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+/// whether this account may change rules without an elevation prompt
+#[tauri::command]
+pub async fn rule_grant(app: AppHandle) -> Result<bool, String> {
+    match dispatch(&app, EngineCmd::GetRuleGrant).await? {
+        Reply::RuleGrant(granted) => Ok(granted),
+        Reply::Error(error) => Err(error),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+/// try a rule mutation over the telemetry channel, which the engine accepts only
+/// when the one-time grant is in force. `Ok(false)` means the engine wants
+/// elevation, so the caller falls back to the elevated one-shot.
+pub(crate) async fn try_unelevated(app: &AppHandle, cmd: EngineCmd) -> Result<bool, String> {
+    match dispatch(app, cmd).await {
+        Ok(Reply::Ok) | Ok(Reply::RuleAdded(_)) => Ok(true),
+        Ok(Reply::Error(error)) if error == NEEDS_ELEVATION => Ok(false),
+        Ok(Reply::Error(error)) => Err(error),
+        Ok(_) => Err("unexpected reply".into()),
+        // the engine being unreachable is not a reason to raise a UAC prompt
+        Err(error) => Err(error),
+    }
+}
+
+/// mirrors the engine's own wording for a rule change that needs elevation
+const NEEDS_ELEVATION: &str = "rule changes require elevation";
 
 #[tauri::command]
 pub async fn list_alerts(app: AppHandle, unacked_only: bool) -> Result<Vec<Alert>, String> {
@@ -461,6 +503,12 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     EngineCmd::ListRules => ClientMessage::ListRules { req },
                     EngineCmd::ListApps => ClientMessage::ListApps { req },
                     EngineCmd::ForgetApp(path) => ClientMessage::ForgetApp { req, path },
+                    EngineCmd::ForgetApps(paths) => ClientMessage::ForgetApps { req, paths },
+                    EngineCmd::AddRule(rule) => ClientMessage::AddRule { req, rule },
+                    EngineCmd::RemoveRule(id) => ClientMessage::RemoveRule { req, id },
+                    EngineCmd::SetRuleEnabled(id, enabled) =>
+                        ClientMessage::SetRuleEnabled { req, id, enabled },
+                    EngineCmd::GetRuleGrant => ClientMessage::GetRuleGrant { req },
                     EngineCmd::GetUsage(query) => ClientMessage::GetUsage { req, query },
                     EngineCmd::GetAdapterUsage(from_ms, to_ms) =>
                         ClientMessage::GetAdapterUsage { req, from_ms, to_ms },
@@ -479,6 +527,8 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     EngineCmd::ListProposals => ClientMessage::ListProposals { req },
                     EngineCmd::RejectProposal(id) =>
                         ClientMessage::ResolveProposal { req, id, accept: false },
+                    EngineCmd::ResolveProposal(id, accept) =>
+                        ClientMessage::ResolveProposal { req, id, accept },
                     EngineCmd::GetPluginPanel(id) => ClientMessage::GetPluginPanel { req, id },
                 };
                 pending.insert(req, command.resp);

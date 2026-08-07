@@ -12,6 +12,10 @@ use tokio::select;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
+/// what the UI is told when a rule change arrives without the delegated grant.
+/// the app matches on it to decide whether to retry the change elevated.
+pub const NEEDS_ELEVATION: &str = "rule changes require elevation";
+
 /// accept clients on the iris pipe until the runtime is cancelled. each
 /// connection is served on its own task.
 pub async fn serve(
@@ -44,8 +48,8 @@ pub async fn serve(
                 continue;
             }
         };
-        let peer_scope = match authorize_peer(&conn) {
-            Ok(scope) => scope,
+        let peer = match authorize_peer(&conn) {
+            Ok(peer) => peer,
             Err(e) => {
                 tracing::warn!("refusing client, authorization check failed: {e}");
                 continue;
@@ -66,7 +70,7 @@ pub async fn serve(
         let panels = panels.clone();
         tokio::spawn(async move {
             let _permit = permit; // held for the session, released on disconnect
-            if let Err(e) = handle(conn, peer_scope, engine, rules, store, enrich, panels).await {
+            if let Err(e) = handle(conn, peer, engine, rules, store, enrich, panels).await {
                 tracing::debug!("client disconnected: {e}");
             }
         });
@@ -95,12 +99,32 @@ fn authorized_linux_uid(peer: u32, desktop: u32) -> bool {
     peer == 0 || peer == desktop
 }
 
+/// who is on the other end of a telemetry connection: the desktop scope the
+/// session-liveness check uses, plus the account identity the delegated
+/// rule-management grant is compared against
+#[derive(Clone)]
+pub struct Peer {
+    scope: u32,
+    account: crate::grant::Account,
+}
+
+impl Peer {
+    /// whether this peer may mutate rules without elevating, which requires both
+    /// a recorded grant naming exactly this account and a still-active session
+    fn may_manage_rules(&self) -> bool {
+        peer_scope_is_active(self.scope) && crate::grant::allows(&self.account)
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn authorize_peer(stream: &transport::Stream) -> io::Result<u32> {
+fn authorize_peer(stream: &transport::Stream) -> io::Result<Peer> {
     let desktop = crate::paths::desktop_uid()?;
     let peer = transport::peer_euid(stream)?;
     if authorized_linux_uid(peer, desktop) {
-        Ok(desktop)
+        Ok(Peer {
+            scope: desktop,
+            account: peer,
+        })
     } else {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -110,7 +134,7 @@ fn authorize_peer(stream: &transport::Stream) -> io::Result<u32> {
 }
 
 #[cfg(windows)]
-fn authorize_peer(stream: &transport::Stream) -> io::Result<u32> {
+fn authorize_peer(stream: &transport::Stream) -> io::Result<Peer> {
     use windows::Win32::System::RemoteDesktop::{
         ProcessIdToSessionId, WTSGetActiveConsoleSessionId,
     };
@@ -125,12 +149,18 @@ fn authorize_peer(stream: &transport::Stream) -> io::Result<u32> {
             "client is outside the active desktop session",
         ));
     }
-    Ok(session)
+    Ok(Peer {
+        scope: session,
+        account: crate::grant::sid_of_process(pid)?,
+    })
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn authorize_peer(_stream: &transport::Stream) -> io::Result<u32> {
-    Ok(0)
+fn authorize_peer(_stream: &transport::Stream) -> io::Result<Peer> {
+    Ok(Peer {
+        scope: 0,
+        account: 0,
+    })
 }
 
 #[cfg(windows)]
@@ -148,7 +178,7 @@ fn peer_scope_is_active(_scope: u32) -> bool {
 /// outbound tick/alert stream on a single duplex connection.
 async fn handle(
     stream: transport::Stream,
-    peer_scope: u32,
+    peer: Peer,
     engine: Engine,
     rules: Arc<Mutex<RuleStore>>,
     store: Arc<Mutex<Store>>,
@@ -185,7 +215,7 @@ async fn handle(
         select! {
             incoming = incoming_rx.recv() => {
                 let Some(incoming) = incoming else { break };
-                if !peer_scope_is_active(peer_scope) {
+                if !peer_scope_is_active(peer.scope) {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         "desktop session is no longer active",
@@ -244,16 +274,101 @@ async fn handle(
                         )
                         .await?;
                     }
-                    // rule mutations are privileged: they run WFP changes as
-                    // LocalSystem, so they are only accepted on the admin pipe
-                    // (which the OS lets only an elevated caller open). reject
-                    // them here rather than let an unprivileged client change the
-                    // firewall.
-                    ClientMessage::AddRule { req, .. }
-                    | ClientMessage::RemoveRule { req, .. }
-                    | ClientMessage::SetRuleEnabled { req, .. } => {
-                        reply(&mut send, req, Reply::Error("rule changes require elevation".into()))
-                            .await?;
+                    // rule mutations run WFP changes as LocalSystem, so they are
+                    // privileged. they are accepted here only when the user has
+                    // already elevated once to authorize exactly this account
+                    // (see `grant`), and the peer is still in the active console
+                    // session. without that grant the admin pipe remains the only
+                    // way in, so an unprivileged client cannot touch the firewall.
+                    ClientMessage::AddRule { req, rule } => {
+                        if !peer.may_manage_rules() {
+                            reply(&mut send, req, Reply::Error(NEEDS_ELEVATION.into())).await?;
+                        } else {
+                            let rules = rules.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                rules
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .add(rule)
+                                    .map(Reply::RuleAdded)
+                                    .unwrap_or_else(|error| Reply::Error(error.to_string()))
+                            })
+                            .await
+                            .unwrap_or_else(|_| Reply::Error("the rule change failed".into()));
+                            reply(&mut send, req, result).await?;
+                        }
+                    }
+                    ClientMessage::RemoveRule { req, id } => {
+                        if !peer.may_manage_rules() {
+                            reply(&mut send, req, Reply::Error(NEEDS_ELEVATION.into())).await?;
+                        } else {
+                            let rules = rules.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                match rules
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .remove(id)
+                                {
+                                    Ok(true) => Reply::Ok,
+                                    Ok(false) => Reply::Error("no rule with that id".into()),
+                                    Err(error) => Reply::Error(error.to_string()),
+                                }
+                            })
+                            .await
+                            .unwrap_or_else(|_| Reply::Error("the rule change failed".into()));
+                            reply(&mut send, req, result).await?;
+                        }
+                    }
+                    ClientMessage::SetRuleEnabled { req, id, enabled } => {
+                        if !peer.may_manage_rules() {
+                            reply(&mut send, req, Reply::Error(NEEDS_ELEVATION.into())).await?;
+                        } else {
+                            let rules = rules.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                match rules
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .set_enabled(id, enabled)
+                                {
+                                    Ok(Some(_)) => Reply::Ok,
+                                    Ok(None) => Reply::Error("no rule with that id".into()),
+                                    Err(error) => Reply::Error(error.to_string()),
+                                }
+                            })
+                            .await
+                            .unwrap_or_else(|_| Reply::Error("the rule change failed".into()));
+                            reply(&mut send, req, result).await?;
+                        }
+                    }
+                    ClientMessage::GetRuleGrant { req } => {
+                        reply(&mut send, req, Reply::RuleGrant(peer.may_manage_rules())).await?;
+                    }
+                    // establishing or revoking the grant is itself privileged, so
+                    // it only happens on the admin channel
+                    ClientMessage::SetRuleGrant { req, .. } => {
+                        reply(&mut send, req, Reply::Error(NEEDS_ELEVATION.into())).await?;
+                    }
+                    ClientMessage::ForgetApps { req, paths } => {
+                        let store = store.clone();
+                        #[cfg(target_os = "linux")]
+                        let rules = rules.clone();
+                        let removed = tokio::task::spawn_blocking(move || {
+                            let removed = store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .forget_apps(&paths);
+                            #[cfg(target_os = "linux")]
+                            {
+                                let rules = rules.lock().unwrap_or_else(|e| e.into_inner());
+                                for path in &paths {
+                                    rules.forget_trusted_app(path);
+                                }
+                            }
+                            removed
+                        })
+                        .await
+                        .unwrap_or(0);
+                        reply(&mut send, req, Reply::Forgotten(removed)).await?;
                     }
                     ClientMessage::GetUsage { req, mut query } => {
                         // bound the window so a caller cannot force a scan of the
@@ -308,8 +423,26 @@ async fn handle(
                                     // this command is bounded to one pending alert and
                                     // the active desktop session. manual rule changes
                                     // still use the admin endpoint.
+                                    //
+                                    // under ask-before-connect an Allow has to become
+                                    // a real permit rule: the catch-all deny is still
+                                    // in force, so recording the decision alone would
+                                    // leave the app blocked forever.
+                                    let asking = {
+                                        #[cfg(has_platform)]
+                                        {
+                                            rules
+                                                .lock()
+                                                .unwrap_or_else(|error| error.into_inner())
+                                                .ask_mode()
+                                        }
+                                        #[cfg(not(has_platform))]
+                                        {
+                                            false
+                                        }
+                                    };
                                     let needs_rule =
-                                        !cfg!(windows) || matches!(action, RuleAction::Block);
+                                        asking || matches!(action, RuleAction::Block);
                                     let applied = if needs_rule {
                                         let rule = Rule {
                                             app,
@@ -348,7 +481,7 @@ async fn handle(
                         reply(&mut send, req, result).await?;
                     }
                     ClientMessage::KillConnection { req, local_port, remote_addr, remote_port } => {
-                        let killed = kill_conn(local_port, &remote_addr, remote_port, peer_scope);
+                        let killed = kill_conn(local_port, &remote_addr, remote_port, peer.scope);
                         let result = if killed {
                             Reply::Ok
                         } else {
@@ -425,11 +558,33 @@ async fn handle(
                         reply(&mut send, req, Reply::Proposals(list)).await?;
                     }
                     // rejecting a proposal enforces nothing, so any client may;
-                    // accepting turns it into a firewall rule and belongs to the
-                    // admin pipe, the same boundary as AddRule
+                    // accepting turns it into a firewall rule and needs the same
+                    // authority as AddRule
                     ClientMessage::ResolveProposal { req, id, accept } => {
-                        let result = if accept {
-                            Reply::Error("accepting a proposal requires elevation".into())
+                        let result = if accept && !peer.may_manage_rules() {
+                            Reply::Error(NEEDS_ELEVATION.into())
+                        } else if accept {
+                            let store = store.clone();
+                            let rules = rules.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let settled = store
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .resolve_proposal(id, true);
+                                match settled {
+                                    Some(proposal) => rules
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .add(proposal.rule)
+                                        .map(Reply::RuleAdded)
+                                        .unwrap_or_else(|e| Reply::Error(e.to_string())),
+                                    None => {
+                                        Reply::Error("no pending proposal with that id".into())
+                                    }
+                                }
+                            })
+                            .await
+                            .unwrap_or_else(|_| Reply::Error("the rule change failed".into()))
                         } else {
                             let store = store.clone();
                             let resolved = tokio::task::spawn_blocking(move || {
@@ -474,7 +629,7 @@ async fn handle(
                 }
             }
             outbound = events.recv() => {
-                if !peer_scope_is_active(peer_scope) {
+                if !peer_scope_is_active(peer.scope) {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         "desktop session is no longer active",
@@ -597,6 +752,23 @@ async fn handle_admin(
                 };
                 reply(&mut send, req, result).await?;
             }
+            // the one elevated step that buys the user out of every later
+            // prompt: authorize this account to manage rules, or take it back
+            ClientMessage::SetRuleGrant { req, granted } => {
+                let result = match crate::grant::calling_account()
+                    .and_then(|account| crate::grant::set(&account, granted))
+                {
+                    Ok(()) => {
+                        tracing::info!(granted, "delegated rule management grant updated");
+                        Reply::Ok
+                    }
+                    Err(error) => Reply::Error(format!("could not record the grant: {error}")),
+                };
+                reply(&mut send, req, result).await?;
+            }
+            ClientMessage::GetRuleGrant { req } => {
+                reply(&mut send, req, Reply::RuleGrant(crate::grant::is_granted())).await?;
+            }
             ClientMessage::Ping { req } => reply(&mut send, req, Reply::Pong).await?,
             other => {
                 if let Some(req) = req_of(&other) {
@@ -658,6 +830,9 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::ListRules { req }
         | ClientMessage::ListApps { req }
         | ClientMessage::ForgetApp { req, .. }
+        | ClientMessage::ForgetApps { req, .. }
+        | ClientMessage::GetRuleGrant { req }
+        | ClientMessage::SetRuleGrant { req, .. }
         | ClientMessage::AddRule { req, .. }
         | ClientMessage::RemoveRule { req, .. }
         | ClientMessage::SetRuleEnabled { req, .. }

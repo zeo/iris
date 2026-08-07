@@ -4,6 +4,7 @@
 
 mod adminclient;
 mod engine;
+mod grant;
 #[cfg(windows)]
 mod install;
 mod monitor;
@@ -63,7 +64,7 @@ fn main() -> anyhow::Result<()> {
     // prompt: a UAC dialog on Windows, a polkit prompt via pkexec on Linux)
     if let Some(idx) = args
         .iter()
-        .position(|a| a.starts_with("--rule-") || a == "--proposal-accept")
+        .position(|a| a.starts_with("--rule-") || a == "--proposal-accept" || a == "--grant-rules")
     {
         return adminclient::run(&args[idx..]);
     }
@@ -156,14 +157,27 @@ pub(crate) async fn run_engine() -> anyhow::Result<()> {
     let engine = Engine::new();
     let store = Arc::new(Mutex::new(open_store()));
     let (enrich, panels, supervisor) = plugins::build(store.clone(), engine.clone());
+    #[cfg(windows)]
+    let mut rules = RuleStore::new()?;
+    #[cfg(not(windows))]
     let rules = RuleStore::new()?;
-    #[cfg(target_os = "linux")]
+    #[cfg(has_platform)]
     rules.trust_apps(
         &store
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .trusted_apps(),
     );
+    // ask-before-connect: an application with no decision is denied until the
+    // user answers, the same guarantee the Linux nfqueue hook gives structurally.
+    // this must come after the trusted apps are seeded, or the catch-all would
+    // be in force for a moment with nothing permitted underneath it. a failure
+    // here must not take the engine down, or a WFP problem would leave the
+    // machine with no monitoring at all.
+    #[cfg(windows)]
+    if let Err(error) = rules.set_ask_mode(true) {
+        tracing::error!("ask-before-connect unavailable, new apps stay allowed: {error}");
+    }
     let rules = Arc::new(Mutex::new(rules));
     monitor::spawn(engine.clone(), rules.clone(), store.clone(), enrich.clone());
     tokio::select! {

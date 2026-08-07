@@ -55,6 +55,12 @@ fn build_op(args: &[String]) -> anyhow::Result<Op> {
             let path = args.get(1).context("rule-import: missing file path")?;
             Ok(Op::Import(read_backup(Path::new(path))?))
         }
+        // the one-time authorization that lets this desktop account change rules
+        // afterwards without another prompt
+        Some("--grant-rules") => {
+            let granted = !matches!(args.get(1).map(String::as_str), Some("false") | Some("0"));
+            Ok(Op::Single(ClientMessage::SetRuleGrant { req: 1, granted }))
+        }
         Some("--proposal-accept") => {
             let id = parse_id(args.get(1))?;
             Ok(Op::Single(ClientMessage::ResolveProposal {

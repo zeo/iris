@@ -25,6 +25,16 @@ export function Settings() {
   const [busy, setBusy] = createSignal("");
   const [update, setUpdate] = createSignal("");
   const [svcMsg, setSvcMsg] = createSignal("");
+  const [granted, setGranted] = createSignal(false);
+  const [grantMsg, setGrantMsg] = createSignal("");
+
+  const readGrant = async () => {
+    try {
+      setGranted(await invoke<boolean>("rule_grant"));
+    } catch {
+      /* engine offline */
+    }
+  };
 
   onMount(async () => {
     try {
@@ -32,7 +42,23 @@ export function Settings() {
     } catch {
       /* non-windows or unreadable */
     }
+    void readGrant();
   });
+
+  const toggleGrant = async () => {
+    const next = !granted();
+    setBusy("grant");
+    setGrantMsg("");
+    try {
+      await invoke("set_rule_grant", { granted: next });
+      // trust the engine's answer over the optimistic one: the grant names a
+      // specific account, and only the engine can say whether it matched
+      await readGrant();
+    } catch (error) {
+      setGrantMsg(String(error));
+    }
+    setBusy("");
+  };
 
   const toggleLogin = async () => {
     const next = !atLogin();
@@ -103,6 +129,30 @@ export function Settings() {
             aria-checked={showNotifications()}
             aria-label="Desktop notifications"
             onClick={() => setShowNotifications(!showNotifications())}
+          >
+            <span class="knob" />
+          </button>
+        </div>
+      </div>
+
+      <div class="set-group">
+        <div class="set-section">Rule changes</div>
+        <div class="set-row">
+          <div class="set-meta">
+            <span class="set-name">Change rules without asking</span>
+            <span class="set-desc">
+              Authorize this account once so blocking or allowing an app stops prompting for
+              elevation. Turning it back off asks once more, then restores the prompt every time.
+            </span>
+            <Show when={grantMsg()}><span class="set-desc">{grantMsg()}</span></Show>
+          </div>
+          <button
+            class="rocker"
+            role="switch"
+            aria-checked={granted()}
+            aria-label="Change rules without asking"
+            disabled={busy() === "grant"}
+            onClick={() => void toggleGrant()}
           >
             <span class="knob" />
           </button>

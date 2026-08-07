@@ -221,14 +221,39 @@ impl Store {
         };
         statement
             .query_map([], |row| {
+                let path: String = row.get(0)?;
                 Ok(KnownApp {
-                    app: AppId::from_path(&row.get::<_, String>(0)?),
+                    installed: std::path::Path::new(&path).is_file(),
+                    app: AppId::from_path(&path),
                     name: row.get(1)?,
                     last_seen: row.get::<_, i64>(2)? as u64,
                 })
             })
             .map(|rows| rows.flatten().collect())
             .unwrap_or_default()
+    }
+
+    /// drop every app in `paths` from the inventory, returning how many were
+    /// removed. one transaction, so clearing a long inactive list is a single
+    /// write rather than one round trip per app.
+    pub fn forget_apps(&mut self, paths: &[String]) -> usize {
+        let Ok(transaction) = self.conn.transaction() else {
+            return 0;
+        };
+        let mut removed = 0;
+        {
+            let Ok(mut statement) = transaction.prepare_cached("DELETE FROM apps WHERE path = ?1")
+            else {
+                return 0;
+            };
+            for path in paths {
+                removed += statement.execute([path]).unwrap_or(0);
+            }
+        }
+        if transaction.commit().is_err() {
+            return 0;
+        }
+        removed
     }
 
     pub fn forget_app(&self, path: &str) -> bool {
@@ -903,6 +928,32 @@ mod tests {
     }
 
     #[test]
+    fn sweeping_inactive_apps_clears_only_the_named_ones() {
+        let mut store = Store::open_in_memory().unwrap();
+        for path in ["c:/keep.exe", "c:/gone-one.exe", "c:/gone-two.exe"] {
+            store.ensure_app(path, None, 100);
+        }
+        assert_eq!(
+            store.forget_apps(&["c:/gone-one.exe".into(), "c:/gone-two.exe".into()]),
+            2
+        );
+        let left: Vec<String> = store
+            .list_apps()
+            .into_iter()
+            .map(|app| app.app.0)
+            .collect();
+        assert_eq!(left, vec!["c:/keep.exe".to_string()]);
+    }
+
+    #[test]
+    fn sweeping_an_app_that_is_already_gone_reports_no_removal() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.ensure_app("c:/keep.exe", None, 100);
+        assert_eq!(store.forget_apps(&["c:/never-existed.exe".into()]), 0);
+        assert_eq!(store.list_apps().len(), 1);
+    }
+
+    #[test]
     fn new_apps_are_pending_until_a_decision_is_saved() {
         let s = Store::open_in_memory().unwrap();
         assert!(s.ensure_app("/usr/bin/new-app", None, 100));
@@ -1014,12 +1065,15 @@ mod tests {
                 KnownApp {
                     app: AppId::from_path("c:/offline.exe"),
                     name: Some("Now online".to_string()),
-                    last_seen: 2_000
+                    last_seen: 2_000,
+                    // these paths are fixtures, so nothing is on disk for them
+                    installed: false
                 },
                 KnownApp {
                     app: AppId::from_path("c:/online.exe"),
                     name: Some("Online".to_string()),
-                    last_seen: 1_000
+                    last_seen: 1_000,
+                    installed: false
                 }
             ]
         );

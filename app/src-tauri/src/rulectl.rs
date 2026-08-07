@@ -1,9 +1,29 @@
-//! elevated firewall-rule mutations. the UI runs unprivileged, so changing a rule
-//! launches the bundled engine elevated (a UAC prompt on Windows, a polkit prompt
-//! on Linux) to relay the change over the admin-only endpoint. the service accepts
-//! mutations only there, so a rule change genuinely requires elevation and an
-//! unprivileged process cannot install an OS-enforced filter behind the user's
-//! back. arguments are passed as argv, so a path never needs shell quoting.
+//! firewall-rule mutations from the unprivileged UI.
+//!
+//! a rule change is privileged, so it needs authority the UI does not have. two
+//! routes lead there. the direct one is the telemetry channel, which the engine
+//! accepts once the user has elevated a single time to authorize this account
+//! (see the engine's `grant` module); that is the common case and costs no
+//! prompt. when no grant is on file the engine refuses, and the change is
+//! relayed through the bundled engine run elevated (a UAC prompt on Windows, a
+//! polkit prompt on Linux) over the admin-only endpoint. arguments are passed as
+//! argv, so a path never needs shell quoting.
+
+use crate::ipc::{try_unelevated, EngineCmd};
+use iris_core::{AppId, Direction, Rule, RuleAction};
+
+/// run `cmd` over the telemetry channel, falling back to one elevated run of
+/// the engine with `args` if the grant is not in force
+async fn mutate(
+    app: tauri::AppHandle,
+    cmd: EngineCmd,
+    args: Vec<String>,
+) -> Result<(), String> {
+    if try_unelevated(&app, cmd).await? {
+        return Ok(());
+    }
+    crate::elevate::run_engine(app, args).await
+}
 
 #[tauri::command]
 pub async fn rule_add(
@@ -13,24 +33,43 @@ pub async fn rule_add(
     action: String,
 ) -> Result<(), String> {
     // map to a fixed vocabulary so only known tokens reach the elevated run
-    let dir = if direction == "inbound" {
-        "inbound"
+    let (dir, direction) = if direction == "inbound" {
+        ("inbound", Direction::Inbound)
     } else {
-        "outbound"
+        ("outbound", Direction::Outbound)
     };
-    let act = if action == "allow" { "allow" } else { "block" };
+    let (act, action) = if action == "allow" {
+        ("allow", RuleAction::Allow)
+    } else {
+        ("block", RuleAction::Block)
+    };
+    let rule = Rule {
+        app: AppId::from_path(&path),
+        direction,
+        action,
+        label: None,
+    };
     let args = vec!["--rule-add".into(), path, dir.into(), act.into()];
-    crate::elevate::run_engine(app, args).await
+    mutate(app, EngineCmd::AddRule(rule), args).await
 }
 
 #[tauri::command]
 pub async fn rule_remove(app: tauri::AppHandle, id: i64) -> Result<(), String> {
-    crate::elevate::run_engine(app, vec!["--rule-remove".into(), id.to_string()]).await
+    let args = vec!["--rule-remove".into(), id.to_string()];
+    mutate(app, EngineCmd::RemoveRule(id), args).await
 }
 
 #[tauri::command]
 pub async fn rule_set_enabled(app: tauri::AppHandle, id: i64, enabled: bool) -> Result<(), String> {
     let args = vec!["--rule-enable".into(), id.to_string(), enabled.to_string()];
+    mutate(app, EngineCmd::SetRuleEnabled(id, enabled), args).await
+}
+
+/// the one elevated step that buys the user out of every later prompt, and the
+/// same call in reverse to hand the authority back
+#[tauri::command]
+pub async fn set_rule_grant(app: tauri::AppHandle, granted: bool) -> Result<(), String> {
+    let args = vec!["--grant-rules".into(), granted.to_string()];
     crate::elevate::run_engine(app, args).await
 }
 
@@ -38,7 +77,8 @@ pub async fn rule_set_enabled(app: tauri::AppHandle, id: i64, enabled: bool) -> 
 /// admin endpoint, exactly like adding the rule by hand
 #[tauri::command]
 pub async fn proposal_accept(app: tauri::AppHandle, id: i64) -> Result<(), String> {
-    crate::elevate::run_engine(app, vec!["--proposal-accept".into(), id.to_string()]).await
+    let args = vec!["--proposal-accept".into(), id.to_string()];
+    mutate(app, EngineCmd::ResolveProposal(id, true), args).await
 }
 
 /// pick a rules backup file and restore it in one elevated run (a single prompt

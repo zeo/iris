@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
-import { forgetKnownApp, knownApps, refreshKnownApps } from "../lib/apps";
+import { forgetKnownApp, forgetKnownApps, knownApps, refreshKnownApps } from "../lib/apps";
 import { engine, type AppSample } from "../lib/engine";
 import { bytes, rate } from "../lib/format";
 import { acceptProposal, pendingProposals, refreshProposals, rejectProposal } from "../lib/proposals";
@@ -16,11 +16,13 @@ type Decision = "open" | "allow" | "block" | "paused";
 type SortKey = "app" | "down" | "up" | "session";
 type SortDirection = "asc" | "desc";
 
-interface AppRow {
+export interface AppRow {
   app: string;
   name?: string;
   sample?: AppSample;
   rules: StoredRule[];
+  lastSeen?: number;
+  installed?: boolean;
 }
 
 function decisionFor(row: AppRow, direction: Direction): Decision {
@@ -28,6 +30,30 @@ function decisionFor(row: AppRow, direction: Direction): Decision {
   if (directional.some((stored) => stored.enabled && stored.rule.action === "block")) return "block";
   if (directional.some((stored) => stored.enabled && stored.rule.action === "allow")) return "allow";
   return directional.length ? "paused" : "open";
+}
+
+// a rule the engine accepted but could not install: no backing filter exists, so
+// it decides nothing. the usual cause is an executable that has been uninstalled
+// or moved, which the engine retries until the image comes back. showing this as
+// a confident block would be a lie about what the firewall is doing.
+export function isDormantRule(row: AppRow, direction: Direction): boolean {
+  return row.rules.some(
+    (stored) =>
+      stored.rule.direction === direction && stored.enabled && stored.filter_ids.length === 0,
+  );
+}
+
+const DAY_MS = 86_400_000;
+const INACTIVE_AFTER_MS = 30 * DAY_MS;
+
+// GlassWire sorts apps with no recent network activity into their own group at
+// the bottom, where they can be cleared out individually or all at once. iris
+// counts a vanished executable as inactive too: those are the entries that
+// accumulate rules which can never be enforced.
+export function isInactive(row: AppRow, now: number): boolean {
+  if (row.sample?.online) return false;
+  if (row.installed === false) return true;
+  return row.lastSeen !== undefined && now - row.lastSeen > INACTIVE_AFTER_MS;
 }
 
 function hostsFor(sample?: AppSample): string {
@@ -49,6 +75,13 @@ export function Protect() {
   const [changing, setChanging] = createSignal("");
   const [sort, setSort] = createSignal<SortKey>("app");
   const [sortDirection, setSortDirection] = createSignal<SortDirection>("asc");
+  const [showInactive, setShowInactive] = createSignal(false);
+  // re-read the clock on each engine tick so the inactive cut-off stays current
+  // through a long-running session without a timer of its own
+  const now = () => {
+    engine.apps();
+    return Date.now();
+  };
 
   createEffect(() => {
     if (!engine.online()) return;
@@ -64,6 +97,8 @@ export function Protect() {
         app: known.app,
         name: known.name ?? undefined,
         rules: [],
+        lastSeen: known.last_seen,
+        installed: known.installed,
       });
     }
     for (const sample of engine.apps()) {
@@ -75,6 +110,8 @@ export function Protect() {
           name: sample.name ?? row?.name,
           sample,
           rules: row?.rules ?? [],
+          lastSeen: row?.lastSeen,
+          installed: row?.installed,
         });
       }
     }
@@ -84,6 +121,7 @@ export function Protect() {
       row.rules.push(stored);
       byPath.set(key, row);
     }
+
 
     const needle = query().trim().toLowerCase();
     const mode = filter();
@@ -115,6 +153,27 @@ export function Protect() {
         return order || name(a).localeCompare(name(b));
       });
   });
+
+  // active rows first, then the inactive group, GlassWire-style. both keep the
+  // chosen sort within the group.
+  const liveRows = createMemo(() => appRows().filter((row) => !isInactive(row, now())));
+  const inactiveRows = createMemo(() => appRows().filter((row) => isInactive(row, now())));
+
+  const sweepInactive = async () => {
+    const stale = inactiveRows();
+    if (stale.length === 0 || ioBusy()) return;
+    setIoBusy(true);
+    setToolError("");
+    setToolNote("");
+    try {
+      const removed = await forgetKnownApps(stale.map((row) => row.app));
+      setToolNote(`cleared ${removed} inactive app${removed === 1 ? "" : "s"}`);
+    } catch (error) {
+      setToolError(String(error));
+    } finally {
+      setIoBusy(false);
+    }
+  };
 
   const chooseSort = (next: SortKey) => {
     if (sort() === next) {
@@ -351,50 +410,135 @@ export function Protect() {
               </tr>
             </thead>
             <tbody>
-              <Key each={appRows()} by={(row) => pathKey(row.app)}>
+              <Key each={liveRows()} by={(row) => pathKey(row.app)}>
                 {(row) => (
-                  <tr classList={{ dormant: !row().sample?.online, blocked: decisionFor(row(), "inbound") === "block" || decisionFor(row(), "outbound") === "block" }}>
-                    <td>
-                      <div class="protect-app-cell">
-                        <span class="app-live" classList={{ on: !!row().sample?.online }} />
-                        <AppIcon path={row().app} />
-                        <span class="protect-app-meta">
-                          <b>{row().sample?.name ?? row().name ?? fileName(row().app)}</b>
-                          <small title={row().app}>{row().app}</small>
-                        </span>
-                        <Show when={!row().sample?.online}>
-                          <button
-                            class="protect-forget"
-                            aria-label={`remove ${fileName(row().app)} from Protect`}
-                            title="Remove from Protect"
-                            onClick={() => void forgetKnownApp(row().app)}
-                          >
-                            <Icon name="x" size={10} />
-                          </button>
-                        </Show>
-                      </div>
-                    </td>
-                    <td>
-                      <InternetToggle
-                        row={row()}
-                        changing={changing()}
-                        toggle={toggleInternet}
-                      />
-                    </td>
-                    <td><DecisionSelect row={row()} direction="inbound" changing={changing()} choose={chooseDecision} /></td>
-                    <td><DecisionSelect row={row()} direction="outbound" changing={changing()} choose={chooseDecision} /></td>
-                    <td><span class="remote-field" title={hostsFor(row().sample)}>{hostsFor(row().sample)}</span></td>
-                    <td class="num">{rate(row().sample?.rate_recv ?? 0)}</td>
-                    <td class="num">{rate(row().sample?.rate_sent ?? 0)}</td>
-                    <td class="num">{bytes((row().sample?.total.recv ?? 0) + (row().sample?.total.sent ?? 0))}</td>
-                  </tr>
+                  <AppRowView
+                    row={row()}
+                    changing={changing()}
+                    choose={chooseDecision}
+                    toggle={toggleInternet}
+                  />
                 )}
               </Key>
+
+              <Show when={inactiveRows().length > 0}>
+                <tr class="protect-group">
+                  <td colSpan={8}>
+                    <button
+                      class="protect-group-toggle"
+                      aria-expanded={showInactive()}
+                      onClick={() => setShowInactive((open) => !open)}
+                    >
+                      <Icon name="chevron" size={11} class={showInactive() ? "open" : undefined} />
+                      Inactive apps <b>{inactiveRows().length}</b>
+                      <small>no traffic in 30 days, or the program is gone</small>
+                    </button>
+                    <span class="grow" />
+                    <button
+                      class="protect-group-clear"
+                      disabled={ioBusy()}
+                      title="Remove every inactive app"
+                      onClick={() => void sweepInactive()}
+                    >
+                      clear all <Icon name="x" size={10} />
+                    </button>
+                  </td>
+                </tr>
+                <Show when={showInactive()}>
+                  <Key each={inactiveRows()} by={(row) => pathKey(row.app)}>
+                    {(row) => (
+                      <AppRowView
+                        row={row()}
+                        changing={changing()}
+                        choose={chooseDecision}
+                        toggle={toggleInternet}
+                      />
+                    )}
+                  </Key>
+                </Show>
+              </Show>
             </tbody>
           </table>
         </div>
       </Show>
     </section>
+  );
+}
+
+function AppRowView(props: {
+  row: AppRow;
+  changing: string;
+  choose: (row: AppRow, direction: Direction, decision: Decision) => Promise<void>;
+  toggle: (row: AppRow) => Promise<void>;
+}) {
+  const missing = () => props.row.installed === false;
+  return (
+    <tr
+      classList={{
+        dormant: !props.row.sample?.online,
+        missing: missing(),
+        blocked:
+          decisionFor(props.row, "inbound") === "block" ||
+          decisionFor(props.row, "outbound") === "block",
+      }}
+    >
+      <td>
+        <div class="protect-app-cell">
+          <span class="app-live" classList={{ on: !!props.row.sample?.online }} />
+          <AppIcon path={props.row.app} />
+          <span class="protect-app-meta">
+            <b>
+              {props.row.sample?.name ?? props.row.name ?? fileName(props.row.app)}
+              <Show when={missing()}>
+                <span class="protect-gone" title="This program is no longer on disk, so no rule for it can be enforced">
+                  uninstalled
+                </span>
+              </Show>
+            </b>
+            <small title={props.row.app}>{props.row.app}</small>
+          </span>
+          <Show when={!props.row.sample?.online}>
+            <button
+              class="protect-forget"
+              aria-label={`remove ${fileName(props.row.app)} from Protect`}
+              title="Remove from Protect"
+              onClick={() => void forgetKnownApp(props.row.app)}
+            >
+              <Icon name="x" size={10} />
+            </button>
+          </Show>
+        </div>
+      </td>
+      <td>
+        <InternetToggle row={props.row} changing={props.changing} toggle={props.toggle} />
+      </td>
+      <td>
+        <DecisionSelect
+          row={props.row}
+          direction="inbound"
+          changing={props.changing}
+          choose={props.choose}
+        />
+      </td>
+      <td>
+        <DecisionSelect
+          row={props.row}
+          direction="outbound"
+          changing={props.changing}
+          choose={props.choose}
+        />
+      </td>
+      <td>
+        <span class="remote-field" title={hostsFor(props.row.sample)}>
+          {hostsFor(props.row.sample)}
+        </span>
+      </td>
+      <td class="num">{rate(props.row.sample?.rate_recv ?? 0)}</td>
+      <td class="num">{rate(props.row.sample?.rate_sent ?? 0)}</td>
+      <td class="num">
+        {bytes((props.row.sample?.total.recv ?? 0) + (props.row.sample?.total.sent ?? 0))}
+      </td>
+    </tr>
   );
 }
 
@@ -446,16 +590,34 @@ function DecisionSelect(props: {
 }) {
   const value = () => decisionFor(props.row, props.direction);
   const busy = () => props.changing === `${props.row.app}:${props.direction}`;
+  // a rule with no backing filter is not deciding anything yet; say so instead
+  // of rendering the same confident state as an enforced one
+  const dormant = () => isDormantRule(props.row, props.direction);
+  const label = () => {
+    const base = `${props.direction} rule for ${fileName(props.row.app)}`;
+    return dormant() ? `${base}, waiting for the program to return` : base;
+  };
   return (
     <label
       class="decision-select"
-      classList={{ busy: busy(), block: value() === "block", allow: value() === "allow", paused: value() === "paused" }}
+      classList={{
+        busy: busy(),
+        block: value() === "block",
+        allow: value() === "allow",
+        paused: value() === "paused",
+        dormant: dormant(),
+      }}
+      title={
+        dormant()
+          ? "Saved, but not enforcing: the program is not on disk. Iris applies it the moment it returns."
+          : undefined
+      }
     >
       <span class="decision-light" />
       <select
         value={value()}
         disabled={busy()}
-        aria-label={`${props.direction} rule for ${fileName(props.row.app)}`}
+        aria-label={label()}
         onChange={(event) => props.choose(props.row, props.direction, event.currentTarget.value as Decision)}
       >
         <option value="open">open</option>
@@ -463,6 +625,9 @@ function DecisionSelect(props: {
         <option value="allow">allow</option>
         <option value="block">block</option>
       </select>
+      <Show when={dormant()}>
+        <span class="decision-dormant" aria-hidden="true">!</span>
+      </Show>
       <Icon name="chevron" size={11} />
     </label>
   );

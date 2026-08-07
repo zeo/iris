@@ -32,7 +32,7 @@ fn target_name(target: &EnrichTarget) -> String {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(has_platform)]
 fn publish_pending(
     pending: Vec<crate::platform::PendingConnection>,
     store: &Arc<Mutex<Store>>,
@@ -79,7 +79,7 @@ fn publish_pending(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(has_platform)]
 fn start_pending_publisher(
     pending: std::sync::mpsc::Receiver<crate::platform::PendingConnection>,
     store: Arc<Mutex<Store>>,
@@ -175,7 +175,7 @@ pub fn spawn(
     store: Arc<Mutex<Store>>,
     enrich: Arc<EnrichmentRegistry>,
 ) {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(has_platform))]
     let _ = &rules;
     let agg = Arc::new(Mutex::new(Aggregator::new(now_ms())));
 
@@ -196,7 +196,7 @@ pub fn spawn(
     #[cfg(not(has_platform))]
     let mut tracker = Tracker::new(agg);
 
-    #[cfg(target_os = "linux")]
+    #[cfg(has_platform)]
     if let Some(pending) = rules
         .lock()
         .unwrap_or_else(|error| error.into_inner())

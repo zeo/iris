@@ -2040,6 +2040,82 @@ html {
   align-items: center;
   gap: var(--s2);
 }
+/* the inactive-apps divider: a collapsed group at the bottom of the table */
+.protect-table tr.protect-group td {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--line2);
+  background: var(--recess);
+}
+.protect-group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: var(--fz-cap);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.protect-group-toggle:hover {
+  color: var(--text-2);
+}
+.protect-group-toggle b {
+  font-family: var(--mono);
+  color: var(--text-2);
+}
+.protect-group-toggle small {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--faint);
+}
+.protect-group-toggle svg {
+  transition: transform var(--t-fast);
+}
+.protect-group-toggle svg.open {
+  transform: rotate(180deg);
+}
+.protect-group-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--line2);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fz-cap);
+  cursor: pointer;
+}
+.protect-group-clear:hover:not(:disabled) {
+  border-color: var(--danger-line);
+  color: var(--danger-ink);
+}
+.protect-group-clear:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* an app whose executable is gone: no rule for it can be enforced */
+.protect-gone {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--recess);
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: var(--fz-cap);
+  font-weight: 400;
+  text-transform: uppercase;
+}
+.protect-table tr.missing .protect-app-meta b {
+  color: var(--muted);
+}
 .protect-forget {
   width: 20px;
   height: 20px;
@@ -2105,7 +2181,9 @@ html {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  width: 82px;
+  /* the native dropdown takes its popup width from the select, so a cramped
+     control clips its own option text; size for the longest label plus room */
+  width: 108px;
   height: 26px;
   padding: 0 7px;
   border: 1px solid var(--line2);
@@ -2119,7 +2197,8 @@ html {
   border-color: var(--steel-dim);
 }
 .decision-select select {
-  width: 48px;
+  flex: 1;
+  min-width: 0;
   padding: 0;
   border: 0;
   outline: 0;
@@ -2138,6 +2217,22 @@ html {
 .decision-select option {
   color: var(--text);
   background: var(--surf2);
+  padding: 2px 8px;
+}
+/* saved but not enforcing: the executable is gone, so no filter backs it */
+.decision-select.dormant {
+  border-style: dashed;
+  opacity: 0.75;
+}
+.decision-select.dormant .decision-light {
+  background: var(--warn);
+  box-shadow: none;
+}
+.decision-dormant {
+  font-family: var(--mono);
+  font-size: var(--fz-cap);
+  color: var(--warn);
+  flex: none;
 }
 .decision-select svg {
   color: var(--faint);

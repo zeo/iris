@@ -14,6 +14,8 @@ mod egress;
 #[cfg(windows)]
 mod etw;
 #[cfg(windows)]
+mod netevent;
+#[cfg(windows)]
 mod proc;
 #[cfg(windows)]
 mod spawn;
@@ -36,5 +38,7 @@ pub use etw::Monitor;
 pub use spawn::{random_token, spawn_restricted, RestrictedChild};
 #[cfg(windows)]
 pub use svc::ServiceMap;
+#[cfg(windows)]
+pub use netevent::DeniedConnection as PendingConnection;
 #[cfg(windows)]
 pub use wfp::Wfp;

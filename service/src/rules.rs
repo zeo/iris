@@ -182,18 +182,70 @@ impl RuleStore {
             .is_some_and(crate::platform::Wfp::is_healthy)
     }
 
-    #[cfg(target_os = "linux")]
+    /// the stream of connections held or denied pending a user decision. on
+    /// Linux the nfqueue verdict threads produce it; on Windows it is the
+    /// classify-drop subscription behind ask mode. either way the service turns
+    /// each one into a prompt.
+    #[cfg(has_platform)]
     pub fn take_pending_receiver(
         &mut self,
     ) -> Option<std::sync::mpsc::Receiver<crate::platform::PendingConnection>> {
-        self.wfp
-            .as_mut()
-            .and_then(crate::platform::Wfp::take_pending_receiver)
+        #[cfg(target_os = "linux")]
+        {
+            self.wfp
+                .as_mut()
+                .and_then(crate::platform::Wfp::take_pending_receiver)
+        }
+        #[cfg(windows)]
+        {
+            self.wfp
+                .as_mut()
+                .and_then(crate::platform::Wfp::take_denied_receiver)
+        }
     }
 
+    /// whether an application with no decision yet is denied until the user
+    /// answers, rather than allowed and reported afterwards
+    #[cfg(has_platform)]
+    pub fn ask_mode(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            // the nfqueue hook always holds undecided flows, so Linux is only
+            // ever in ask mode
+            self.wfp.is_some()
+        }
+        #[cfg(windows)]
+        {
+            self.wfp
+                .as_ref()
+                .is_some_and(crate::platform::Wfp::ask_mode_active)
+        }
+    }
+
+    /// turn ask-before-connect on or off. Linux holds undecided connections
+    /// structurally, so only Windows has anything to switch.
+    #[cfg(windows)]
+    pub fn set_ask_mode(&mut self, enabled: bool) -> anyhow::Result<()> {
+        match self.wfp.as_mut() {
+            Some(wfp) => Ok(wfp.set_ask_mode(enabled)?),
+            None => anyhow::bail!("firewall enforcement is unavailable"),
+        }
+    }
+
+    /// carry forward the applications the user already accepted, so enabling
+    /// ask-before-connect does not retroactively deny a machine's worth of
+    /// software. Linux keeps them in the verdict map; Windows seeds permits
+    /// underneath the user's own rules.
     #[cfg(target_os = "linux")]
     pub fn trust_apps(&self, paths: &[String]) {
         if let Some(wfp) = &self.wfp {
+            wfp.trust_apps(paths);
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn trust_apps(&mut self, paths: &[String]) {
+        if let Some(wfp) = self.wfp.as_mut() {
             wfp.trust_apps(paths);
         }
     }

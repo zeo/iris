@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+## [0.1.11] - 2026-08-12
+
+### Fixed
+
+- Pending network prompts return as soon as the desktop host reconnects to the engine.
+- Windows network-event subscriptions close before their WFP engine handle.
+
 ## [0.1.10] - 2026-07-26
 
 ### Fixed

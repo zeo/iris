@@ -21,8 +21,6 @@ pub struct NotifyState {
     /// alert ids already toasted this session, so a replayed or restored alert
     /// never toasts twice
     toasted: Mutex<HashSet<i64>>,
-    /// the while-you-were-away summary fires at most once per app run
-    backlog_announced: AtomicBool,
 }
 
 impl Default for NotifyState {
@@ -30,7 +28,6 @@ impl Default for NotifyState {
         Self {
             enabled: AtomicBool::new(true),
             toasted: Mutex::new(HashSet::new()),
-            backlog_announced: AtomicBool::new(false),
         }
     }
 }
@@ -94,30 +91,32 @@ pub fn alert_toast(app: &tauri::AppHandle, alert: &Alert) {
     show(app, &title, &body);
 }
 
-/// summarize unacknowledged non-decision alerts found at the first engine
-/// contact of this run: everything that fired while Iris was not running.
-/// one toast, once per run, so a backlog never floods the tray on login.
+/// summarize unacknowledged non-decision alerts missed during startup or an
+/// engine reconnect. ids already surfaced live stay suppressed.
 pub fn announce_backlog(app: &tauri::AppHandle, alerts: &[Alert]) {
-    let count = alerts
-        .iter()
-        .filter(|alert| !alert.acknowledged && !needs_decision(alert))
-        .count();
     let Some(state) = app.try_state::<NotifyState>() else {
         return;
     };
-    if state.backlog_announced.swap(true, Ordering::AcqRel) || count == 0 || !enabled(app) {
+    if !enabled(app) {
         return;
     }
-    // the backlog is covered by the summary; suppress individual re-toasts
-    if let Ok(mut toasted) = state.toasted.lock() {
-        for alert in alerts {
-            toasted.insert(alert.id);
-        }
+    let mut toasted = state
+        .toasted
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let count = alerts
+        .iter()
+        .filter(|alert| !alert.acknowledged && !needs_decision(alert))
+        .filter(|alert| toasted.insert(alert.id))
+        .count();
+    drop(toasted);
+    if count == 0 {
+        return;
     }
     let body = if count == 1 {
-        "1 alert while Iris was closed".to_string()
+        "1 network alert needs attention".to_string()
     } else {
-        format!("{count} alerts while Iris was closed")
+        format!("{count} network alerts need attention")
     };
     show(app, "Iris", &body);
 }

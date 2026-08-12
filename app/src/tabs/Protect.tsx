@@ -46,7 +46,7 @@ export function isDormantRule(row: AppRow, direction: Direction): boolean {
 const DAY_MS = 86_400_000;
 const INACTIVE_AFTER_MS = 30 * DAY_MS;
 
-// GlassWire sorts apps with no recent network activity into their own group at
+// sort apps with no recent network activity into their own group at
 // the bottom, where they can be cleared out individually or all at once. iris
 // counts a vanished executable as inactive too: those are the entries that
 // accumulate rules which can never be enforced.
@@ -154,7 +154,7 @@ export function Protect() {
       });
   });
 
-  // active rows first, then the inactive group, GlassWire-style. both keep the
+  // active rows first, then the inactive group. both keep the
   // chosen sort within the group.
   const liveRows = createMemo(() => appRows().filter((row) => !isInactive(row, now())));
   const inactiveRows = createMemo(() => appRows().filter((row) => isInactive(row, now())));

@@ -478,6 +478,8 @@ fn non_loopback_condition() -> FWPM_FILTER_CONDITION0 {
 
 impl Drop for Wfp {
     fn drop(&mut self) {
+        // unsubscribe while the engine handle is still valid
+        self.events.take();
         unsafe {
             let _ = FwpmEngineClose0(self.engine);
         }

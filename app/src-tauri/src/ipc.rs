@@ -426,11 +426,11 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
             if protocol != PROTOCOL_VERSION {
                 anyhow::bail!("protocol mismatch: engine {protocol}, ui {PROTOCOL_VERSION}");
             }
+            reconcile_alerts(app, &mut recv, &mut send).await?;
             set_status(app, true, Some(engine_version));
         }
         other => anyhow::bail!("expected Welcome, got {other:?}"),
     }
-    transport::write_frame(&mut send, &ClientMessage::Subscribe).await?;
 
     let mut next_id: u64 = 1;
     let mut last_tick_emit = 0;
@@ -540,6 +540,72 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
         }
     }
     Ok(())
+}
+
+async fn reconcile_alerts(
+    app: &AppHandle,
+    recv: &mut transport::RecvHalf,
+    send: &mut transport::SendHalf,
+) -> anyhow::Result<()> {
+    const RESTORE_REQ: u64 = 0;
+    transport::write_frame(send, &ClientMessage::Subscribe).await?;
+    transport::write_frame(
+        send,
+        &ClientMessage::ListAlerts {
+            req: RESTORE_REQ,
+            unacked_only: true,
+        },
+    )
+    .await?;
+
+    loop {
+        let frame = tokio::time::timeout(
+            Duration::from_secs(10),
+            transport::read_frame::<_, ServerMessage>(recv),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("engine timed out during alert restore"))??;
+        match frame {
+            Some(ServerMessage::Reply {
+                req: RESTORE_REQ,
+                result: Reply::Alerts(alerts),
+            }) => {
+                crate::notify::announce_backlog(app, &alerts);
+                for alert in alerts
+                    .iter()
+                    .filter(|alert| crate::notify::needs_decision(alert))
+                {
+                    crate::prompt::show(app, alert);
+                }
+                return Ok(());
+            }
+            Some(ServerMessage::Alert(alert)) => {
+                crate::prompt::show(app, &alert);
+                crate::notify::alert_toast(app, &alert);
+                let _ = app.emit("engine-alert", alert);
+            }
+            Some(ServerMessage::Enrichment {
+                target,
+                annotations,
+            }) => {
+                let _ = app.emit(
+                    "engine-enrichment",
+                    EnrichmentEvent {
+                        target,
+                        annotations,
+                    },
+                );
+            }
+            Some(ServerMessage::Proposal(proposal)) => {
+                let _ = app.emit("engine-proposal", proposal);
+            }
+            Some(ServerMessage::Tick(_) | ServerMessage::Welcome { .. }) => {}
+            Some(ServerMessage::Reply { .. }) => {
+                anyhow::bail!("unexpected reply during alert restore")
+            }
+            None => anyhow::bail!("engine disconnected during alert restore"),
+        }
+    }
 }
 
 fn set_status(app: &AppHandle, online: bool, version: Option<String>) {

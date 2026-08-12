@@ -75,7 +75,7 @@ fn show_window(app: &tauri::AppHandle) {
     .shadow(false)
     .always_on_top(true)
     .skip_taskbar(true)
-    .focused(true)
+    .focused(false)
     .visible(false)
     .build() else {
         return;
@@ -98,17 +98,41 @@ pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<
     }
     app.state::<PromptCount>().0.store(count, Ordering::Relaxed);
     let size = host_size(count, current_scale(&app));
-    window
-        .set_size(size)
-        .map_err(|error| error.to_string())?;
+    window.set_size(size).map_err(|error| error.to_string())?;
     position_window(&app, &window, size);
-    window.show().map_err(|error| error.to_string())?;
+    show_without_focus(&window)?;
     // re-anchor once the window is mapped: the pre-show placement can be dropped
     // by the compositor before the surface exists (the position reads back as
     // 0,0 until it settles), which strands the host away from the corner
     position_window(&app, &window, size);
-    window.set_focus().map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn show_without_focus(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    };
+
+    let hwnd =
+        windows::Win32::Foundation::HWND(window.hwnd().map_err(|error| error.to_string())?.0);
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        )
+        .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(not(windows))]
+fn show_without_focus(window: &tauri::WebviewWindow) -> Result<(), String> {
+    window.show().map_err(|error| error.to_string())
 }
 
 /// re-size the open prompt window to a freshly reported device-pixel-ratio

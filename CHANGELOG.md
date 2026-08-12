@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+## [0.1.12] - 2026-08-12
+
+### Fixed
+
+- Network prompts appear without taking focus from the active application.
+
 ## [0.1.11] - 2026-08-12
 
 ### Fixed

@@ -85,6 +85,7 @@ UPDATE apps SET decision = 'allow';
 
 const SCHEMA_V7_ALERT_PROMPT_SUPPRESSION: &str = "
 ALTER TABLE alerts ADD COLUMN prompt_suppressed INTEGER NOT NULL DEFAULT 0;
+UPDATE alerts SET prompt_suppressed = 1 WHERE acknowledged = 0;
 ";
 
 /// bump when the schema changes; drives the migration ladder in [`Store::migrate`]
@@ -1297,6 +1298,41 @@ mod tests {
             .iter()
             .any(|alert| alert.id == prompt.id));
         assert_eq!(s.list_alerts(false).len(), 2);
+    }
+
+    #[test]
+    fn schema_upgrade_defers_legacy_pending_alerts() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(SCHEMA_V2_ADAPTER_USAGE).unwrap();
+        conn.execute_batch(SCHEMA_V3_PLUGIN_GRANTS).unwrap();
+        conn.execute_batch(SCHEMA_V4_RULE_PROPOSALS).unwrap();
+        conn.execute_batch(SCHEMA_V5_APP_LAST_SEEN).unwrap();
+        conn.execute_batch(SCHEMA_V6_APP_DECISION).unwrap();
+        conn.execute(
+            "INSERT INTO alerts(at_ms, kind, acknowledged) VALUES (?1, ?2, 0)",
+            params![
+                500_i64,
+                serde_json::to_string(&AlertKind::NewApp {
+                    app: AppId("c:/legacy.exe".into()),
+                    remote: Some(iris_core::Endpoint {
+                        addr: "203.0.113.8".parse().unwrap(),
+                        port: 443,
+                        protocol: iris_core::Protocol::Tcp,
+                    }),
+                    direction: Some(iris_core::Direction::Outbound),
+                })
+                .unwrap()
+            ],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 6).unwrap();
+
+        let store = Store { conn };
+        store.migrate().unwrap();
+
+        assert!(store.list_prompt_alerts().is_empty());
+        assert_eq!(store.list_alerts(true).len(), 1);
     }
 
     #[test]

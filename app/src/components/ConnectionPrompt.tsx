@@ -33,7 +33,7 @@ export function ConnectionPrompt() {
   const refresh = async () => {
     const sequence = ++refreshSequence;
     try {
-      const next = await invoke<Alert[]>("list_alerts", { unackedOnly: true });
+      const next = await invoke<Alert[]>("list_prompt_alerts");
       if (sequence === refreshSequence) setAlerts(next);
     } catch (reason) {
       if (sequence === refreshSequence) setError({ id: 0, message: String(reason) });

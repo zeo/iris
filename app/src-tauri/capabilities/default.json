@@ -29,6 +29,7 @@
     "allow-list-apps",
     "allow-forget-app",
     "allow-list-alerts",
+    "allow-list-prompt-alerts",
     "allow-resize-connection-prompts",
     "allow-report-display-scale",
     "allow-ack-alert",

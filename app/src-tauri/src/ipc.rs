@@ -62,6 +62,8 @@ pub enum EngineCmd {
     GetUsage(UsageQuery),
     GetAdapterUsage(u64, u64),
     ListAlerts(bool),
+    ListPromptAlerts,
+    SuppressAlertPrompts,
     AckAlert(i64),
     DecideAlert(i64, RuleAction),
     KillConnection(u16, String, u16),
@@ -196,6 +198,23 @@ pub async fn list_alerts(app: AppHandle, unacked_only: bool) -> Result<Vec<Alert
     match dispatch(&app, EngineCmd::ListAlerts(unacked_only)).await? {
         Reply::Alerts(a) => Ok(a),
         Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn list_prompt_alerts(app: AppHandle) -> Result<Vec<Alert>, String> {
+    match dispatch(&app, EngineCmd::ListPromptAlerts).await? {
+        Reply::Alerts(alerts) => Ok(alerts),
+        Reply::Error(error) => Err(error),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+pub(crate) async fn suppress_alert_prompts(app: AppHandle) -> Result<(), String> {
+    match dispatch(&app, EngineCmd::SuppressAlertPrompts).await? {
+        Reply::Ok => Ok(()),
+        Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
@@ -499,6 +518,8 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     EngineCmd::GetAdapterUsage(from_ms, to_ms) =>
                         ClientMessage::GetAdapterUsage { req, from_ms, to_ms },
                     EngineCmd::ListAlerts(unacked_only) => ClientMessage::ListAlerts { req, unacked_only },
+                    EngineCmd::ListPromptAlerts => ClientMessage::ListPromptAlerts { req },
+                    EngineCmd::SuppressAlertPrompts => ClientMessage::SuppressAlertPrompts { req },
                     EngineCmd::AckAlert(id) => ClientMessage::AckAlert { req, id },
                     EngineCmd::DecideAlert(id, action) =>
                         ClientMessage::DecideAlert { req, id, action },
@@ -533,16 +554,21 @@ async fn reconcile_alerts(
     recv: &mut transport::RecvHalf,
     send: &mut transport::SendHalf,
 ) -> anyhow::Result<()> {
-    const RESTORE_REQ: u64 = 0;
+    const BACKLOG_REQ: u64 = 0;
+    const PROMPT_REQ: u64 = 1;
     transport::write_frame(send, &ClientMessage::Subscribe).await?;
     transport::write_frame(
         send,
         &ClientMessage::ListAlerts {
-            req: RESTORE_REQ,
+            req: BACKLOG_REQ,
             unacked_only: true,
         },
     )
     .await?;
+    transport::write_frame(send, &ClientMessage::ListPromptAlerts { req: PROMPT_REQ }).await?;
+
+    let mut backlog: Option<Vec<Alert>> = None;
+    let mut prompts: Option<Vec<Alert>> = None;
 
     loop {
         let frame = tokio::time::timeout(
@@ -553,17 +579,24 @@ async fn reconcile_alerts(
         .map_err(|_| anyhow::anyhow!("engine timed out during alert restore"))??;
         match frame {
             Some(ServerMessage::Reply {
-                req: RESTORE_REQ,
+                req: BACKLOG_REQ,
                 result: Reply::Alerts(alerts),
             }) => {
-                crate::notify::announce_backlog(app, &alerts);
-                if let Some(alert) = alerts
-                    .iter()
-                    .find(|alert| crate::notify::needs_decision(alert))
-                {
-                    crate::prompt::show(app, alert);
+                backlog = Some(alerts);
+                if let (Some(backlog), Some(prompts)) = (&backlog, &prompts) {
+                    finish_alert_reconcile(app, backlog, prompts);
+                    return Ok(());
                 }
-                return Ok(());
+            }
+            Some(ServerMessage::Reply {
+                req: PROMPT_REQ,
+                result: Reply::Alerts(alerts),
+            }) => {
+                prompts = Some(alerts);
+                if let (Some(backlog), Some(prompts)) = (&backlog, &prompts) {
+                    finish_alert_reconcile(app, backlog, prompts);
+                    return Ok(());
+                }
             }
             Some(ServerMessage::Alert(alert)) => {
                 crate::prompt::show(app, &alert);
@@ -591,6 +624,16 @@ async fn reconcile_alerts(
             }
             None => anyhow::bail!("engine disconnected during alert restore"),
         }
+    }
+}
+
+fn finish_alert_reconcile(app: &AppHandle, backlog: &[Alert], prompts: &[Alert]) {
+    crate::notify::announce_backlog(app, backlog);
+    if let Some(alert) = prompts
+        .iter()
+        .find(|alert| crate::notify::needs_decision(alert))
+    {
+        crate::prompt::show(app, alert);
     }
 }
 

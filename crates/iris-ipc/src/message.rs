@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 /// v6 added durable app inventory and compact host summaries.
 /// v7 added bulk app forget, install state on the inventory, and the delegated
 /// rule-management grant that replaces a UAC prompt per rule change.
-pub const PROTOCOL_VERSION: u32 = 7;
+/// v8 separates promptable alerts from decisions deferred during fullscreen.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// what the UI shows for one installed plugin: its declared identity and
 /// capabilities, plus whether the user has consented and enabled it
@@ -92,6 +93,16 @@ pub enum ClientMessage {
     ListAlerts {
         req: u64,
         unacked_only: bool,
+    },
+    /// pending connection decisions that have not been deferred from the
+    /// desktop prompt surface
+    ListPromptAlerts {
+        req: u64,
+    },
+    /// keep pending connection decisions in the Alerts view without replaying
+    /// them as desktop prompt cards
+    SuppressAlertPrompts {
+        req: u64,
     },
     AckAlert {
         req: u64,

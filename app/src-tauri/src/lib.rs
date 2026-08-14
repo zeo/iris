@@ -66,6 +66,7 @@ pub fn run() {
             ipc::rule_grant,
             rulectl::set_rule_grant,
             ipc::list_alerts,
+            ipc::list_prompt_alerts,
             prompt::resize_connection_prompts,
             notify::set_notifications_enabled,
             report_display_scale,

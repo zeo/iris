@@ -18,6 +18,10 @@ pub struct PromptState {
     count: AtomicUsize,
     #[cfg(windows)]
     watcher_active: AtomicBool,
+    #[cfg(windows)]
+    suppression_in_flight: AtomicBool,
+    #[cfg(windows)]
+    suppression_generation: std::sync::atomic::AtomicU64,
 }
 
 fn stack_height(count: usize) -> f64 {
@@ -56,8 +60,55 @@ pub fn show(app: &tauri::AppHandle, alert: &Alert) {
         return;
     }
 
+    #[cfg(windows)]
+    if notifications_suppressed() {
+        suppress_pending_prompts(app);
+        return;
+    }
+
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || show_window(&handle));
+}
+
+#[cfg(windows)]
+fn suppress_pending_prompts(app: &tauri::AppHandle) {
+    let state = app.state::<PromptState>();
+    state.suppression_generation.fetch_add(1, Ordering::AcqRel);
+    if state
+        .suppression_in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let state = handle.state::<PromptState>();
+            let generation = state.suppression_generation.load(Ordering::Acquire);
+            if crate::ipc::suppress_alert_prompts(handle.clone())
+                .await
+                .is_ok()
+            {
+                let _ = handle.emit("connection-prompts-refresh", ());
+            }
+            if state.suppression_generation.load(Ordering::Acquire) != generation {
+                continue;
+            }
+            state.suppression_in_flight.store(false, Ordering::Release);
+            if state.suppression_generation.load(Ordering::Acquire) == generation {
+                break;
+            }
+            if state
+                .suppression_in_flight
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 }
 
 fn show_window(app: &tauri::AppHandle) {
@@ -123,7 +174,12 @@ fn sync_window_visibility(
 ) -> Result<(), String> {
     let count = app.state::<PromptState>().count.load(Ordering::Acquire);
     #[cfg(windows)]
-    if count == 0 || notifications_suppressed() {
+    let suppressed = notifications_suppressed();
+    #[cfg(windows)]
+    if count == 0 || suppressed {
+        if suppressed {
+            suppress_pending_prompts(app);
+        }
         return hide_without_input(window);
     }
     #[cfg(not(windows))]
@@ -166,7 +222,11 @@ fn ensure_visibility_watcher(app: &tauri::AppHandle) {
                 break;
             }
 
-            if watch.sample(notifications_suppressed()) {
+            let suppressed = notifications_suppressed();
+            if suppressed {
+                suppress_pending_prompts(&handle);
+            }
+            if watch.sample(suppressed) {
                 sync_on_main_thread(&handle);
             }
         }

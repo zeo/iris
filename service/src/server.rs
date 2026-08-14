@@ -399,6 +399,29 @@ async fn handle(
                         .unwrap_or_default();
                         reply(&mut send, req, Reply::Alerts(list)).await?;
                     }
+                    ClientMessage::ListPromptAlerts { req } => {
+                        let store = store.clone();
+                        let list = tokio::task::spawn_blocking(move || {
+                            store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .list_prompt_alerts()
+                        })
+                        .await
+                        .unwrap_or_default();
+                        reply(&mut send, req, Reply::Alerts(list)).await?;
+                    }
+                    ClientMessage::SuppressAlertPrompts { req } => {
+                        let store = store.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .suppress_prompt_alerts();
+                        })
+                        .await;
+                        reply(&mut send, req, Reply::Ok).await?;
+                    }
                     ClientMessage::AckAlert { req, id } => {
                         let store = store.clone();
                         let _ = tokio::task::spawn_blocking(move || {
@@ -838,6 +861,8 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::SetRuleEnabled { req, .. }
         | ClientMessage::GetUsage { req, .. }
         | ClientMessage::ListAlerts { req, .. }
+        | ClientMessage::ListPromptAlerts { req }
+        | ClientMessage::SuppressAlertPrompts { req }
         | ClientMessage::AckAlert { req, .. }
         | ClientMessage::DecideAlert { req, .. }
         | ClientMessage::KillConnection { req, .. }

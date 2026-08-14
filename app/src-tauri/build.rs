@@ -6,6 +6,7 @@ fn main() {
         "list_apps",
         "forget_app",
         "list_alerts",
+        "list_prompt_alerts",
         "resize_connection_prompts",
         "report_display_scale",
         "ack_alert",

@@ -83,8 +83,12 @@ ALTER TABLE apps ADD COLUMN decision TEXT;
 UPDATE apps SET decision = 'allow';
 ";
 
+const SCHEMA_V7_ALERT_PROMPT_SUPPRESSION: &str = "
+ALTER TABLE alerts ADD COLUMN prompt_suppressed INTEGER NOT NULL DEFAULT 0;
+";
+
 /// bump when the schema changes; drives the migration ladder in [`Store::migrate`]
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 pub struct Store {
     conn: Connection,
@@ -183,6 +187,10 @@ impl Store {
         }
         if version < 6 {
             self.conn.execute_batch(SCHEMA_V6_APP_DECISION)?;
+        }
+        if version < 7 {
+            self.conn
+                .execute_batch(SCHEMA_V7_ALERT_PROMPT_SUPPRESSION)?;
         }
         if version < SCHEMA_VERSION {
             self.conn
@@ -572,12 +580,26 @@ impl Store {
     }
 
     pub fn list_alerts(&self, unacked_only: bool) -> Vec<Alert> {
-        let sql = if unacked_only {
-            "SELECT id, at_ms, kind, acknowledged FROM alerts WHERE acknowledged = 0 ORDER BY id DESC LIMIT 500"
+        let condition = if unacked_only {
+            "acknowledged = 0"
         } else {
-            "SELECT id, at_ms, kind, acknowledged FROM alerts ORDER BY id DESC LIMIT 500"
+            "1 = 1"
         };
-        let mut stmt = match self.conn.prepare(sql) {
+        self.list_alerts_where(condition, false)
+    }
+
+    /// pending connection decisions that may be shown in the prompt surface.
+    /// suppressed rows stay unacknowledged so the Alerts view can still drive a
+    /// real allow or block decision.
+    pub fn list_prompt_alerts(&self) -> Vec<Alert> {
+        self.list_alerts_where("acknowledged = 0 AND prompt_suppressed = 0", true)
+    }
+
+    fn list_alerts_where(&self, condition: &str, promptable_only: bool) -> Vec<Alert> {
+        let sql = format!(
+            "SELECT id, at_ms, kind, acknowledged FROM alerts WHERE {condition} ORDER BY id DESC LIMIT 500"
+        );
+        let mut stmt = match self.conn.prepare(&sql) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
@@ -592,6 +614,18 @@ impl Store {
         if let Ok(rows) = rows {
             for row in rows.flatten() {
                 if let Ok(kind) = serde_json::from_str::<AlertKind>(&row.2) {
+                    if promptable_only
+                        && !matches!(
+                            kind,
+                            AlertKind::NewApp {
+                                remote: Some(_),
+                                direction: Some(_),
+                                ..
+                            }
+                        )
+                    {
+                        continue;
+                    }
                     out.push(Alert {
                         id: row.0,
                         at_ms: row.1 as u64,
@@ -602,6 +636,36 @@ impl Store {
             }
         }
         out
+    }
+
+    /// keep pending decisions available in the Alerts view while removing them
+    /// from the replayable desktop prompt queue.
+    pub fn suppress_prompt_alerts(&mut self) -> usize {
+        let ids: Vec<i64> = self
+            .list_prompt_alerts()
+            .into_iter()
+            .map(|alert| alert.id)
+            .collect();
+        if ids.is_empty() {
+            return 0;
+        }
+        let Ok(transaction) = self.conn.transaction() else {
+            return 0;
+        };
+        let changed = {
+            let Ok(mut statement) =
+                transaction.prepare_cached("UPDATE alerts SET prompt_suppressed = 1 WHERE id = ?1")
+            else {
+                return 0;
+            };
+            ids.iter()
+                .map(|id| statement.execute([id]).unwrap_or(0))
+                .sum()
+        };
+        if transaction.commit().is_err() {
+            return 0;
+        }
+        changed
     }
 
     pub fn ack_alert(&self, id: i64) {
@@ -937,11 +1001,7 @@ mod tests {
             store.forget_apps(&["c:/gone-one.exe".into(), "c:/gone-two.exe".into()]),
             2
         );
-        let left: Vec<String> = store
-            .list_apps()
-            .into_iter()
-            .map(|app| app.app.0)
-            .collect();
+        let left: Vec<String> = store.list_apps().into_iter().map(|app| app.app.0).collect();
         assert_eq!(left, vec!["c:/keep.exe".to_string()]);
     }
 
@@ -1204,6 +1264,39 @@ mod tests {
         s.ack_alert(a.id);
         assert_eq!(s.list_alerts(true).len(), 0);
         assert_eq!(s.list_alerts(false).len(), 1);
+    }
+
+    #[test]
+    fn suppressed_prompt_alerts_stay_available_for_manual_decision() {
+        let mut s = Store::open_in_memory().unwrap();
+        let prompt = s.insert_alert(
+            &AlertKind::NewApp {
+                app: AppId("c:/x.exe".into()),
+                remote: Some(iris_core::Endpoint {
+                    addr: "203.0.113.7".parse().unwrap(),
+                    port: 443,
+                    protocol: iris_core::Protocol::Tcp,
+                }),
+                direction: Some(iris_core::Direction::Outbound),
+            },
+            500,
+        );
+        s.insert_alert(
+            &AlertKind::Plugin {
+                source: "test".into(),
+                message: "keep this history".into(),
+            },
+            501,
+        );
+
+        assert_eq!(s.list_prompt_alerts().len(), 1);
+        assert_eq!(s.suppress_prompt_alerts(), 1);
+        assert!(s.list_prompt_alerts().is_empty());
+        assert!(s
+            .list_alerts(true)
+            .iter()
+            .any(|alert| alert.id == prompt.id));
+        assert_eq!(s.list_alerts(false).len(), 2);
     }
 
     #[test]

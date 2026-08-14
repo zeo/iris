@@ -63,6 +63,7 @@ pub enum EngineCmd {
     GetAdapterUsage(u64, u64),
     ListAlerts(bool),
     ListPromptAlerts,
+    #[cfg(windows)]
     SuppressAlertPrompts,
     AckAlert(i64),
     DecideAlert(i64, RuleAction),
@@ -211,6 +212,7 @@ pub async fn list_prompt_alerts(app: AppHandle) -> Result<Vec<Alert>, String> {
     }
 }
 
+#[cfg(windows)]
 pub(crate) async fn suppress_alert_prompts(app: AppHandle) -> Result<(), String> {
     match dispatch(&app, EngineCmd::SuppressAlertPrompts).await? {
         Reply::Ok => Ok(()),
@@ -519,6 +521,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                         ClientMessage::GetAdapterUsage { req, from_ms, to_ms },
                     EngineCmd::ListAlerts(unacked_only) => ClientMessage::ListAlerts { req, unacked_only },
                     EngineCmd::ListPromptAlerts => ClientMessage::ListPromptAlerts { req },
+                    #[cfg(windows)]
                     EngineCmd::SuppressAlertPrompts => ClientMessage::SuppressAlertPrompts { req },
                     EngineCmd::AckAlert(id) => ClientMessage::AckAlert { req, id },
                     EngineCmd::DecideAlert(id, action) =>

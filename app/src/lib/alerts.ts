@@ -56,19 +56,10 @@ let started = false;
 export function initAlerts() {
   if (started) return;
   started = true;
-  void restoreDecisionPrompts();
+  void refreshAlerts();
   listen<Alert>("engine-alert", (e) => {
     setAlerts((a) => [e.payload, ...a.filter((x) => x.id !== e.payload.id)].slice(0, 500));
   });
-}
-
-export async function restoreDecisionPrompts(): Promise<void> {
-  await refreshAlerts();
-  try {
-    await invoke("restore_connection_prompts");
-  } catch {
-    /* offline */
-  }
 }
 
 export async function refreshAlerts(): Promise<void> {

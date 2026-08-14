@@ -4,7 +4,7 @@ import { Titlebar } from "./components/Titlebar";
 import { Icon } from "./components/Icon";
 import { createTheme } from "./lib/theme";
 import { engine, initEngine, setTickCadence } from "./lib/engine";
-import { initAlerts, restoreDecisionPrompts, unackedCount } from "./lib/alerts";
+import { initAlerts, refreshAlerts, unackedCount } from "./lib/alerts";
 import { initQuota } from "./lib/quota";
 import { autoUpdate } from "./lib/updater";
 import { Protect } from "./tabs/Protect";
@@ -91,7 +91,7 @@ export function App() {
   createEffect(() => {
     if (engine.online()) {
       refreshPlugins();
-      void restoreDecisionPrompts();
+      void refreshAlerts();
     }
   });
 

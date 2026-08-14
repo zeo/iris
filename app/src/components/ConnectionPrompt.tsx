@@ -23,16 +23,20 @@ export function ConnectionPrompt() {
   const [dismissed, setDismissed] = createSignal<Set<number>>(new Set());
   const [busy, setBusy] = createSignal<Set<number>>(new Set());
   const [error, setError] = createSignal<{ id: number; message: string }>();
+  let refreshSequence = 0;
+  let resizeQueue = Promise.resolve();
   const visible = () => visibleDecisionPrompts(alerts(), dismissed(), MAX_VISIBLE);
   // each stacked prompt decides independently, so track in-flight ids as a set
   // rather than a single value that would freeze the whole stack
   const isBusy = (id: number) => busy().has(id);
 
   const refresh = async () => {
+    const sequence = ++refreshSequence;
     try {
-      setAlerts(await invoke<Alert[]>("list_alerts", { unackedOnly: true }));
+      const next = await invoke<Alert[]>("list_alerts", { unackedOnly: true });
+      if (sequence === refreshSequence) setAlerts(next);
     } catch (reason) {
-      setError({ id: 0, message: String(reason) });
+      if (sequence === refreshSequence) setError({ id: 0, message: String(reason) });
     }
   };
 
@@ -47,6 +51,7 @@ export function ConnectionPrompt() {
     track(
       listen<Alert>("engine-alert", ({ payload }) => {
         if (needsDecision(payload)) {
+          refreshSequence += 1;
           setAlerts((current) => [payload, ...current.filter((alert) => alert.id !== payload.id)]);
         }
       }),
@@ -69,7 +74,10 @@ export function ConnectionPrompt() {
   });
 
   createEffect(() => {
-    void invoke("resize_connection_prompts", { count: visible().length });
+    const count = visible().length;
+    resizeQueue = resizeQueue
+      .then(() => invoke<void>("resize_connection_prompts", { count }))
+      .catch(() => undefined);
   });
 
   const dismiss = (id: number) => {
@@ -82,9 +90,11 @@ export function ConnectionPrompt() {
     setError(undefined);
     try {
       await invoke("decide_alert", { id: alert.id, action });
+      refreshSequence += 1;
       setAlerts((current) => current.filter((candidate) => candidate.id !== alert.id));
     } catch (reason) {
       if (decisionAlreadySettled(reason)) {
+        refreshSequence += 1;
         setAlerts((current) => current.filter((candidate) => candidate.id !== alert.id));
         void refresh();
       } else {

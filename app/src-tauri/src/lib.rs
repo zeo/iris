@@ -54,7 +54,7 @@ pub fn run() {
         .manage(ipc::TickDetailState::default())
         .manage(ipc::Commander(cmd_tx))
         .manage(DisplayScale(Mutex::new(1.0)))
-        .manage(prompt::PromptCount::default())
+        .manage(prompt::PromptState::default())
         .manage(notify::NotifyState::default())
         .invoke_handler(tauri::generate_handler![
             ipc::engine_status,
@@ -66,7 +66,6 @@ pub fn run() {
             ipc::rule_grant,
             rulectl::set_rule_grant,
             ipc::list_alerts,
-            ipc::restore_connection_prompts,
             prompt::resize_connection_prompts,
             notify::set_notifications_enabled,
             report_display_scale,

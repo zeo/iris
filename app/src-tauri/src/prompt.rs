@@ -2,6 +2,7 @@ use iris_core::{Alert, AlertKind};
 #[cfg(windows)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 #[cfg(windows)]
 use std::time::Duration;
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
@@ -16,6 +17,7 @@ const MAX_VISIBLE: usize = 2;
 #[derive(Default)]
 pub struct PromptState {
     count: AtomicUsize,
+    visibility_lock: Mutex<()>,
     #[cfg(windows)]
     watcher_active: AtomicBool,
     #[cfg(windows)]
@@ -62,6 +64,17 @@ pub fn show(app: &tauri::AppHandle, alert: &Alert) {
 
     #[cfg(windows)]
     if notifications_suppressed() {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let state = handle.state::<PromptState>();
+            let _visibility_guard = state
+                .visibility_lock
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(window) = handle.get_webview_window(LABEL) {
+                let _ = hide_without_input(&window);
+            }
+        });
         suppress_pending_prompts(app);
         return;
     }
@@ -112,7 +125,24 @@ fn suppress_pending_prompts(app: &tauri::AppHandle) {
 }
 
 fn show_window(app: &tauri::AppHandle) {
+    let state = app.state::<PromptState>();
+    let _visibility_guard = state
+        .visibility_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    #[cfg(windows)]
+    if notifications_suppressed() {
+        if let Some(window) = app.get_webview_window(LABEL) {
+            let _ = hide_without_input(&window);
+        }
+        suppress_pending_prompts(app);
+        return;
+    }
+
     if let Some(window) = app.get_webview_window(LABEL) {
+        #[cfg(windows)]
+        let _ = configure_prompt_window(&window);
         let _ = window.emit("connection-prompts-refresh", ());
         return;
     }
@@ -138,6 +168,8 @@ fn show_window(app: &tauri::AppHandle) {
         return;
     };
 
+    #[cfg(windows)]
+    let _ = configure_prompt_window(&window);
     let _ = window.set_ignore_cursor_events(true);
     let _ = window.set_size(size);
     position_window(app, &window, size);
@@ -145,21 +177,35 @@ fn show_window(app: &tauri::AppHandle) {
 
 #[tauri::command]
 pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<(), String> {
+    let state = app.state::<PromptState>();
+    let _visibility_guard = state
+        .visibility_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let Some(window) = app.get_webview_window(LABEL) else {
         return Ok(());
     };
     if count == 0 {
-        app.state::<PromptState>().count.store(0, Ordering::Release);
+        state.count.store(0, Ordering::Release);
         hide_without_input(&window)?;
         return Ok(());
     }
-    app.state::<PromptState>()
-        .count
-        .store(count.min(MAX_VISIBLE), Ordering::Release);
-    let visibility = sync_window_visibility(&app, &window);
+    state.count.store(count.min(MAX_VISIBLE), Ordering::Release);
     #[cfg(windows)]
-    ensure_visibility_watcher(&app);
-    visibility
+    {
+        ensure_visibility_watcher(&app);
+        if notifications_suppressed() {
+            suppress_pending_prompts(&app);
+            return hide_without_input(&window);
+        }
+        // a hidden host waits for the watcher to observe a stable foreground
+        // this removes the alt-tab frame where an old prompt can flash before
+        // the fullscreen check catches up
+        if !window.is_visible().unwrap_or(false) {
+            return hide_without_input(&window);
+        }
+    }
+    sync_window_visibility(&app, &window)
 }
 
 fn hide_without_input(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -217,7 +263,7 @@ fn ensure_visibility_watcher(app: &tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut watch = VisibilityWatch::default();
         loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
             if handle.state::<PromptState>().count.load(Ordering::Acquire) == 0 {
                 break;
             }
@@ -245,7 +291,6 @@ fn ensure_visibility_watcher(app: &tauri::AppHandle) {
 #[derive(Default)]
 struct VisibilityWatch {
     last_suppressed: Option<bool>,
-    saw_suppression: bool,
     clear_samples: u8,
 }
 
@@ -253,16 +298,12 @@ struct VisibilityWatch {
 impl VisibilityWatch {
     fn sample(&mut self, suppressed: bool) -> bool {
         if suppressed {
-            self.saw_suppression = true;
             self.clear_samples = 0;
             return self.last_suppressed.replace(true) != Some(true);
         }
-        if self.saw_suppression {
-            self.clear_samples = self.clear_samples.saturating_add(1);
-            if self.clear_samples < 2 {
-                return false;
-            }
-            self.saw_suppression = false;
+        self.clear_samples = self.clear_samples.saturating_add(1);
+        if self.clear_samples < 4 {
+            return false;
         }
         self.last_suppressed.replace(false) != Some(false)
     }
@@ -272,6 +313,11 @@ impl VisibilityWatch {
 fn sync_on_main_thread(app: &tauri::AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
+        let state = handle.state::<PromptState>();
+        let _visibility_guard = state
+            .visibility_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let Some(window) = handle.get_webview_window(LABEL) else {
             return;
         };
@@ -385,6 +431,44 @@ fn borderless_fullscreen_bounds(
 }
 
 #[cfg(windows)]
+fn configure_prompt_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+
+    let hwnd = HWND(window.hwnd().map_err(|error| error.to_string())?.0);
+    unsafe {
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let desired = prompt_extended_style(current);
+        if desired != current {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired as isize);
+            SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn prompt_extended_style(style: u32) -> u32 {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    };
+
+    (style & !WS_EX_APPWINDOW.0) | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0
+}
+
+#[cfg(windows)]
 fn show_without_focus(window: &tauri::WebviewWindow) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{
         SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
@@ -413,10 +497,15 @@ fn show_without_focus(window: &tauri::WebviewWindow) -> Result<(), String> {
 
 /// re-size the open prompt window to a freshly reported device-pixel-ratio
 pub fn apply_scale(app: &tauri::AppHandle, scale: f64) {
+    let state = app.state::<PromptState>();
+    let _visibility_guard = state
+        .visibility_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let Some(window) = app.get_webview_window(LABEL) else {
         return;
     };
-    let count = app.state::<PromptState>().count.load(Ordering::Acquire);
+    let count = state.count.load(Ordering::Acquire);
     if count == 0 {
         return;
     }
@@ -574,12 +663,30 @@ mod tests {
         use super::VisibilityWatch;
 
         let mut watch = VisibilityWatch::default();
-        assert!(watch.sample(false));
         assert!(!watch.sample(false));
+        assert!(!watch.sample(false));
+        assert!(!watch.sample(false));
+        assert!(watch.sample(false));
         assert!(watch.sample(true));
         assert!(!watch.sample(true));
         assert!(!watch.sample(false));
+        assert!(!watch.sample(false));
+        assert!(!watch.sample(false));
         assert!(watch.sample(false));
         assert!(!watch.sample(false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prompt_host_cannot_enter_alt_tab_or_activate() {
+        use super::prompt_extended_style;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        };
+
+        let style = prompt_extended_style(WS_EX_APPWINDOW.0);
+        assert_eq!(style & WS_EX_APPWINDOW.0, 0);
+        assert_ne!(style & WS_EX_TOOLWINDOW.0, 0);
+        assert_ne!(style & WS_EX_NOACTIVATE.0, 0);
     }
 }

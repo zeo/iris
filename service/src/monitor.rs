@@ -47,7 +47,7 @@ fn publish_pending(
     // single alert query, not one per connection
     let store = store.lock().unwrap_or_else(|error| error.into_inner());
     let mut seen: HashSet<(iris_core::AppId, iris_core::Direction)> = store
-        .list_alerts(true)
+        .list_prompt_alerts()
         .into_iter()
         .filter_map(|alert| match alert.kind {
             AlertKind::NewApp {
@@ -96,7 +96,7 @@ fn start_pending_publisher(
         .unwrap_or_else(|error| panic!("cannot start pending publisher: {error}"));
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, has_platform))]
 mod tests {
     use super::*;
     use iris_core::{AppId, Direction, Endpoint, Protocol};
@@ -165,6 +165,51 @@ mod tests {
                 .unwrap()
         });
         assert!(matches!(alert, ServerMessage::Alert(_)));
+    }
+
+    #[test]
+    fn suppressed_pending_alert_does_not_hide_a_new_connection_prompt() {
+        let engine = Engine::new();
+        let mut events = engine.subscribe();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let app = AppId::from_path("/usr/bin/rotated-app");
+        let now = now_ms();
+        {
+            let store = store.lock().unwrap();
+            store.insert_alert(
+                &AlertKind::NewApp {
+                    app: app.clone(),
+                    remote: Some(Endpoint {
+                        addr: "203.0.113.7".parse::<IpAddr>().unwrap(),
+                        port: 443,
+                        protocol: Protocol::Tcp,
+                    }),
+                    direction: Some(iris_core::Direction::Outbound),
+                },
+                now,
+            );
+        }
+        assert_eq!(store.lock().unwrap().suppress_prompt_alerts(), 1);
+
+        publish_pending(
+            vec![crate::platform::PendingConnection {
+                app: app.clone(),
+                remote: Endpoint {
+                    addr: "203.0.113.8".parse::<IpAddr>().unwrap(),
+                    port: 443,
+                    protocol: Protocol::Tcp,
+                },
+                direction: Direction::Outbound,
+            }],
+            &store,
+            &engine,
+        );
+
+        let ServerMessage::Alert(alert) = events.try_recv().unwrap() else {
+            panic!("expected a fresh alert after a suppressed row");
+        };
+        assert!(matches!(alert.kind, AlertKind::NewApp { .. }));
+        assert_eq!(store.lock().unwrap().list_prompt_alerts().len(), 1);
     }
 }
 

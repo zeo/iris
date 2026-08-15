@@ -209,6 +209,10 @@ pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<
 }
 
 fn hide_without_input(window: &tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(windows)]
+    if let Err(error) = configure_prompt_window(window) {
+        tracing::debug!("could not configure connection prompt host: {error}");
+    }
     let cursor = window.set_ignore_cursor_events(true);
     let hidden = window.hide();
     cursor.and(hidden).map_err(|error| error.to_string())
@@ -474,6 +478,7 @@ fn show_without_focus(window: &tauri::WebviewWindow) -> Result<(), String> {
         SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
     };
 
+    configure_prompt_window(window)?;
     let hwnd =
         windows::Win32::Foundation::HWND(window.hwnd().map_err(|error| error.to_string())?.0);
     unsafe {

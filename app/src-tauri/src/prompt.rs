@@ -168,11 +168,13 @@ fn show_window(app: &tauri::AppHandle) {
         return;
     };
 
-    #[cfg(windows)]
-    let _ = configure_prompt_window(&window);
     let _ = window.set_ignore_cursor_events(true);
     let _ = window.set_size(size);
     position_window(app, &window, size);
+    #[cfg(windows)]
+    if let Err(error) = configure_prompt_window(&window) {
+        tracing::debug!("could not configure connection prompt host: {error}");
+    }
 }
 
 #[tauri::command]
@@ -209,12 +211,12 @@ pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<
 }
 
 fn hide_without_input(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let cursor = window.set_ignore_cursor_events(true);
+    let hidden = window.hide();
     #[cfg(windows)]
     if let Err(error) = configure_prompt_window(window) {
         tracing::debug!("could not configure connection prompt host: {error}");
     }
-    let cursor = window.set_ignore_cursor_events(true);
-    let hidden = window.hide();
     cursor.and(hidden).map_err(|error| error.to_string())
 }
 
@@ -249,7 +251,10 @@ fn sync_window_visibility(
     }
     window
         .set_ignore_cursor_events(false)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    configure_prompt_window(window)?;
+    Ok(())
 }
 
 #[cfg(windows)]

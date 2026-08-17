@@ -63,8 +63,6 @@ pub enum EngineCmd {
     GetAdapterUsage(u64, u64),
     ListAlerts(bool),
     ListPromptAlerts,
-    #[cfg(windows)]
-    SuppressAlertPrompts,
     AckAlert(i64),
     DecideAlert(i64, RuleAction),
     KillConnection(u16, String, u16),
@@ -212,19 +210,13 @@ pub async fn list_prompt_alerts(app: AppHandle) -> Result<Vec<Alert>, String> {
     }
 }
 
-#[cfg(windows)]
-pub(crate) async fn suppress_alert_prompts(app: AppHandle) -> Result<(), String> {
-    match dispatch(&app, EngineCmd::SuppressAlertPrompts).await? {
-        Reply::Ok => Ok(()),
-        Reply::Error(error) => Err(error),
-        _ => Err("unexpected reply".into()),
-    }
-}
-
 #[tauri::command]
 pub async fn ack_alert(app: AppHandle, id: i64) -> Result<(), String> {
     match dispatch(&app, EngineCmd::AckAlert(id)).await? {
-        Reply::Ok => Ok(()),
+        Reply::Ok => {
+            let _ = app.emit("connection-prompts-refresh", ());
+            Ok(())
+        }
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
     }
@@ -238,7 +230,10 @@ pub async fn decide_alert(app: AppHandle, id: i64, action: String) -> Result<(),
         RuleAction::Block
     };
     match dispatch(&app, EngineCmd::DecideAlert(id, action)).await? {
-        Reply::Ok => Ok(()),
+        Reply::Ok => {
+            let _ = app.emit("connection-prompts-refresh", ());
+            Ok(())
+        }
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
@@ -521,8 +516,6 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                         ClientMessage::GetAdapterUsage { req, from_ms, to_ms },
                     EngineCmd::ListAlerts(unacked_only) => ClientMessage::ListAlerts { req, unacked_only },
                     EngineCmd::ListPromptAlerts => ClientMessage::ListPromptAlerts { req },
-                    #[cfg(windows)]
-                    EngineCmd::SuppressAlertPrompts => ClientMessage::SuppressAlertPrompts { req },
                     EngineCmd::AckAlert(id) => ClientMessage::AckAlert { req, id },
                     EngineCmd::DecideAlert(id, action) =>
                         ClientMessage::DecideAlert { req, id, action },
@@ -632,9 +625,9 @@ async fn reconcile_alerts(
 
 fn finish_alert_reconcile(app: &AppHandle, backlog: &[Alert], prompts: &[Alert]) {
     crate::notify::announce_backlog(app, backlog);
-    if let Some(alert) = prompts
+    for alert in prompts
         .iter()
-        .find(|alert| crate::notify::needs_decision(alert))
+        .filter(|alert| crate::notify::needs_decision(alert))
     {
         crate::prompt::show(app, alert);
     }

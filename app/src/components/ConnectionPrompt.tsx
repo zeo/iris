@@ -34,7 +34,20 @@ export function ConnectionPrompt() {
     const sequence = ++refreshSequence;
     try {
       const next = await invoke<Alert[]>("list_prompt_alerts");
-      if (sequence === refreshSequence) setAlerts(next);
+      if (sequence === refreshSequence) {
+        setAlerts((current) => {
+          const map = new Map<number, Alert>();
+          for (const item of next) {
+            if (needsDecision(item)) map.set(item.id, item);
+          }
+          for (const item of current) {
+            if (needsDecision(item) && !map.has(item.id)) {
+              map.set(item.id, item);
+            }
+          }
+          return Array.from(map.values());
+        });
+      }
     } catch (reason) {
       if (sequence === refreshSequence) setError({ id: 0, message: String(reason) });
     }
@@ -52,6 +65,14 @@ export function ConnectionPrompt() {
       listen<Alert>("engine-alert", ({ payload }) => {
         if (needsDecision(payload)) {
           refreshSequence += 1;
+          setDismissed((current) => {
+            if (current.has(payload.id)) {
+              const next = new Set(current);
+              next.delete(payload.id);
+              return next;
+            }
+            return current;
+          });
           setAlerts((current) => [payload, ...current.filter((alert) => alert.id !== payload.id)]);
         }
       }),

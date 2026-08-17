@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+## [0.1.13] - 2026-08-17
+
+### Fixed
+
+- Network connection prompts stay topmost and visible without losing z-order or falling behind active applications.
+- Connection alert publishing captures immediate baseline on startup without initial delay, and optimizes drop deduplication.
+- Safe merging of incoming prompt decisions eliminates race conditions in the connection alert stack.
+- Restore all pending prompt alerts across engine reconnects and restarts.
+
 ## [0.1.12] - 2026-08-12
 
 ### Fixed

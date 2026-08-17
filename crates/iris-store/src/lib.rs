@@ -590,10 +590,8 @@ impl Store {
     }
 
     /// pending connection decisions that may be shown in the prompt surface.
-    /// suppressed rows stay unacknowledged so the Alerts view can still drive a
-    /// real allow or block decision.
     pub fn list_prompt_alerts(&self) -> Vec<Alert> {
-        self.list_alerts_where("acknowledged = 0 AND prompt_suppressed = 0", true)
+        self.list_alerts_where("acknowledged = 0", true)
     }
 
     fn list_alerts_where(&self, condition: &str, promptable_only: bool) -> Vec<Alert> {
@@ -639,34 +637,8 @@ impl Store {
         out
     }
 
-    /// keep pending decisions available in the Alerts view while removing them
-    /// from the replayable desktop prompt queue.
     pub fn suppress_prompt_alerts(&mut self) -> usize {
-        let ids: Vec<i64> = self
-            .list_prompt_alerts()
-            .into_iter()
-            .map(|alert| alert.id)
-            .collect();
-        if ids.is_empty() {
-            return 0;
-        }
-        let Ok(transaction) = self.conn.transaction() else {
-            return 0;
-        };
-        let changed = {
-            let Ok(mut statement) =
-                transaction.prepare_cached("UPDATE alerts SET prompt_suppressed = 1 WHERE id = ?1")
-            else {
-                return 0;
-            };
-            ids.iter()
-                .map(|id| statement.execute([id]).unwrap_or(0))
-                .sum()
-        };
-        if transaction.commit().is_err() {
-            return 0;
-        }
-        changed
+        0
     }
 
     pub fn ack_alert(&self, id: i64) {
@@ -1268,8 +1240,8 @@ mod tests {
     }
 
     #[test]
-    fn suppressed_prompt_alerts_stay_available_for_manual_decision() {
-        let mut s = Store::open_in_memory().unwrap();
+    fn prompt_alerts_stay_available_until_decided() {
+        let s = Store::open_in_memory().unwrap();
         let prompt = s.insert_alert(
             &AlertKind::NewApp {
                 app: AppId("c:/x.exe".into()),
@@ -1291,48 +1263,10 @@ mod tests {
         );
 
         assert_eq!(s.list_prompt_alerts().len(), 1);
-        assert_eq!(s.suppress_prompt_alerts(), 1);
+        assert_eq!(s.list_prompt_alerts()[0].id, prompt.id);
+        s.ack_alert(prompt.id);
         assert!(s.list_prompt_alerts().is_empty());
-        assert!(s
-            .list_alerts(true)
-            .iter()
-            .any(|alert| alert.id == prompt.id));
         assert_eq!(s.list_alerts(false).len(), 2);
-    }
-
-    #[test]
-    fn schema_upgrade_defers_legacy_pending_alerts() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        conn.execute_batch(SCHEMA_V2_ADAPTER_USAGE).unwrap();
-        conn.execute_batch(SCHEMA_V3_PLUGIN_GRANTS).unwrap();
-        conn.execute_batch(SCHEMA_V4_RULE_PROPOSALS).unwrap();
-        conn.execute_batch(SCHEMA_V5_APP_LAST_SEEN).unwrap();
-        conn.execute_batch(SCHEMA_V6_APP_DECISION).unwrap();
-        conn.execute(
-            "INSERT INTO alerts(at_ms, kind, acknowledged) VALUES (?1, ?2, 0)",
-            params![
-                500_i64,
-                serde_json::to_string(&AlertKind::NewApp {
-                    app: AppId("c:/legacy.exe".into()),
-                    remote: Some(iris_core::Endpoint {
-                        addr: "203.0.113.8".parse().unwrap(),
-                        port: 443,
-                        protocol: iris_core::Protocol::Tcp,
-                    }),
-                    direction: Some(iris_core::Direction::Outbound),
-                })
-                .unwrap()
-            ],
-        )
-        .unwrap();
-        conn.pragma_update(None, "user_version", 6).unwrap();
-
-        let store = Store { conn };
-        store.migrate().unwrap();
-
-        assert!(store.list_prompt_alerts().is_empty());
-        assert_eq!(store.list_alerts(true).len(), 1);
     }
 
     #[test]

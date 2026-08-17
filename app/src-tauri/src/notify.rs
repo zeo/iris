@@ -71,18 +71,35 @@ fn first_sighting(app: &tauri::AppHandle, id: i64) -> bool {
     toasted.insert(id)
 }
 
-/// toast a live alert as it arrives from the engine. decision-prompt alerts are
-/// skipped: they get the actionable prompt window, not a generic notification.
+/// toast a live alert as it arrives from the engine.
 pub fn alert_toast(app: &tauri::AppHandle, alert: &Alert) {
-    if needs_decision(alert) || !enabled(app) || !first_sighting(app, alert.id) {
+    if !enabled(app) || needs_decision(alert) || !first_sighting(app, alert.id) {
         return;
     }
     let (title, body) = match &alert.kind {
         AlertKind::Plugin { source, message } => (source.clone(), message.clone()),
-        AlertKind::NewApp { app, .. } => (
-            "New app on the network".to_string(),
-            format!("{} connected for the first time", app.file_name()),
-        ),
+        AlertKind::NewApp {
+            app,
+            remote,
+            direction,
+        } => {
+            let file = app.file_name();
+            if let Some(remote) = remote {
+                let dir_str = match direction {
+                    Some(iris_core::Direction::Inbound) => "incoming connection from",
+                    _ => "connecting to",
+                };
+                (
+                    "New network connection".to_string(),
+                    format!("{file} is {dir_str} {}:{}", remote.addr, remote.port),
+                )
+            } else {
+                (
+                    "New app on the network".to_string(),
+                    format!("{file} connected for the first time"),
+                )
+            }
+        }
         AlertKind::Blocked { app, .. } => (
             "Connection blocked".to_string(),
             format!("Blocked {}", app.file_name()),
@@ -91,7 +108,7 @@ pub fn alert_toast(app: &tauri::AppHandle, alert: &Alert) {
     show(app, &title, &body);
 }
 
-/// summarize unacknowledged non-decision alerts missed during startup or an
+/// summarize unacknowledged alerts missed during startup or an
 /// engine reconnect. ids already surfaced live stay suppressed.
 pub fn announce_backlog(app: &tauri::AppHandle, alerts: &[Alert]) {
     let Some(state) = app.try_state::<NotifyState>() else {
@@ -106,7 +123,7 @@ pub fn announce_backlog(app: &tauri::AppHandle, alerts: &[Alert]) {
         .unwrap_or_else(|error| error.into_inner());
     let count = alerts
         .iter()
-        .filter(|alert| !alert.acknowledged && !needs_decision(alert))
+        .filter(|alert| !alert.acknowledged)
         .filter(|alert| toasted.insert(alert.id))
         .count();
     drop(toasted);
@@ -123,6 +140,6 @@ pub fn announce_backlog(app: &tauri::AppHandle, alerts: &[Alert]) {
 
 fn show(app: &tauri::AppHandle, title: &str, body: &str) {
     if let Err(error) = app.notification().builder().title(title).body(body).show() {
-        tracing::debug!("could not raise notification: {error}");
+        tracing::warn!("could not raise notification: {error}");
     }
 }

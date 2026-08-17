@@ -31,6 +31,15 @@ fn valid_scale(scale: f64) -> Option<f64> {
 
 /// build and run the Tauri application
 pub fn run() {
+    #[cfg(windows)]
+    {
+        use windows::core::w;
+        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        unsafe {
+            let _ = SetCurrentProcessExplicitAppUserModelID(w!("lt.rot.iris"));
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -100,6 +109,7 @@ pub fn run() {
         .setup(move |app| {
             ipc::spawn(app.handle().clone(), cmd_rx);
             build_tray(app.handle())?;
+            prompt::prewarm(app.handle());
             if let Err(error) = startup::repair_launch_at_login() {
                 tracing::warn!("could not refresh launch at login: {error}");
             }

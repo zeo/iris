@@ -20,7 +20,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWPM_NET_EVENT5, FWPM_NET_EVENT_FLAG_APP_ID_SET, FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET,
     FWPM_NET_EVENT_FLAG_IP_VERSION_SET, FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET,
     FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET, FWPM_NET_EVENT_SUBSCRIPTION0,
-    FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, FWP_IP_VERSION_V4, FWP_UINT32, FWP_VALUE0,
+    FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, FWP_IP_VERSION_V6, FWP_UINT32, FWP_VALUE0,
 };
 
 // the engine option index for net event collection; FWPM_ENGINE_COLLECT_NET_EVENTS
@@ -150,15 +150,21 @@ unsafe extern "system" fn on_net_event(_context: *mut core::ffi::c_void, event: 
 
     let flags = header.flags;
     let has = |flag: u32| flags & flag != 0;
-    if !has(FWPM_NET_EVENT_FLAG_APP_ID_SET) || !has(FWPM_NET_EVENT_FLAG_IP_VERSION_SET) {
+    if !has(FWPM_NET_EVENT_FLAG_APP_ID_SET) {
         return;
     }
     let Some(path) = app_id_path(&header.appId) else {
         return;
     };
+    let is_v6 = header.ipVersion == FWP_IP_VERSION_V6
+        || (has(FWPM_NET_EVENT_FLAG_IP_VERSION_SET) && header.ipVersion == FWP_IP_VERSION_V6);
     let addr = if !has(FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET) {
-        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-    } else if header.ipVersion == FWP_IP_VERSION_V4 {
+        if is_v6 {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        }
+    } else if !is_v6 {
         IpAddr::V4(Ipv4Addr::from(unsafe { header.Anonymous2.remoteAddrV4 }))
     } else {
         IpAddr::V6(Ipv6Addr::from(unsafe {
@@ -206,21 +212,40 @@ fn app_id_path(blob: &windows::Win32::NetworkManagement::WindowsFilteringPlatfor
 /// everything else in iris keys apps by the drive-letter path the monitor reads
 /// from a process handle. rewrite the device prefix so the two agree, or the
 /// same executable would be two different apps.
+use std::sync::Arc;
+
 fn to_drive_path(path: &str) -> String {
     if !path.starts_with("\\device\\") && !path.starts_with("\\Device\\") {
         return path.to_string();
     }
-    for (device, letter) in device_map() {
-        if path.len() > device.len() && path[..device.len()].eq_ignore_ascii_case(&device) {
+    let map = cached_device_map();
+    for (device, letter) in map.iter() {
+        if path.len() > device.len() && path[..device.len()].eq_ignore_ascii_case(device) {
             return format!("{letter}{}", &path[device.len()..]);
         }
     }
     path.to_string()
 }
 
-/// each drive letter and the NT device path it resolves to. rebuilt per lookup:
-/// volumes come and go, and a denial is rare enough that the enumeration cost
-/// never lands on a hot path.
+fn cached_device_map() -> Arc<Vec<(String, String)>> {
+    static CACHE: OnceLock<Mutex<(Option<std::time::Instant>, Arc<Vec<(String, String)>>)>> =
+        OnceLock::new();
+    let lock = CACHE.get_or_init(|| Mutex::new((None, Arc::new(Vec::new()))));
+    if let Ok(mut guard) = lock.lock() {
+        let needs_refresh = match guard.0 {
+            Some(last) => last.elapsed() >= std::time::Duration::from_secs(30) || guard.1.is_empty(),
+            None => true,
+        };
+        if needs_refresh {
+            guard.1 = Arc::new(device_map());
+            guard.0 = Some(std::time::Instant::now());
+        }
+        return guard.1.clone();
+    }
+    Arc::new(device_map())
+}
+
+/// each drive letter and the NT device path it resolves to.
 fn device_map() -> Vec<(String, String)> {
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::QueryDosDeviceW;

@@ -33,47 +33,78 @@ fn target_name(target: &EnrichTarget) -> String {
 }
 
 #[cfg(has_platform)]
+use std::collections::HashMap;
+
+#[cfg(has_platform)]
 fn publish_pending(
     pending: Vec<crate::platform::PendingConnection>,
     store: &Arc<Mutex<Store>>,
     engine: &Engine,
+    last_notified: &mut HashMap<(iris_core::AppId, iris_core::Direction), u64>,
 ) {
     if pending.is_empty() {
         return;
     }
 
     let now = now_ms();
-    // dedup the whole batch against alerts already awaiting a decision with a
-    // single alert query, not one per connection
+    let mut unthrottled = Vec::with_capacity(pending.len());
+    for conn in pending {
+        let key = (conn.app.clone(), conn.direction);
+        let last = last_notified.get(&key).copied().unwrap_or(0);
+        if now.saturating_sub(last) >= 1000 || last == 0 {
+            unthrottled.push(conn);
+        }
+    }
+
+    if unthrottled.is_empty() {
+        return;
+    }
+
+    let mut to_publish = Vec::new();
     let store = store.lock().unwrap_or_else(|error| error.into_inner());
-    let mut seen: HashSet<(iris_core::AppId, iris_core::Direction)> = store
-        .list_prompt_alerts()
+    let prompt_alerts = store.list_prompt_alerts();
+    let mut seen: HashMap<(iris_core::AppId, iris_core::Direction), iris_core::Alert> = prompt_alerts
         .into_iter()
-        .filter_map(|alert| match alert.kind {
+        .filter_map(|alert| match &alert.kind {
             AlertKind::NewApp {
                 app,
                 direction: Some(direction),
                 ..
-            } => Some((app, direction)),
+            } => Some(((app.clone(), *direction), alert)),
             _ => None,
         })
         .collect();
-    let mut fresh = Vec::new();
-    for connection in pending {
+
+    for connection in unthrottled {
         store.ensure_app(connection.app.as_str(), None, now);
-        if seen.insert((connection.app.clone(), connection.direction)) {
-            fresh.push(store.insert_alert(
+        let key = (connection.app.clone(), connection.direction);
+        if let Some(existing) = seen.get(&key) {
+            let last = last_notified.get(&key).copied().unwrap_or(0);
+            if now.saturating_sub(last) >= 1000 || last == 0 {
+                last_notified.insert(key, now);
+                to_publish.push(existing.clone());
+            }
+        } else {
+            let alert = store.insert_alert(
                 &AlertKind::NewApp {
-                    app: connection.app,
+                    app: connection.app.clone(),
                     remote: Some(connection.remote),
                     direction: Some(connection.direction),
                 },
                 now,
-            ));
+            );
+            seen.insert(key.clone(), alert.clone());
+            last_notified.insert(key, now);
+            to_publish.push(alert);
         }
     }
     drop(store);
-    for alert in fresh {
+
+    if last_notified.len() > 1024 {
+        last_notified.retain(|_, &mut time| now.saturating_sub(time) <= 60_000);
+    }
+
+    for alert in to_publish {
         tracing::info!(alert_id = alert.id, "published pending connection alert");
         engine.publish(ServerMessage::Alert(alert));
     }
@@ -88,9 +119,10 @@ fn start_pending_publisher(
     std::thread::Builder::new()
         .name("iris-pending-publisher".to_string())
         .spawn(move || {
+            let mut last_notified = HashMap::new();
             for connection in pending {
                 tracing::info!(app = connection.app.as_str(), "received pending connection");
-                publish_pending(vec![connection], &store, &engine);
+                publish_pending(vec![connection], &store, &engine, &mut last_notified);
             }
         })
         .unwrap_or_else(|error| panic!("cannot start pending publisher: {error}"));
@@ -108,6 +140,7 @@ mod tests {
         let mut events = engine.subscribe();
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let app = AppId::from_path("/usr/bin/example");
+        let mut last_notified = HashMap::new();
 
         publish_pending(
             vec![crate::platform::PendingConnection {
@@ -121,6 +154,7 @@ mod tests {
             }],
             &store,
             &engine,
+            &mut last_notified,
         );
 
         let ServerMessage::Alert(alert) = events.try_recv().unwrap() else {
@@ -168,11 +202,12 @@ mod tests {
     }
 
     #[test]
-    fn suppressed_pending_alert_does_not_hide_a_new_connection_prompt() {
+    fn pending_alert_stays_visible_until_decided() {
         let engine = Engine::new();
-        let mut events = engine.subscribe();
+        let _events = engine.subscribe();
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let app = AppId::from_path("/usr/bin/rotated-app");
+        let mut last_notified = HashMap::new();
         let now = now_ms();
         {
             let store = store.lock().unwrap();
@@ -189,7 +224,7 @@ mod tests {
                 now,
             );
         }
-        assert_eq!(store.lock().unwrap().suppress_prompt_alerts(), 1);
+        assert_eq!(store.lock().unwrap().list_prompt_alerts().len(), 1);
 
         publish_pending(
             vec![crate::platform::PendingConnection {
@@ -203,12 +238,43 @@ mod tests {
             }],
             &store,
             &engine,
+            &mut last_notified,
         );
 
-        let ServerMessage::Alert(alert) = events.try_recv().unwrap() else {
-            panic!("expected a fresh alert after a suppressed row");
+        assert_eq!(store.lock().unwrap().list_prompt_alerts().len(), 1);
+    }
+
+    #[test]
+    fn pending_connection_republishes_on_retry() {
+        let engine = Engine::new();
+        let mut events = engine.subscribe();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let app = AppId::from_path("/usr/bin/retry-example");
+        let mut last_notified = HashMap::new();
+
+        let conn = crate::platform::PendingConnection {
+            app: app.clone(),
+            remote: Endpoint {
+                addr: "203.0.113.7".parse::<IpAddr>().unwrap(),
+                port: 443,
+                protocol: Protocol::Tcp,
+            },
+            direction: Direction::Outbound,
         };
-        assert!(matches!(alert.kind, AlertKind::NewApp { .. }));
+
+        publish_pending(vec![conn.clone()], &store, &engine, &mut last_notified);
+        let ServerMessage::Alert(alert1) = events.try_recv().unwrap() else {
+            panic!("expected first alert");
+        };
+
+        // Simulate 1 second later retry
+        last_notified.insert((app.clone(), Direction::Outbound), 0);
+        publish_pending(vec![conn], &store, &engine, &mut last_notified);
+        let ServerMessage::Alert(alert2) = events.try_recv().unwrap() else {
+            panic!("expected second alert on retry");
+        };
+
+        assert_eq!(alert1.id, alert2.id);
         assert_eq!(store.lock().unwrap().list_prompt_alerts().len(), 1);
     }
 }
@@ -254,9 +320,9 @@ pub fn spawn(
         #[cfg(has_platform)]
         let byte_monitor = byte_monitor;
         let mut ticks: u64 = 0;
-        // register everything already connected silently for the first few
-        // seconds so a fresh install does not toast every running app at once
-        let baseline_until = now_ms() + 6_000;
+        // register everything already connected silently on the first tick so a
+        // fresh start does not toast every already-running app at once
+        let mut baseline_done = false;
         // remote endpoints already handed to the enrichers, so each is resolved
         // and pushed once rather than every tick it stays connected
         let mut enriched_seen: HashSet<IpAddr> = HashSet::new();
@@ -282,8 +348,9 @@ pub fn spawn(
             // history and alerting
             {
                 let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
-                let alerting = now > baseline_until;
+                let alerting = baseline_done;
                 let fresh_apps = store.record_tick(&tick);
+                baseline_done = true;
                 for app in &tick.apps {
                     if app.online && fresh_apps.contains(&app.app) && alerting {
                         let connection = app

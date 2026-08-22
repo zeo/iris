@@ -94,9 +94,12 @@ pub fn secure_state() -> std::io::Result<()> {
 
 #[cfg(windows)]
 pub fn secure_state() -> std::io::Result<()> {
-    const STATE_ROOT: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;GX;;;RC)";
-    const PRIVATE: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
-    const PLUGINS: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;RC)";
+    // O:SY/G:SY cannot be set by an elevated administrator (only the current
+    // owner or SYSTEM may reassign ownership), so ownership is left as-is and
+    // the protected DACL carries the guarantee.
+    const STATE_ROOT: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;GX;;;RC)";
+    const PRIVATE: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+    const PLUGINS: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;RC)";
 
     let root = data_dir();
     let plugins = plugins_dir();
@@ -168,8 +171,8 @@ fn set_acl(path: &std::path::Path, sddl: &str) -> std::io::Result<()> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows::Win32::Security::{
-        SetFileSecurityW, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
-        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
     };
 
     let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -185,10 +188,7 @@ fn set_acl(path: &std::path::Path, sddl: &str) -> std::io::Result<()> {
         .map_err(std::io::Error::other)?;
         let applied = SetFileSecurityW(
             PCWSTR(path.as_ptr()),
-            DACL_SECURITY_INFORMATION
-                | PROTECTED_DACL_SECURITY_INFORMATION
-                | OWNER_SECURITY_INFORMATION
-                | GROUP_SECURITY_INFORMATION,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             descriptor,
         )
         .ok()

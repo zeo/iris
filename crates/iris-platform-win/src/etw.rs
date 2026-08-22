@@ -8,7 +8,9 @@ use ferrisetw::trace::UserTrace;
 use ferrisetw::EventRecord;
 use iris_core::{AdapterKind, Aggregator};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use windows::core::PCWSTR;
 use windows::Win32::System::Diagnostics::Etw::{
     ControlTraceW, CONTROLTRACE_HANDLE, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_PROPERTIES,
@@ -22,6 +24,13 @@ const KERNEL_NETWORK_GUID: &str = "7dd42a49-5329-4832-8dfd-43d979153a88";
 const DNS_CLIENT_GUID: &str = "1c95126e-7eea-49a9-a3fe-a378b03ddb4d";
 // DNS query-completed event that carries QueryName + resolved addresses
 const DNS_QUERY_COMPLETE: u16 = 3008;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 #[derive(Clone, Copy)]
 enum Dir {
@@ -48,18 +57,26 @@ pub struct Monitor {
     dns_trace: Option<UserTrace>,
     cache: Arc<Mutex<PidCache>>,
     adapters: Arc<AdapterMap>,
+    /// millisecond timestamp of the last byte event the network callback saw.
+    /// the service samples this on a slow cadence; a silent ETW session death
+    /// (controller stopped the trace out from under us) shows up as an old stamp
+    /// while connections keep flowing, which is the one symptom we can act on.
+    last_event_ms: Arc<AtomicU64>,
 }
 
 impl Monitor {
     pub fn start(agg: Arc<Mutex<Aggregator>>, dns_map: DnsMap) -> anyhow::Result<Monitor> {
         let cache = Arc::new(Mutex::new(PidCache::new()));
         let adapters = Arc::new(AdapterMap::new());
+        let last_event_ms = Arc::new(AtomicU64::new(now_ms()));
 
         // byte counts, required
         let net_agg = agg;
         let net_cache = cache.clone();
         let net_adapters = adapters.clone();
+        let net_stamp = last_event_ms.clone();
         let net_cb = move |record: &EventRecord, locator: &SchemaLocator| {
+            net_stamp.store(now_ms(), Ordering::Relaxed);
             on_net_event(record, locator, &net_agg, &net_cache, &net_adapters);
         };
         let net_provider = Provider::by_guid(KERNEL_NETWORK_GUID)
@@ -98,7 +115,22 @@ impl Monitor {
             dns_trace,
             cache,
             adapters,
+            last_event_ms,
         })
+    }
+
+    /// milliseconds since the last captured byte event. large values mean the
+    /// trace stopped delivering (or traffic genuinely went quiet); the caller
+    /// compares against its own connection view to tell those apart.
+    pub fn ms_since_last_event(&self) -> u64 {
+        now_ms().saturating_sub(self.last_event_ms.load(Ordering::Relaxed))
+    }
+
+    /// stop leaked ETW sessions by name, for a caller restarting capture after
+    /// a stalled session. same cleanup `start` runs before creating its traces.
+    pub fn stop_leaked_sessions() {
+        stop_stale_session("iris-net");
+        stop_stale_session("iris-dns");
     }
 
     /// clear the PID->path cache; called periodically to bound PID-reuse staleness

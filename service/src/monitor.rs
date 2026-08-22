@@ -304,7 +304,7 @@ pub fn spawn(
     };
 
     #[cfg(has_platform)]
-    let mut tracker = Tracker::new(agg, dns);
+    let mut tracker = Tracker::new(agg.clone(), dns.clone());
     #[cfg(not(has_platform))]
     let mut tracker = Tracker::new(agg);
 
@@ -325,7 +325,11 @@ pub fn spawn(
         .name("iris-sample-loop".to_string())
         .spawn(move || {
             #[cfg(has_platform)]
-            let byte_monitor = byte_monitor;
+            let mut byte_monitor = byte_monitor;
+            #[cfg(all(has_platform, target_os = "windows"))]
+            let agg = agg;
+            #[cfg(all(has_platform, target_os = "windows"))]
+            let dns = dns;
             let mut ticks: u64 = 0;
             // register everything already connected silently on the first tick so a
             // fresh start does not toast every already-running app at once
@@ -353,6 +357,7 @@ pub fn spawn(
                 // record usage + first-seen alerts under one store lock. recover a
                 // poisoned guard so one panicking tick never silently ends all
                 // history and alerting
+                let any_online = tick.apps.iter().any(|app| app.online);
                 {
                     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
                     let alerting = baseline_done;
@@ -471,6 +476,31 @@ pub fn spawn(
                     if let Some(m) = byte_monitor.as_ref() {
                         m.clear_cache();
                         m.refresh_adapters();
+                    }
+                }
+                // a dead ETW session is invisible from inside: the trace object
+                // still exists, events just stop. the one observable symptom is
+                // an old last-event stamp while the connection view keeps
+                // finding active sockets, so restart the capture when both hold.
+                // quiet traffic with an old stamp stays alone.
+                #[cfg(all(has_platform, target_os = "windows"))]
+                if ticks.is_multiple_of(30) {
+                    const ETW_STALE_MS: u64 = 20_000;
+                    let capture_dead = byte_monitor
+                        .as_ref()
+                        .is_some_and(|m| m.ms_since_last_event() > ETW_STALE_MS);
+                    if capture_dead && any_online {
+                        tracing::warn!("byte capture stalled, restarting the ETW session");
+                        if let Some(dead) = byte_monitor.take() {
+                            drop(dead);
+                        }
+                        crate::platform::Monitor::stop_leaked_sessions();
+                        byte_monitor = crate::platform::Monitor::start(agg.clone(), dns.clone())
+                            .map_err(|e| {
+                                tracing::error!("byte monitor restart failed: {e}");
+                                e
+                            })
+                            .ok();
                     }
                 }
                 // prune usage older than 45 days, hourly

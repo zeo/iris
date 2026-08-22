@@ -18,9 +18,9 @@ use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineSetOption0, FwpmNetEventSubscribe4, FwpmNetEventUnsubscribe0, FWPM_ENGINE_OPTION,
     FWPM_NET_EVENT5, FWPM_NET_EVENT_FLAG_APP_ID_SET, FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET,
-    FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET,
-    FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET, FWPM_NET_EVENT_SUBSCRIPTION0,
-    FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, FWP_IP_VERSION_V6, FWP_UINT32, FWP_VALUE0,
+    FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET, FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET,
+    FWPM_NET_EVENT_SUBSCRIPTION0, FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, FWP_IP_VERSION_V6, FWP_UINT32,
+    FWP_VALUE0,
 };
 
 // the engine option index for net event collection; FWPM_ENGINE_COLLECT_NET_EVENTS
@@ -125,7 +125,10 @@ impl Drop for NetEvents {
 
 /// BFE calls this on its own thread for every collected event. it must return
 /// promptly, so the only work here is decoding and a non-blocking send.
-unsafe extern "system" fn on_net_event(_context: *mut core::ffi::c_void, event: *const FWPM_NET_EVENT5) {
+unsafe extern "system" fn on_net_event(
+    _context: *mut core::ffi::c_void,
+    event: *const FWPM_NET_EVENT5,
+) {
     if event.is_null() {
         return;
     }
@@ -193,7 +196,9 @@ unsafe extern "system" fn on_net_event(_context: *mut core::ffi::c_void, event: 
 
 /// a WFP app id is the image path as a NT device path in UTF-16, terminated.
 /// convert it back to something that matches what the monitor records.
-fn app_id_path(blob: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB) -> Option<String> {
+fn app_id_path(
+    blob: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB,
+) -> Option<String> {
     if blob.data.is_null() || blob.size < 2 {
         return None;
     }
@@ -233,7 +238,9 @@ fn cached_device_map() -> Arc<Vec<(String, String)>> {
     let lock = CACHE.get_or_init(|| Mutex::new((None, Arc::new(Vec::new()))));
     if let Ok(mut guard) = lock.lock() {
         let needs_refresh = match guard.0 {
-            Some(last) => last.elapsed() >= std::time::Duration::from_secs(30) || guard.1.is_empty(),
+            Some(last) => {
+                last.elapsed() >= std::time::Duration::from_secs(30) || guard.1.is_empty()
+            }
             None => true,
         };
         if needs_refresh {

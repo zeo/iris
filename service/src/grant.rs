@@ -151,8 +151,8 @@ pub fn sid_of_process(pid: u32) -> std::io::Result<String> {
     };
 
     unsafe {
-        let process =
-            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).map_err(std::io::Error::other)?;
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .map_err(std::io::Error::other)?;
         let mut token = windows::Win32::Foundation::HANDLE::default();
         let opened = OpenProcessToken(process, TOKEN_QUERY, &mut token);
         let _ = CloseHandle(process);

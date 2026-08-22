@@ -86,7 +86,11 @@ impl EnrichmentRegistry {
             // reclaim stale entries first, then fall back to evicting the oldest
             cache.retain(|_, c| c.at.elapsed() < TTL);
             if cache.len() >= MAX_CACHE {
-                if let Some(oldest) = cache.iter().min_by_key(|(_, c)| c.at).map(|(k, _)| k.clone()) {
+                if let Some(oldest) = cache
+                    .iter()
+                    .min_by_key(|(_, c)| c.at)
+                    .map(|(k, _)| k.clone())
+                {
                     cache.remove(&oldest);
                 }
             }

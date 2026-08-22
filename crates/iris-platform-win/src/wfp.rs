@@ -310,12 +310,8 @@ impl Wfp {
         let mut seeded = 0usize;
         for path in paths {
             for direction in [Direction::Outbound, Direction::Inbound] {
-                match self.apply_weighted(
-                    path,
-                    direction,
-                    RuleAction::Allow,
-                    &WEIGHT_SEEDED_TRUST,
-                ) {
+                match self.apply_weighted(path, direction, RuleAction::Allow, &WEIGHT_SEEDED_TRUST)
+                {
                     Ok(ids) => {
                         seeded += 1;
                         self.trusted_filters.extend(ids);
@@ -519,7 +515,10 @@ mod tests {
         let rule = weight_value(&weight(&WEIGHT_APP_RULE));
         let seeded = weight_value(&weight(&WEIGHT_SEEDED_TRUST));
         let fallback = weight_value(&weight(&WEIGHT_ASK_FALLBACK));
-        assert!(rule > seeded, "a user rule {rule} must outweigh seeded trust {seeded}");
+        assert!(
+            rule > seeded,
+            "a user rule {rule} must outweigh seeded trust {seeded}"
+        );
         assert!(
             seeded > fallback,
             "seeded trust {seeded} must outweigh the catch-all {fallback}"
@@ -533,12 +532,18 @@ mod tests {
         // if its own filter is heavier than the default deny
         let app = weight_value(&weight(&WEIGHT_APP_RULE));
         let fallback = weight_value(&weight(&WEIGHT_ASK_FALLBACK));
-        assert!(app > fallback, "app rule {app} must outweigh ask mode {fallback}");
+        assert!(
+            app > fallback,
+            "app rule {app} must outweigh ask mode {fallback}"
+        );
     }
 
     #[test]
     fn the_ask_mode_weight_survives_the_round_trip_into_wfp() {
-        assert_eq!(weight_value(&weight(&WEIGHT_ASK_FALLBACK)), WEIGHT_ASK_FALLBACK);
+        assert_eq!(
+            weight_value(&weight(&WEIGHT_ASK_FALLBACK)),
+            WEIGHT_ASK_FALLBACK
+        );
     }
 
     #[test]

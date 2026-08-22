@@ -96,8 +96,7 @@ pub fn secure_state() -> std::io::Result<()> {
 pub fn secure_state() -> std::io::Result<()> {
     const STATE_ROOT: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;GX;;;RC)";
     const PRIVATE: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
-    const PLUGINS: &str =
-        "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;RC)";
+    const PLUGINS: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;RC)";
 
     let root = data_dir();
     let plugins = plugins_dir();

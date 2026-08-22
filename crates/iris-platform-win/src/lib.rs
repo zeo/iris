@@ -35,10 +35,10 @@ pub use egress::{AppPin, PluginNet};
 #[cfg(windows)]
 pub use etw::Monitor;
 #[cfg(windows)]
+pub use netevent::DeniedConnection as PendingConnection;
+#[cfg(windows)]
 pub use spawn::{random_token, spawn_restricted, RestrictedChild};
 #[cfg(windows)]
 pub use svc::ServiceMap;
-#[cfg(windows)]
-pub use netevent::DeniedConnection as PendingConnection;
 #[cfg(windows)]
 pub use wfp::Wfp;

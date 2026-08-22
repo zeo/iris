@@ -135,6 +135,9 @@ export function initEngine() {
       setTick(null);
       setRing([]);
       setCaptureDegraded(false);
+      // the reconnect's first tick must land immediately, not wait out a stale
+      // cadence window measured against the pre-outage stamp
+      lastVisibleTick = 0;
     }
   });
 

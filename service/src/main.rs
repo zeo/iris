@@ -203,6 +203,11 @@ pub(crate) async fn run_engine() -> anyhow::Result<()> {
 
 #[cfg(any(windows, target_os = "linux"))]
 pub(crate) async fn watch_rules(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
+    // enforcement is sampled every second on Linux; require a run of bad
+    // samples before concluding the verdict workers are really gone, so one
+    // slow poll or a worker mid-restart does not tear down the whole engine.
+    #[cfg(target_os = "linux")]
+    let mut unhealthy_streak = 0u32;
     loop {
         #[cfg(windows)]
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -211,12 +216,26 @@ pub(crate) async fn watch_rules(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<
         #[cfg(windows)]
         let mut rules = rules.lock().unwrap_or_else(|error| error.into_inner());
         #[cfg(target_os = "linux")]
-        let rules = rules
-            .lock()
-            .map_err(|_| anyhow::anyhow!("rule store unavailable"))?;
-        #[cfg(target_os = "linux")]
-        if !rules.enforcement_healthy() {
-            anyhow::bail!("firewall enforcement worker stopped");
+        {
+            let healthy = rules
+                .lock()
+                .map(|rules| rules.enforcement_healthy())
+                // a poisoned guard means some rule call panicked; treat it like
+                // an unhealthy sample rather than killing monitoring outright
+                .unwrap_or(false);
+            if healthy {
+                unhealthy_streak = 0;
+            } else {
+                unhealthy_streak += 1;
+                tracing::warn!(
+                    streak = unhealthy_streak,
+                    "firewall enforcement is unhealthy"
+                );
+            }
+            const MAX_UNHEALTHY_SAMPLES: u32 = 15;
+            if unhealthy_streak >= MAX_UNHEALTHY_SAMPLES {
+                anyhow::bail!("firewall enforcement worker stopped");
+            }
         }
         #[cfg(windows)]
         match rules.retry_deferred() {

@@ -106,9 +106,13 @@ fn parse_action(s: Option<&str>) -> anyhow::Result<RuleAction> {
 }
 
 async fn exec(op: Op) -> anyhow::Result<()> {
-    let stream = transport::connect_admin()
-        .await
-        .context("could not open the admin channel (is the engine running?)")?;
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        transport::connect_admin(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("the engine did not answer the admin channel in time"))?
+    .context("could not open the admin channel (is the engine running?)")?;
     let (mut recv, mut send) = transport::split(stream);
 
     transport::write_frame(
@@ -165,12 +169,20 @@ async fn request(
     send: &mut transport::SendHalf,
     command: ClientMessage,
 ) -> anyhow::Result<Reply> {
-    transport::write_frame(send, &command).await?;
-    loop {
-        match transport::read_frame::<_, ServerMessage>(recv).await? {
-            Some(ServerMessage::Reply { result, .. }) => return Ok(result),
-            Some(_) => continue,
-            None => bail!("the engine closed the connection"),
+    let work = async {
+        transport::write_frame(send, &command).await?;
+        loop {
+            match transport::read_frame::<_, ServerMessage>(recv).await? {
+                Some(ServerMessage::Reply { result, .. }) => return Ok(result),
+                Some(_) => continue,
+                None => bail!("the engine closed the connection"),
+            }
         }
+    };
+    // the elevated run outlives a UAC prompt the user is watching, but it must
+    // never hang forever on an engine that stopped answering
+    match tokio::time::timeout(std::time::Duration::from_secs(30), work).await {
+        Ok(result) => result,
+        Err(_) => bail!("the engine did not answer in time"),
     }
 }

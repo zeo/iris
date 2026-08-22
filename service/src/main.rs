@@ -209,9 +209,7 @@ pub(crate) async fn watch_rules(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<
         #[cfg(target_os = "linux")]
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         #[cfg(windows)]
-        let mut rules = rules
-            .lock()
-            .map_err(|_| anyhow::anyhow!("rule store unavailable"))?;
+        let mut rules = rules.lock().unwrap_or_else(|error| error.into_inner());
         #[cfg(target_os = "linux")]
         let rules = rules
             .lock()

@@ -63,17 +63,18 @@ fn publish_pending(
     let mut to_publish = Vec::new();
     let store = store.lock().unwrap_or_else(|error| error.into_inner());
     let prompt_alerts = store.list_prompt_alerts();
-    let mut seen: HashMap<(iris_core::AppId, iris_core::Direction), iris_core::Alert> = prompt_alerts
-        .into_iter()
-        .filter_map(|alert| match &alert.kind {
-            AlertKind::NewApp {
-                app,
-                direction: Some(direction),
-                ..
-            } => Some(((app.clone(), *direction), alert)),
-            _ => None,
-        })
-        .collect();
+    let mut seen: HashMap<(iris_core::AppId, iris_core::Direction), iris_core::Alert> =
+        prompt_alerts
+            .into_iter()
+            .filter_map(|alert| match &alert.kind {
+                AlertKind::NewApp {
+                    app,
+                    direction: Some(direction),
+                    ..
+                } => Some(((app.clone(), *direction), alert)),
+                _ => None,
+            })
+            .collect();
 
     for connection in unthrottled {
         store.ensure_app(connection.app.as_str(), None, now);
@@ -316,154 +317,175 @@ pub fn spawn(
         start_pending_publisher(pending, store.clone(), engine.clone());
     }
 
-    tokio::spawn(async move {
-        #[cfg(has_platform)]
-        let byte_monitor = byte_monitor;
-        let mut ticks: u64 = 0;
-        // register everything already connected silently on the first tick so a
-        // fresh start does not toast every already-running app at once
-        let mut baseline_done = false;
-        // remote endpoints already handed to the enrichers, so each is resolved
-        // and pushed once rather than every tick it stays connected
-        let mut enriched_seen: HashSet<IpAddr> = HashSet::new();
+    // the sample loop runs on a dedicated thread, not the async reactor: every
+    // tick takes the store lock for its SQLite write, so a stalled reactor or
+    // one slow write must never delay samples for every connected UI. the
+    // loop's only engine work is a broadcast send that never blocks.
+    let sample_loop = std::thread::Builder::new()
+        .name("iris-sample-loop".to_string())
+        .spawn(move || {
+            #[cfg(has_platform)]
+            let byte_monitor = byte_monitor;
+            let mut ticks: u64 = 0;
+            // register everything already connected silently on the first tick so a
+            // fresh start does not toast every already-running app at once
+            let mut baseline_done = false;
+            // remote endpoints already handed to the enrichers, so each is resolved
+            // and pushed once rather than every tick it stays connected
+            let mut enriched_seen: HashSet<IpAddr> = HashSet::new();
 
-        loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let now = now_ms();
-            let tick = tracker.tick(now);
-            #[cfg(target_os = "linux")]
-            let recent_flows: HashMap<String, crate::platform::RecentFlow> = byte_monitor
-                .as_ref()
-                .map(|monitor| {
-                    monitor
-                        .take_recent_flows()
-                        .into_iter()
-                        .map(|flow| (flow.path.clone(), flow))
-                        .collect()
-                })
-                .unwrap_or_default();
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let now = now_ms();
+                let tick = tracker.tick(now);
+                #[cfg(target_os = "linux")]
+                let recent_flows: HashMap<String, crate::platform::RecentFlow> = byte_monitor
+                    .as_ref()
+                    .map(|monitor| {
+                        monitor
+                            .take_recent_flows()
+                            .into_iter()
+                            .map(|flow| (flow.path.clone(), flow))
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-            // record usage + first-seen alerts under one store lock. recover a
-            // poisoned guard so one panicking tick never silently ends all
-            // history and alerting
-            {
-                let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
-                let alerting = baseline_done;
-                let fresh_apps = store.record_tick(&tick);
-                baseline_done = true;
-                for app in &tick.apps {
-                    if app.online && fresh_apps.contains(&app.app) && alerting {
-                        let connection = app
-                            .processes
-                            .iter()
-                            .flat_map(|process| &process.conns)
-                            .next();
-                        #[cfg(target_os = "linux")]
-                        let closed = recent_flows.get(app.app.as_str());
-                        let alert = store.insert_alert(
-                            &AlertKind::NewApp {
-                                app: app.app.clone(),
-                                remote: connection.map(|conn| conn.remote.clone()).or({
-                                    #[cfg(target_os = "linux")]
-                                    {
-                                        closed.map(|flow| flow.remote.clone())
-                                    }
-                                    #[cfg(not(target_os = "linux"))]
-                                    {
-                                        None
-                                    }
-                                }),
-                                direction: connection.map(|conn| conn.direction).or({
-                                    #[cfg(target_os = "linux")]
-                                    {
-                                        closed.map(|flow| flow.direction)
-                                    }
-                                    #[cfg(not(target_os = "linux"))]
-                                    {
-                                        None
-                                    }
-                                }),
-                            },
-                            now,
-                        );
-                        engine.publish(ServerMessage::Alert(alert));
-                    }
-                }
-            }
-
-            // gather remote endpoints not enriched yet, before the tick is moved
-            let mut new_targets: Vec<EnrichTarget> = Vec::new();
-            for app in &tick.apps {
-                for proc in &app.processes {
-                    for conn in &proc.conns {
-                        let ip = conn.remote.addr;
-                        if enriched_seen.insert(ip) {
-                            new_targets.push(EnrichTarget::Endpoint(ip));
-                        }
-                    }
-                }
-            }
-            // bound the seen-set over a long session; a re-resolve after a clear
-            // is a cache hit in the registry, so clearing is cheap
-            if enriched_seen.len() > 8192 {
-                enriched_seen.clear();
-            }
-
-            engine.publish(ServerMessage::Tick(tick));
-
-            // resolve and push enrichment off the tick path so a slow enricher
-            // never delays the next sample. this runs on a blocking thread: a
-            // built-in enricher may touch disk (the watchlist file) and an
-            // out-of-process plugin proxy blocks on a pipe round-trip, neither of
-            // which may run on an async worker.
-            if !new_targets.is_empty() {
-                let engine = engine.clone();
-                let enrich = enrich.clone();
-                let store = store.clone();
-                tokio::task::spawn_blocking(move || {
-                    for target in new_targets {
-                        let annotations = enrich.resolve(&target);
-                        if annotations.is_empty() {
-                            continue;
-                        }
-                        // a danger-severity annotation is alert-worthy: the first
-                        // sighting persists and toasts, not just a drawer badge
-                        for a in annotations
-                            .iter()
-                            .filter(|a| a.severity == Severity::Danger)
-                        {
-                            let kind = AlertKind::Plugin {
-                                source: a.label.clone(),
-                                message: format!("{} flagged {}", a.label, target_name(&target)),
-                            };
-                            let alert = store
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert_alert(&kind, now_ms());
+                // record usage + first-seen alerts under one store lock. recover a
+                // poisoned guard so one panicking tick never silently ends all
+                // history and alerting
+                {
+                    let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
+                    let alerting = baseline_done;
+                    let fresh_apps = store.record_tick(&tick);
+                    baseline_done = true;
+                    for app in &tick.apps {
+                        if app.online && fresh_apps.contains(&app.app) && alerting {
+                            let connection = app
+                                .processes
+                                .iter()
+                                .flat_map(|process| &process.conns)
+                                .next();
+                            #[cfg(target_os = "linux")]
+                            let closed = recent_flows.get(app.app.as_str());
+                            let alert = store.insert_alert(
+                                &AlertKind::NewApp {
+                                    app: app.app.clone(),
+                                    remote: connection.map(|conn| conn.remote.clone()).or({
+                                        #[cfg(target_os = "linux")]
+                                        {
+                                            closed.map(|flow| flow.remote.clone())
+                                        }
+                                        #[cfg(not(target_os = "linux"))]
+                                        {
+                                            None
+                                        }
+                                    }),
+                                    direction: connection.map(|conn| conn.direction).or({
+                                        #[cfg(target_os = "linux")]
+                                        {
+                                            closed.map(|flow| flow.direction)
+                                        }
+                                        #[cfg(not(target_os = "linux"))]
+                                        {
+                                            None
+                                        }
+                                    }),
+                                },
+                                now,
+                            );
                             engine.publish(ServerMessage::Alert(alert));
                         }
-                        engine.publish(ServerMessage::Enrichment {
-                            target,
-                            annotations,
-                        });
                     }
-                });
-            }
+                }
 
-            ticks += 1;
-            if ticks.is_multiple_of(30) {
-                tracker.clear_cache();
-                #[cfg(has_platform)]
-                if let Some(m) = byte_monitor.as_ref() {
-                    m.clear_cache();
-                    m.refresh_adapters();
+                // gather remote endpoints not enriched yet, before the tick is moved
+                let mut new_targets: Vec<EnrichTarget> = Vec::new();
+                for app in &tick.apps {
+                    for proc in &app.processes {
+                        for conn in &proc.conns {
+                            let ip = conn.remote.addr;
+                            if enriched_seen.insert(ip) {
+                                new_targets.push(EnrichTarget::Endpoint(ip));
+                            }
+                        }
+                    }
+                }
+                // bound the seen-set over a long session; a re-resolve after a clear
+                // is a cache hit in the registry, so clearing is cheap
+                if enriched_seen.len() > 8192 {
+                    enriched_seen.clear();
+                }
+
+                engine.publish(ServerMessage::Tick(tick));
+
+                // resolve and push enrichment off the tick path so a slow enricher
+                // never delays the next sample. this runs on a blocking thread: a
+                // built-in enricher may touch disk (the watchlist file) and an
+                // out-of-process plugin proxy blocks on a pipe round-trip, neither of
+                // which may run on an async worker.
+                if !new_targets.is_empty() {
+                    let engine = engine.clone();
+                    let enrich = enrich.clone();
+                    let store = store.clone();
+                    std::thread::Builder::new()
+                        .name("iris-enrich".to_string())
+                        .spawn(move || {
+                            for target in new_targets {
+                                let annotations = enrich.resolve(&target);
+                                if annotations.is_empty() {
+                                    continue;
+                                }
+                                // a danger-severity annotation is alert-worthy: the first
+                                // sighting persists and toasts, not just a drawer badge
+                                for a in annotations
+                                    .iter()
+                                    .filter(|a| a.severity == Severity::Danger)
+                                {
+                                    let kind = AlertKind::Plugin {
+                                        source: a.label.clone(),
+                                        message: format!(
+                                            "{} flagged {}",
+                                            a.label,
+                                            target_name(&target)
+                                        ),
+                                    };
+                                    let alert = store
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .insert_alert(&kind, now_ms());
+                                    engine.publish(ServerMessage::Alert(alert));
+                                }
+                                engine.publish(ServerMessage::Enrichment {
+                                    target,
+                                    annotations,
+                                });
+                            }
+                        })
+                        .ok();
+                }
+
+                ticks += 1;
+                if ticks.is_multiple_of(30) {
+                    tracker.clear_cache();
+                    #[cfg(has_platform)]
+                    if let Some(m) = byte_monitor.as_ref() {
+                        m.clear_cache();
+                        m.refresh_adapters();
+                    }
+                }
+                // prune usage older than 45 days, hourly
+                if ticks.is_multiple_of(3600) {
+                    let store = store.lock().unwrap_or_else(|e| e.into_inner());
+                    store.prune_usage(now.saturating_sub(45 * 86_400_000));
                 }
             }
-            // prune usage older than 45 days, hourly
-            if ticks.is_multiple_of(3600) {
-                let store = store.lock().unwrap_or_else(|e| e.into_inner());
-                store.prune_usage(now.saturating_sub(45 * 86_400_000));
-            }
-        }
-    });
+        })
+        .and_then(|handle| {
+            handle
+                .join()
+                .map_err(|_| std::io::Error::other("sample loop panicked"))
+        });
+    if let Err(error) = sample_loop {
+        tracing::error!("sample loop could not start or died: {error}");
+    }
 }

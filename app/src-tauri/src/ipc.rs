@@ -466,7 +466,12 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                             continue;
                         };
                         let cadence_ms = state.cadence_ms.load(Ordering::Acquire);
-                        if tick.at_ms.saturating_sub(last_tick_emit) < cadence_ms {
+                        // a tick stamped before the last one (wall clock stepped
+                        // back after sleep) would otherwise stall the cadence
+                        // gate and freeze every view until it caught up
+                        if tick.at_ms < last_tick_emit
+                            || tick.at_ms.saturating_sub(last_tick_emit) < cadence_ms
+                        {
                             continue;
                         }
                         last_tick_emit = tick.at_ms;

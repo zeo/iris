@@ -117,10 +117,14 @@ impl Aggregator {
     }
 
     /// produce a sample for every tracked process, plus the adapter rollup,
-    /// over the window since the last flush, then reset the window
+    /// over the window since the last flush, then reset the window. the rate
+    /// is capped at one second's worth of bytes so a stalled tick (system
+    /// sleep, debugger) reports a momentary burst rather than hours of
+    /// accumulated traffic as a single-second spike.
     pub fn flush(&mut self, now_ms: u64) -> Flushed {
         let elapsed_ms = now_ms.saturating_sub(self.window_start_ms).max(1);
-        let per_sec = |bytes: u64| -> u64 { ((bytes as u128 * 1000) / elapsed_ms as u128) as u64 };
+        let elapsed = elapsed_ms.min(1000);
+        let per_sec = |bytes: u64| -> u64 { ((bytes as u128 * 1000) / elapsed as u128) as u64 };
 
         let mut procs = Vec::with_capacity(self.procs.len());
         for (pid, accum) in self.procs.iter_mut() {
@@ -235,5 +239,17 @@ mod tests {
         let second = agg.flush(2000).adapters;
         assert_eq!(second[0].rate_sent, 0);
         assert_eq!(second[0].total.sent, 500);
+    }
+
+    #[test]
+    fn a_stalled_window_does_not_report_hours_of_traffic_as_one_second() {
+        let mut agg = Aggregator::new(0);
+        agg.record(1, "c:/x.exe", None, ETH, 3_600_000_000, 0);
+        // the machine slept for an hour between ticks; the rate still reads as
+        // one second of traffic, and the window start advances to now so the
+        // next flush does not re-spike on the same backlog
+        let out = agg.flush(3_600_000_000).procs;
+        assert_eq!(out[0].rate_sent, 3_600_000_000);
+        assert_eq!(agg.flush(3_600_001_000).procs[0].rate_sent, 0);
     }
 }

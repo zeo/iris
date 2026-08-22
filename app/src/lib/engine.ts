@@ -136,7 +136,9 @@ export function initEngine() {
 
   listen<StatsTick>("engine-tick", (e) => {
     const t = e.payload;
-    if (t.at_ms - lastVisibleTick >= tickCadenceMs) {
+    // an out-of-order stamp (wall clock stepped back after sleep) must still
+    // pass the gate, or every view freezes on stale data until time catches up
+    if (t.at_ms < lastVisibleTick || t.at_ms - lastVisibleTick >= tickCadenceMs) {
       setTick(t);
       lastVisibleTick = t.at_ms;
     }

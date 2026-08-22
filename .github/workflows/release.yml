@@ -58,7 +58,15 @@ jobs:
           TERMIE_INSTALLER_PUBLIC_KEY: ${{ vars.TERMIE_INSTALLER_PUBLIC_KEY }}
           CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CERTIFICATE_THUMBPRINT }}
           TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+          WINDOWS_PFX: ${{ secrets.WINDOWS_PFX }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
         run: |
+          # hosted runners have no machine certificate; import ours before signing
+          $pfx = Join-Path $env:RUNNER_TEMP 'iris-signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_PFX))
+          Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My `
+            -Password (ConvertTo-SecureString $env:WINDOWS_PFX_PASSWORD -AsPlainText -Force) | Out-Null
+          Remove-Item $pfx
           cargo build --release --locked --manifest-path .rot-installer\Cargo.toml --bin rot-installer --bin rot-pack
           if ($LASTEXITCODE -ne 0) { throw "shared installer build failed" }
           New-Item -ItemType Directory -Force bridge | Out-Null
@@ -98,9 +106,17 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CERTIFICATE_THUMBPRINT }}
           TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+          WINDOWS_PFX: ${{ secrets.WINDOWS_PFX }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
         run: |
           $ver = $env:GITHUB_REF_NAME -replace '^v',''
           $stage = Join-Path $env:RUNNER_TEMP 'iris-rpack'
+          # hosted runners have no machine certificate; import ours before signing
+          $pfx = Join-Path $env:RUNNER_TEMP 'iris-signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_PFX))
+          Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My `
+            -Password (ConvertTo-SecureString $env:WINDOWS_PFX_PASSWORD -AsPlainText -Force) | Out-Null
+          Remove-Item $pfx
           New-Item -ItemType Directory -Force "$stage\engine","$stage\resources\geo" | Out-Null
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
             Sort-Object FullName -Descending | Select-Object -First 1

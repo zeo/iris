@@ -12,6 +12,10 @@ const PANEL_REFRESH_MS = 5_000;
 export function PanelView(props: { id: string; name: string }) {
   const [panel, setPanel] = createSignal<Panel | null>(null);
   const [err, setErr] = createSignal("");
+  // a quarantined plugin stops answering; the poll must not spin on it forever.
+  // after repeated failures, back off to a slow retry so recovery (the user
+  // toggling the plugin, or the engine restarting it) still shows up.
+  let failures = 0;
 
   const load = async () => {
     if (!engine.online()) return;
@@ -21,14 +25,31 @@ export function PanelView(props: { id: string; name: string }) {
       // widget rows (and their canvases) are not torn down and rebuilt every 5s
       setPanel((prev) => (JSON.stringify(prev) === JSON.stringify(fresh) ? prev : fresh));
       setErr("");
+      failures = 0;
     } catch (e) {
-      setErr(String(e));
+      if (!engine.online()) return;
+      failures += 1;
+      if (failures >= 3) {
+        setErr(`${props.name} is not responding. It may have crashed or been quarantined.`);
+      } else {
+        setErr(String(e));
+      }
     }
   };
 
   onMount(() => {
     load();
-    const timer = setInterval(load, PANEL_REFRESH_MS);
+    const timer = setInterval(() => {
+      // after three straight failures only retry every minute instead of every
+      // five seconds, so a dead plugin does not generate error traffic forever
+      if (failures < 3) {
+        void load();
+      } else if ((failures - 2) % 12 === 0) {
+        void load();
+      } else {
+        failures += 1;
+      }
+    }, PANEL_REFRESH_MS);
     onCleanup(() => clearInterval(timer));
   });
 

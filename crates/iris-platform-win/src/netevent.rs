@@ -18,7 +18,7 @@ use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineSetOption0, FwpmNetEventSubscribe4, FwpmNetEventUnsubscribe0, FWPM_ENGINE_OPTION,
     FWPM_NET_EVENT5, FWPM_NET_EVENT_FLAG_APP_ID_SET, FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET,
-    FWPM_NET_EVENT_FLAG_IP_VERSION_SET, FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET,
+    FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET,
     FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET, FWPM_NET_EVENT_SUBSCRIPTION0,
     FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, FWP_IP_VERSION_V6, FWP_UINT32, FWP_VALUE0,
 };
@@ -156,8 +156,7 @@ unsafe extern "system" fn on_net_event(_context: *mut core::ffi::c_void, event: 
     let Some(path) = app_id_path(&header.appId) else {
         return;
     };
-    let is_v6 = header.ipVersion == FWP_IP_VERSION_V6
-        || (has(FWPM_NET_EVENT_FLAG_IP_VERSION_SET) && header.ipVersion == FWP_IP_VERSION_V6);
+    let is_v6 = header.ipVersion == FWP_IP_VERSION_V6;
     let addr = if !has(FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET) {
         if is_v6 {
             IpAddr::V6(Ipv6Addr::UNSPECIFIED)
@@ -227,9 +226,10 @@ fn to_drive_path(path: &str) -> String {
     path.to_string()
 }
 
+type DeviceMapCache = (Option<std::time::Instant>, Arc<Vec<(String, String)>>);
+
 fn cached_device_map() -> Arc<Vec<(String, String)>> {
-    static CACHE: OnceLock<Mutex<(Option<std::time::Instant>, Arc<Vec<(String, String)>>)>> =
-        OnceLock::new();
+    static CACHE: OnceLock<Mutex<DeviceMapCache>> = OnceLock::new();
     let lock = CACHE.get_or_init(|| Mutex::new((None, Arc::new(Vec::new()))));
     if let Ok(mut guard) = lock.lock() {
         let needs_refresh = match guard.0 {

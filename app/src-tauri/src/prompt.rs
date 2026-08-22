@@ -112,7 +112,7 @@ fn show_window(app: &tauri::AppHandle, alert: Option<&Alert>) {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
 
-    let count = state.count.load(Ordering::Acquire).max(1).min(MAX_VISIBLE);
+    let count = state.count.load(Ordering::Acquire).clamp(1, MAX_VISIBLE);
 
     if let Some(window) = app.get_webview_window(LABEL) {
         let monitor = target_monitor(app, &window);

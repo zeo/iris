@@ -15,9 +15,14 @@ pub struct Update {
 
 #[tauri::command]
 pub async fn check_installer_update() -> Result<Option<Update>, String> {
-    tauri::async_runtime::spawn_blocking(check_installer_update_blocking)
-        .await
-        .map_err(|error| format!("updater task failed: {error}"))?
+    // a hung installer subprocess (network stall, antivirus scan) must not pin
+    // a blocking-pool thread and leave the settings check spinning forever;
+    // the frontend treats this like any other unreachable feed
+    let job = tauri::async_runtime::spawn_blocking(check_installer_update_blocking);
+    match tokio::time::timeout(std::time::Duration::from_secs(30), job).await {
+        Ok(result) => result.map_err(|error| format!("updater task failed: {error}"))?,
+        Err(_) => Err("the updater did not respond in time".into()),
+    }
 }
 
 fn check_installer_update_blocking() -> Result<Option<Update>, String> {

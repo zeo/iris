@@ -171,6 +171,17 @@ export function App() {
         </div>
       </Show>
 
+      <Show when={engine.online() && engine.captureDegraded()}>
+        <div class="install-banner degraded" role="status">
+          <Icon name="activity" />
+          <span>
+            Live throughput and usage history are temporarily incomplete: the
+            engine is recovering its traffic capture. Connection lists stay
+            current.
+          </span>
+        </div>
+      </Show>
+
       <main class="content">
         <Show when={current()} keyed>
           {(t) => (

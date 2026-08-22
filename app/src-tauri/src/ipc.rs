@@ -494,6 +494,9 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     ServerMessage::Proposal(proposal) => {
                         let _ = app.emit("engine-proposal", proposal);
                     }
+                    ServerMessage::CaptureDegraded { degraded } => {
+                        let _ = app.emit("engine-capture-degraded", degraded);
+                    }
                     ServerMessage::Reply { req, result } => {
                         if let Some(resp) = pending.remove(&req) {
                             let _ = resp.send(result);
@@ -619,6 +622,7 @@ async fn reconcile_alerts(
             Some(ServerMessage::Proposal(proposal)) => {
                 let _ = app.emit("engine-proposal", proposal);
             }
+            Some(ServerMessage::CaptureDegraded { .. }) => {}
             Some(ServerMessage::Tick(_) | ServerMessage::Welcome { .. }) => {}
             Some(ServerMessage::Reply { .. }) => {
                 anyhow::bail!("unexpected reply during alert restore")

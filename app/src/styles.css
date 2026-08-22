@@ -587,6 +587,9 @@ html {
   color: var(--steel);
   flex: none;
 }
+.install-banner.degraded svg {
+  color: var(--err);
+}
 .view {
   animation: rise var(--t-slow) var(--spring-soft);
 }

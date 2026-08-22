@@ -337,6 +337,10 @@ pub fn spawn(
             // remote endpoints already handed to the enrichers, so each is resolved
             // and pushed once rather than every tick it stays connected
             let mut enriched_seen: HashSet<IpAddr> = HashSet::new();
+            // whether the UI has been told byte capture is down; only transitions
+            // publish, so a long outage does not spam every client
+            #[cfg(all(has_platform, target_os = "windows"))]
+            let mut degraded_published = false;
 
             loop {
                 std::thread::sleep(Duration::from_secs(1));
@@ -495,12 +499,26 @@ pub fn spawn(
                             drop(dead);
                         }
                         crate::platform::Monitor::stop_leaked_sessions();
-                        byte_monitor = crate::platform::Monitor::start(agg.clone(), dns.clone())
-                            .map_err(|e| {
+                        let restarted = crate::platform::Monitor::start(agg.clone(), dns.clone());
+                        match restarted {
+                            Ok(monitor) => {
+                                byte_monitor = Some(monitor);
+                                if degraded_published {
+                                    engine.publish(ServerMessage::CaptureDegraded {
+                                        degraded: false,
+                                    });
+                                    degraded_published = false;
+                                }
+                            }
+                            Err(e) => {
                                 tracing::error!("byte monitor restart failed: {e}");
-                                e
-                            })
-                            .ok();
+                                if !degraded_published {
+                                    engine
+                                        .publish(ServerMessage::CaptureDegraded { degraded: true });
+                                    degraded_published = true;
+                                }
+                            }
+                        }
                     }
                 }
                 // prune usage older than 45 days, hourly

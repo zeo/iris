@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 /// v7 added bulk app forget, install state on the inventory, and the delegated
 /// rule-management grant that replaces a UAC prompt per rule change.
 /// v8 separates promptable alerts from decisions deferred during fullscreen.
-pub const PROTOCOL_VERSION: u32 = 8;
+/// v9 adds the byte-capture degraded push.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// what the UI shows for one installed plugin: its declared identity and
 /// capabilities, plus whether the user has consented and enabled it
@@ -192,6 +193,10 @@ pub enum ServerMessage {
     },
     /// a plugin proposed a rule; pushed so the review UI updates live
     Proposal(RuleProposal),
+    /// byte capture is degraded: connection lists keep flowing but per-app
+    /// throughput and usage history are incomplete. pushed on entering and
+    /// leaving the degraded state so the UI can say what is wrong.
+    CaptureDegraded { degraded: bool },
     /// correlated response to a client request
     Reply { req: u64, result: Reply },
 }

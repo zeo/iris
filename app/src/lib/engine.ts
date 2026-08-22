@@ -99,6 +99,9 @@ const [tick, setTick] = createSignal<StatsTick | null>(null);
 const [ring, setRing] = createSignal<Sample[]>([]);
 // annotations resolved by the engine, keyed by endpoint ip
 const [enrichment, setEnrichment] = createSignal<Map<string, Annotation[]>>(new Map());
+// byte capture is down while connections still flow; throughput and usage
+// history are incomplete until the engine recovers the capture session
+const [captureDegraded, setCaptureDegraded] = createSignal(false);
 
 let started = false;
 let tickCadenceMs = 1000;
@@ -154,6 +157,10 @@ export function initEngine() {
 
   listen<RuleProposal>("engine-proposal", (e) => upsertProposal(e.payload));
 
+  listen<boolean>("engine-capture-degraded", (e) => {
+    setCaptureDegraded(e.payload);
+  });
+
   // seed from managed state so a status event that fired before this listener
   // registered is not missed
   invoke<Status>("engine_status")
@@ -180,6 +187,7 @@ export const engine = {
   tick,
   ring,
   enrichment,
+  captureDegraded,
   annotationsFor: (ip: string): Annotation[] => enrichment().get(ip) ?? [],
   down: () => tick()?.total_rate_recv ?? 0,
   up: () => tick()?.total_rate_sent ?? 0,

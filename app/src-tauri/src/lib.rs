@@ -127,7 +127,10 @@ pub fn run() {
                         .unwrap_or(1.0)
                 }
             };
-            *app.state::<DisplayScale>().0.lock().unwrap() = initial_scale;
+            *app.state::<DisplayScale>()
+                .0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = initial_scale;
             fit_main_window(app.handle(), initial_scale);
             // a login launch passes --tray so it comes up quietly in the tray
             if std::env::args().any(|a| a == "--tray") {
@@ -166,7 +169,7 @@ fn report_display_scale(
     };
     {
         let state = app.state::<DisplayScale>();
-        let mut current = state.0.lock().unwrap();
+        let mut current = state.0.lock().unwrap_or_else(|error| error.into_inner());
         // only react to a genuine change: re-fitting on every duplicate report
         // would fight a window the user has since resized
         if (*current - scale).abs() < 0.005 {

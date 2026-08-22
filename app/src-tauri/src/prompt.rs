@@ -34,10 +34,15 @@ pub(crate) fn webview_scale() -> f64 {
 
 /// the webview's measured device-pixel-ratio, best known so far
 fn current_scale(app: &tauri::AppHandle) -> f64 {
-    app.try_state::<crate::DisplayScale>()
-        .map(|state| *state.0.lock().unwrap())
-        .filter(|scale| scale.is_finite() && *scale > 0.0)
-        .unwrap_or(1.0)
+    let scale = match app.try_state::<crate::DisplayScale>() {
+        Some(state) => *state.0.lock().unwrap_or_else(|error| error.into_inner()),
+        None => 1.0,
+    };
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
 }
 
 /// the host window's physical size for `count` cards at `scale`. sizing in

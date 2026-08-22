@@ -134,6 +134,7 @@ export function initEngine() {
     if (!e.payload.online) {
       setTick(null);
       setRing([]);
+      setCaptureDegraded(false);
     }
   });
 

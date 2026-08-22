@@ -11,8 +11,6 @@ use crate::tracker::Tracker;
 use iris_core::{Aggregator, AlertKind, EnrichTarget, Severity};
 use iris_ipc::ServerMessage;
 use iris_store::Store;
-#[cfg(target_os = "linux")]
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -33,6 +31,7 @@ fn target_name(target: &EnrichTarget) -> String {
 }
 
 #[cfg(has_platform)]
+#[allow(unused_imports)]
 use std::collections::HashMap;
 
 #[cfg(has_platform)]
@@ -325,6 +324,7 @@ pub fn spawn(
         .name("iris-sample-loop".to_string())
         .spawn(move || {
             #[cfg(has_platform)]
+            #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
             let mut byte_monitor = byte_monitor;
             #[cfg(all(has_platform, target_os = "windows"))]
             let agg = agg;
@@ -361,6 +361,7 @@ pub fn spawn(
                 // record usage + first-seen alerts under one store lock. recover a
                 // poisoned guard so one panicking tick never silently ends all
                 // history and alerting
+                #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
                 let any_online = tick.apps.iter().any(|app| app.online);
                 {
                     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());

@@ -6,8 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
-### Fixed
+## [0.1.14] - 2026-08-23
 
+### Fixed
 - Throughput sampling survives suspend/resume: rates no longer spike after a clock step, out-of-order ticks no longer stall the live view, and the sample loop no longer shares a reactor with request handling.
 - A stalled byte-capture session is detected and restarted automatically; the interface shows a clear degraded state while capture is down and clears it when traffic resumes.
 - Firewall rule changes keep working after a poisoned rule-store lock on the admin channel and in the desktop UI.

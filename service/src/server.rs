@@ -726,12 +726,13 @@ async fn handle_admin(
     while let Some(msg) = transport::read_frame::<_, ClientMessage>(&mut recv).await? {
         match msg {
             ClientMessage::AddRule { req, rule } => {
-                let result = rules
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("rule store unavailable"))
-                    .and_then(|mut r| r.add(rule))
-                    .map(Reply::RuleAdded)
-                    .unwrap_or_else(|e| Reply::Error(e.to_string()));
+                let result = match rules.lock() {
+                    Ok(mut rules) => match rules.add(rule) {
+                        Ok(stored) => Reply::RuleAdded(stored),
+                        Err(e) => Reply::Error(e.to_string()),
+                    },
+                    Err(_) => Reply::Error("rule store unavailable".into()),
+                };
                 reply(&mut send, req, result).await?;
             }
             ClientMessage::RemoveRule { req, id } => {
@@ -764,12 +765,13 @@ async fn handle_admin(
                     .map(|s| s.resolve_proposal(id, accept))
                     .unwrap_or(None);
                 let result = match settled {
-                    Some(p) if accept => rules
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("rule store unavailable"))
-                        .and_then(|mut r| r.add(p.rule))
-                        .map(Reply::RuleAdded)
-                        .unwrap_or_else(|e| Reply::Error(e.to_string())),
+                    Some(p) if accept => match rules.lock() {
+                        Ok(mut rules) => match rules.add(p.rule) {
+                            Ok(stored) => Reply::RuleAdded(stored),
+                            Err(e) => Reply::Error(e.to_string()),
+                        },
+                        Err(_) => Reply::Error("rule store unavailable".into()),
+                    },
                     Some(_) => Reply::Ok,
                     None => Reply::Error("no pending proposal with that id".into()),
                 };

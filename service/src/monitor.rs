@@ -12,6 +12,7 @@ use iris_core::{Aggregator, AlertKind, EnrichTarget, Severity};
 use iris_ipc::ServerMessage;
 use iris_store::Store;
 use std::collections::HashSet;
+use std::io;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -303,11 +304,12 @@ pub fn spawn(
     };
 
     #[cfg(has_platform)]
-    let mut tracker = Tracker::new(agg.clone(), dns.clone());
-    #[cfg(not(has_platform))]
-    let mut tracker = Tracker::new(agg);
-
     #[cfg(has_platform)]
+    // the first monitor handle moves into the first spawned sampler; later
+    // respawns start with no capture and their ETW restart path brings it
+    // back within 30 ticks, the same self-heal a degraded boot gets
+    let mut first_monitor = Some(byte_monitor);
+
     if let Some(pending) = rules
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -320,223 +322,253 @@ pub fn spawn(
     // tick takes the store lock for its SQLite write, so a stalled reactor or
     // one slow write must never delay samples for every connected UI. the
     // loop's only engine work is a broadcast send that never blocks.
-    let sample_loop = std::thread::Builder::new()
-        .name("iris-sample-loop".to_string())
-        .spawn(move || {
+    // a panic inside a tick must not end monitoring for the life of the process,
+    // and the SCM only restarts the engine when the service reports failure, so
+    // the sampling thread is respawned here instead of dying with the panic
+    loop {
+        let spawned = {
+            let engine = engine.clone();
+            let rules = rules.clone();
+            let store = store.clone();
+            let enrich = enrich.clone();
+            let agg = agg.clone();
             #[cfg(has_platform)]
-            let mut byte_monitor = byte_monitor;
-            #[cfg(all(has_platform, target_os = "windows"))]
-            let agg = agg;
-            #[cfg(all(has_platform, target_os = "windows"))]
-            let dns = dns;
-            let mut ticks: u64 = 0;
-            // register everything already connected silently on the first tick so a
-            // fresh start does not toast every already-running app at once
-            let mut baseline_done = false;
-            // remote endpoints already handed to the enrichers, so each is resolved
-            // and pushed once rather than every tick it stays connected
-            let mut enriched_seen: HashSet<IpAddr> = HashSet::new();
-            // whether the UI has been told byte capture is down; only transitions
-            // publish, so a long outage does not spam every client
-            #[cfg(all(has_platform, target_os = "windows"))]
-            let mut degraded_published = false;
-
-            loop {
-                std::thread::sleep(Duration::from_secs(1));
-                let now = now_ms();
-                let tick = tracker.tick(now);
-                #[cfg(target_os = "linux")]
-                let recent_flows: HashMap<String, crate::platform::RecentFlow> = byte_monitor
-                    .as_ref()
-                    .map(|monitor| {
-                        monitor
-                            .take_recent_flows()
-                            .into_iter()
-                            .map(|flow| (flow.path.clone(), flow))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                // record usage + first-seen alerts under one store lock. recover a
-                // poisoned guard so one panicking tick never silently ends all
-                // history and alerting
-                #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
-                let any_online = tick.apps.iter().any(|app| app.online);
-                {
-                    let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
-                    let alerting = baseline_done;
-                    let fresh_apps = store.record_tick(&tick);
-                    baseline_done = true;
-                    for app in &tick.apps {
-                        if app.online && fresh_apps.contains(&app.app) && alerting {
-                            let connection = app
-                                .processes
-                                .iter()
-                                .flat_map(|process| &process.conns)
-                                .next();
-                            #[cfg(target_os = "linux")]
-                            let closed = recent_flows.get(app.app.as_str());
-                            let alert = store.insert_alert(
-                                &AlertKind::NewApp {
-                                    app: app.app.clone(),
-                                    remote: connection.map(|conn| conn.remote.clone()).or({
-                                        #[cfg(target_os = "linux")]
-                                        {
-                                            closed.map(|flow| flow.remote.clone())
-                                        }
-                                        #[cfg(not(target_os = "linux"))]
-                                        {
-                                            None
-                                        }
-                                    }),
-                                    direction: connection.map(|conn| conn.direction).or({
-                                        #[cfg(target_os = "linux")]
-                                        {
-                                            closed.map(|flow| flow.direction)
-                                        }
-                                        #[cfg(not(target_os = "linux"))]
-                                        {
-                                            None
-                                        }
-                                    }),
-                                },
-                                now,
-                            );
-                            engine.publish(ServerMessage::Alert(alert));
-                        }
-                    }
-                }
-
-                // gather remote endpoints not enriched yet, before the tick is moved
-                let mut new_targets: Vec<EnrichTarget> = Vec::new();
-                for app in &tick.apps {
-                    for proc in &app.processes {
-                        for conn in &proc.conns {
-                            let ip = conn.remote.addr;
-                            if enriched_seen.insert(ip) {
-                                new_targets.push(EnrichTarget::Endpoint(ip));
-                            }
-                        }
-                    }
-                }
-                // bound the seen-set over a long session; a re-resolve after a clear
-                // is a cache hit in the registry, so clearing is cheap
-                if enriched_seen.len() > 8192 {
-                    enriched_seen.clear();
-                }
-
-                engine.publish(ServerMessage::Tick(tick));
-
-                // resolve and push enrichment off the tick path so a slow enricher
-                // never delays the next sample. this runs on a blocking thread: a
-                // built-in enricher may touch disk (the watchlist file) and an
-                // out-of-process plugin proxy blocks on a pipe round-trip, neither of
-                // which may run on an async worker.
-                if !new_targets.is_empty() {
-                    let engine = engine.clone();
-                    let enrich = enrich.clone();
-                    let store = store.clone();
-                    std::thread::Builder::new()
-                        .name("iris-enrich".to_string())
-                        .spawn(move || {
-                            for target in new_targets {
-                                let annotations = enrich.resolve(&target);
-                                if annotations.is_empty() {
-                                    continue;
-                                }
-                                // a danger-severity annotation is alert-worthy: the first
-                                // sighting persists and toasts, not just a drawer badge
-                                for a in annotations
-                                    .iter()
-                                    .filter(|a| a.severity == Severity::Danger)
-                                {
-                                    let kind = AlertKind::Plugin {
-                                        source: a.label.clone(),
-                                        message: format!(
-                                            "{} flagged {}",
-                                            a.label,
-                                            target_name(&target)
-                                        ),
-                                    };
-                                    let alert = store
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .insert_alert(&kind, now_ms());
-                                    engine.publish(ServerMessage::Alert(alert));
-                                }
-                                engine.publish(ServerMessage::Enrichment {
-                                    target,
-                                    annotations,
-                                });
-                            }
-                        })
-                        .ok();
-                }
-
-                ticks += 1;
-                if ticks.is_multiple_of(30) {
-                    tracker.clear_cache();
-                    #[cfg(has_platform)]
-                    if let Some(m) = byte_monitor.as_ref() {
-                        m.clear_cache();
-                        m.refresh_adapters();
-                    }
-                }
-                // a dead ETW session is invisible from inside: the trace object
-                // still exists, events just stop. the one observable symptom is
-                // an old last-event stamp while the connection view keeps
-                // finding active sockets, so restart the capture when both hold.
-                // quiet traffic with an old stamp stays alone.
-                #[cfg(all(has_platform, target_os = "windows"))]
-                if ticks.is_multiple_of(30) {
-                    const ETW_STALE_MS: u64 = 20_000;
-                    let capture_dead = byte_monitor
-                        .as_ref()
-                        .is_some_and(|m| m.ms_since_last_event() > ETW_STALE_MS);
-                    let capture_missing = byte_monitor.is_none();
-                    if (capture_dead && any_online) || capture_missing {
-                        tracing::warn!("byte capture stalled, restarting the ETW session");
-                        if capture_dead {
-                            if let Some(dead) = byte_monitor.take() {
-                                drop(dead);
-                            }
-                        }
-                        crate::platform::Monitor::stop_leaked_sessions();
-                        let restarted = crate::platform::Monitor::start(agg.clone(), dns.clone());
-                        match restarted {
-                            Ok(monitor) => {
-                                byte_monitor = Some(monitor);
-                                if degraded_published {
-                                    engine.publish(ServerMessage::CaptureDegraded {
-                                        degraded: false,
-                                    });
-                                    degraded_published = false;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("byte monitor restart failed: {e}");
-                                if !degraded_published {
-                                    engine
-                                        .publish(ServerMessage::CaptureDegraded { degraded: true });
-                                    degraded_published = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                // prune usage older than 45 days, hourly
-                if ticks.is_multiple_of(3600) {
-                    let store = store.lock().unwrap_or_else(|e| e.into_inner());
-                    store.prune_usage(now.saturating_sub(45 * 86_400_000));
-                }
-            }
-        })
-        .and_then(|handle| {
+            let dns = dns.clone();
+            #[cfg(has_platform)]
+            let byte_monitor = first_monitor.take().unwrap_or_else(|| {
+                tracing::warn!("respawned sample loop will retry byte capture");
+                None
+            });
+            std::thread::Builder::new()
+                .name("iris-sample-loop".to_string())
+                .spawn(move || sample_forever(engine, rules, store, enrich, agg, dns, byte_monitor))
+                .map_err(io::Error::other)
+        };
+        let outcome = spawned.and_then(|handle| {
             handle
                 .join()
-                .map_err(|_| std::io::Error::other("sample loop panicked"))
+                .map_err(|_| std::io::Error::other("sample thread panicked"))
         });
-    if let Err(error) = sample_loop {
-        tracing::error!("sample loop could not start or died: {error}");
+        match outcome {
+            Ok(()) => break,
+            Err(error) => {
+                tracing::error!("sample thread ended ({error}); restarting in 1s");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
+/// run the per-second sampler until it unwinds. the spawner in [`spawn`]
+/// restarts this whole function after a panic so one bad tick never ends
+/// monitoring.
+#[cfg_attr(not(has_platform), allow(unused_variables))]
+fn sample_forever(
+    engine: Engine,
+    _rules: Arc<Mutex<RuleStore>>,
+    store: Arc<Mutex<Store>>,
+    enrich: Arc<EnrichmentRegistry>,
+    #[cfg(has_platform)] agg: Arc<Mutex<Aggregator>>,
+    #[cfg(has_platform)] dns: crate::platform::DnsMap,
+    #[cfg(has_platform)] mut byte_monitor: Option<crate::platform::Monitor>,
+) {
+    #[cfg(has_platform)]
+    let mut tracker = Tracker::new(agg.clone(), dns.clone());
+    #[cfg(not(has_platform))]
+    let mut tracker = Tracker::new(agg);
+
+    let mut ticks: u64 = 0;
+    // register everything already connected silently on the first tick so a
+    // fresh start does not toast every already-running app at once
+    let mut baseline_done = false;
+    // remote endpoints already handed to the enrichers, so each is resolved
+    // and pushed once rather than every tick it stays connected
+    let mut enriched_seen: HashSet<IpAddr> = HashSet::new();
+    // whether the UI has been told byte capture is down; only transitions
+    // publish, so a long outage does not spam every client
+    #[cfg(all(has_platform, target_os = "windows"))]
+    let mut degraded_published = false;
+
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let now = now_ms();
+        let tick = tracker.tick(now);
+        #[cfg(target_os = "linux")]
+        let recent_flows: HashMap<String, crate::platform::RecentFlow> = byte_monitor
+            .as_ref()
+            .map(|monitor| {
+                monitor
+                    .take_recent_flows()
+                    .into_iter()
+                    .map(|flow| (flow.path.clone(), flow))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // record usage + first-seen alerts under one store lock. recover a
+        // poisoned guard so one panicking tick never silently ends all
+        // history and alerting
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+        let any_online = tick.apps.iter().any(|app| app.online);
+        {
+            let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
+            let alerting = baseline_done;
+            let fresh_apps = store.record_tick(&tick);
+            baseline_done = true;
+            for app in &tick.apps {
+                if app.online && fresh_apps.contains(&app.app) && alerting {
+                    let connection = app
+                        .processes
+                        .iter()
+                        .flat_map(|process| &process.conns)
+                        .next();
+                    #[cfg(target_os = "linux")]
+                    let closed = recent_flows.get(app.app.as_str());
+                    let alert = store.insert_alert(
+                        &AlertKind::NewApp {
+                            app: app.app.clone(),
+                            remote: connection.map(|conn| conn.remote.clone()).or({
+                                #[cfg(target_os = "linux")]
+                                {
+                                    closed.map(|flow| flow.remote.clone())
+                                }
+                                #[cfg(not(target_os = "linux"))]
+                                {
+                                    None
+                                }
+                            }),
+                            direction: connection.map(|conn| conn.direction).or({
+                                #[cfg(target_os = "linux")]
+                                {
+                                    closed.map(|flow| flow.direction)
+                                }
+                                #[cfg(not(target_os = "linux"))]
+                                {
+                                    None
+                                }
+                            }),
+                        },
+                        now,
+                    );
+                    engine.publish(ServerMessage::Alert(alert));
+                }
+            }
+        }
+
+        // gather remote endpoints not enriched yet, before the tick is moved
+        let mut new_targets: Vec<EnrichTarget> = Vec::new();
+        for app in &tick.apps {
+            for proc in &app.processes {
+                for conn in &proc.conns {
+                    let ip = conn.remote.addr;
+                    if enriched_seen.insert(ip) {
+                        new_targets.push(EnrichTarget::Endpoint(ip));
+                    }
+                }
+            }
+        }
+        // bound the seen-set over a long session; a re-resolve after a clear
+        // is a cache hit in the registry, so clearing is cheap
+        if enriched_seen.len() > 8192 {
+            enriched_seen.clear();
+        }
+
+        engine.publish(ServerMessage::Tick(tick));
+
+        // resolve and push enrichment off the tick path so a slow enricher
+        // never delays the next sample. this runs on a blocking thread: a
+        // built-in enricher may touch disk (the watchlist file) and an
+        // out-of-process plugin proxy blocks on a pipe round-trip, neither of
+        // which may run on an async worker.
+        if !new_targets.is_empty() {
+            let engine = engine.clone();
+            let enrich = enrich.clone();
+            let store = store.clone();
+            std::thread::Builder::new()
+                .name("iris-enrich".to_string())
+                .spawn(move || {
+                    for target in new_targets {
+                        let annotations = enrich.resolve(&target);
+                        if annotations.is_empty() {
+                            continue;
+                        }
+                        // a danger-severity annotation is alert-worthy: the first
+                        // sighting persists and toasts, not just a drawer badge
+                        for a in annotations
+                            .iter()
+                            .filter(|a| a.severity == Severity::Danger)
+                        {
+                            let kind = AlertKind::Plugin {
+                                source: a.label.clone(),
+                                message: format!("{} flagged {}", a.label, target_name(&target)),
+                            };
+                            let alert = store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert_alert(&kind, now_ms());
+                            engine.publish(ServerMessage::Alert(alert));
+                        }
+                        engine.publish(ServerMessage::Enrichment {
+                            target,
+                            annotations,
+                        });
+                    }
+                })
+                .ok();
+        }
+
+        ticks += 1;
+        if ticks.is_multiple_of(30) {
+            tracker.clear_cache();
+            #[cfg(has_platform)]
+            if let Some(m) = byte_monitor.as_ref() {
+                m.clear_cache();
+                m.refresh_adapters();
+            }
+        }
+        // a dead ETW session is invisible from inside: the trace object
+        // still exists, events just stop. the one observable symptom is
+        // an old last-event stamp while the connection view keeps
+        // finding active sockets, so restart the capture when both hold.
+        // quiet traffic with an old stamp stays alone.
+        #[cfg(all(has_platform, target_os = "windows"))]
+        if ticks.is_multiple_of(30) {
+            const ETW_STALE_MS: u64 = 20_000;
+            let capture_dead = byte_monitor
+                .as_ref()
+                .is_some_and(|m| m.ms_since_last_event() > ETW_STALE_MS);
+            let capture_missing = byte_monitor.is_none();
+            if (capture_dead && any_online) || capture_missing {
+                tracing::warn!("byte capture stalled, restarting the ETW session");
+                if capture_dead {
+                    if let Some(dead) = byte_monitor.take() {
+                        drop(dead);
+                    }
+                }
+                crate::platform::Monitor::stop_leaked_sessions();
+                let restarted = crate::platform::Monitor::start(agg.clone(), dns.clone());
+                match restarted {
+                    Ok(monitor) => {
+                        byte_monitor = Some(monitor);
+                        if degraded_published {
+                            engine.publish(ServerMessage::CaptureDegraded { degraded: false });
+                            degraded_published = false;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("byte monitor restart failed: {e}");
+                        if !degraded_published {
+                            engine.publish(ServerMessage::CaptureDegraded { degraded: true });
+                            degraded_published = true;
+                        }
+                    }
+                }
+            }
+        }
+        // prune usage older than 45 days, hourly
+        if ticks.is_multiple_of(3600) {
+            let store = store.lock().unwrap_or_else(|e| e.into_inner());
+            store.prune_usage(now.saturating_sub(45 * 86_400_000));
+        }
     }
 }

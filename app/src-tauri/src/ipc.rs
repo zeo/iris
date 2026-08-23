@@ -436,6 +436,9 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
 
     let mut next_id: u64 = 1;
     let mut last_tick_emit = 0;
+    // the engine sends at least one tick per second, so a silent connection is
+    // detectable; a hung transport would otherwise read as online forever
+    let mut last_inbound = tokio::time::Instant::now();
     let mut pending: HashMap<u64, oneshot::Sender<Reply>> = HashMap::new();
     let (incoming_tx, mut incoming_rx) = mpsc::channel(16);
     tokio::spawn(async move {
@@ -459,6 +462,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
         tokio::select! {
             incoming = incoming_rx.recv() => {
                 let Some(incoming) = incoming else { break };
+                last_inbound = tokio::time::Instant::now();
                 let msg = incoming?;
                 match msg {
                     ServerMessage::Tick(mut tick) => {
@@ -547,6 +551,9 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     // drop the connection; the pending oneshot resolves as offline
                     return Err(e.into());
                 }
+            }
+            _ = tokio::time::sleep_until(last_inbound + Duration::from_secs(15)) => {
+                anyhow::bail!("engine went quiet (no frames for 15s)");
             }
         }
     }

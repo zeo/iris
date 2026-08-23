@@ -83,8 +83,15 @@ export function Protect() {
     return Date.now();
   };
 
+  // re-read on every engine reconnect, not just the first online transition:
+  // rules and the app inventory can change while the UI was offline (service
+  // restart, elevated import), so one missed refresh leaves stale rows until a
+  // manual action happens to trigger another read
+  let lastOnline = false;
   createEffect(() => {
     if (!engine.online()) return;
+    if (lastOnline) return;
+    lastOnline = true;
     refreshRules();
     refreshProposals();
     refreshKnownApps();

@@ -624,8 +624,8 @@ async fn reconcile_alerts(
             }
             Some(ServerMessage::CaptureDegraded { .. }) => {}
             Some(ServerMessage::Tick(_) | ServerMessage::Welcome { .. }) => {}
-            Some(ServerMessage::Reply { .. }) => {
-                anyhow::bail!("unexpected reply during alert restore")
+            Some(ServerMessage::Reply { req, .. }) => {
+                anyhow::bail!("unexpected reply (req {req}) during alert restore")
             }
             None => anyhow::bail!("engine disconnected during alert restore"),
         }

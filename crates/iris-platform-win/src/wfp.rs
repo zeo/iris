@@ -18,7 +18,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmFilterDeleteById0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0,
     FwpmGetAppIdFromFileName0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0,
     FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_FLAGS, FWPM_DISPLAY_DATA0,
-    FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_ENUM_TEMPLATE0,
+    FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_ENUM_TEMPLATE0, FWPM_FILTER_FLAG_PERSISTENT,
     FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
     FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0,
     FWPM_SUBLAYER0, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE,
@@ -147,6 +147,9 @@ impl Wfp {
     /// enumerate and delete every filter iris owns. we only ever add at the four
     /// ALE connect / recv-accept layers, so enumerating those by our provider key
     /// covers all of them.
+    ///
+    /// persistent filters from a previous run are included by default; the enum
+    /// template's flags field stays zero for that reason.
     unsafe fn clear_filters(&self) {
         const LAYERS: [GUID; 4] = [
             FWPM_LAYER_ALE_AUTH_CONNECT_V4,
@@ -254,6 +257,9 @@ impl Wfp {
                 filter.layerKey = layer;
                 filter.subLayerKey = IRIS_SUBLAYER;
                 filter.weight = weight(rule_weight);
+                // survive an ungraceful engine exit; the next startup wipes and
+                // re-applies from the rules file either way
+                filter.flags = FWPM_FILTER_FLAG_PERSISTENT;
                 filter.numFilterConditions = conditions.len() as u32;
                 filter.filterCondition = conditions.as_mut_ptr();
                 filter.action = FWPM_ACTION0 {

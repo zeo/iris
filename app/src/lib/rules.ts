@@ -50,8 +50,14 @@ export async function blockApp(path: string): Promise<void> {
 export async function unblockApp(path: string): Promise<void> {
   const p = pathKey(path);
   const hits = rules().filter((r) => r.rule.action === "block" && r.rule.app === p);
-  for (const r of hits) await invoke("rule_remove", { id: r.id });
+  // one round trip per rule, but never leave a half-finished unblock behind:
+  // a failure on the second rule (engine restart, declined prompt) must still
+  // report, and the caller's catch shows it
+  try {
+    for (const r of hits) await invoke("rule_remove", { id: r.id });
+  } finally {
   await refreshRules();
+  }
 }
 
 export async function removeRule(id: number): Promise<void> {

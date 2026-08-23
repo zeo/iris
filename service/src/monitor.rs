@@ -324,7 +324,6 @@ pub fn spawn(
         .name("iris-sample-loop".to_string())
         .spawn(move || {
             #[cfg(has_platform)]
-            #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
             let mut byte_monitor = byte_monitor;
             #[cfg(all(has_platform, target_os = "windows"))]
             let agg = agg;
@@ -494,10 +493,13 @@ pub fn spawn(
                     let capture_dead = byte_monitor
                         .as_ref()
                         .is_some_and(|m| m.ms_since_last_event() > ETW_STALE_MS);
-                    if capture_dead && any_online {
+                    let capture_missing = byte_monitor.is_none();
+                    if (capture_dead && any_online) || capture_missing {
                         tracing::warn!("byte capture stalled, restarting the ETW session");
-                        if let Some(dead) = byte_monitor.take() {
-                            drop(dead);
+                        if capture_dead {
+                            if let Some(dead) = byte_monitor.take() {
+                                drop(dead);
+                            }
                         }
                         crate::platform::Monitor::stop_leaked_sessions();
                         let restarted = crate::platform::Monitor::start(agg.clone(), dns.clone());

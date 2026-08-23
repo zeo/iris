@@ -24,6 +24,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWPM_SUBLAYER0, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE,
     FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0, FWP_FILTER_ENUM_OVERLAPPING,
     FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_NONE_SET, FWP_UINT32, FWP_UINT64, FWP_VALUE0,
+    FWPM_PROVIDER_FLAG_PERSISTENT, FWPM_SUBLAYER_FLAG_PERSISTENT,
 };
 use windows::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
@@ -113,6 +114,7 @@ impl Wfp {
             description: PWSTR(name.as_mut_ptr()),
         };
         // FWPM_E_ALREADY_EXISTS is fine on a warm start
+        provider.flags = FWPM_PROVIDER_FLAG_PERSISTENT;
         let _ = FwpmProviderAdd0(self.engine, &provider, None);
 
         let mut sublayer: FWPM_SUBLAYER0 = std::mem::zeroed();
@@ -123,6 +125,9 @@ impl Wfp {
         };
         sublayer.providerKey = &IRIS_PROVIDER as *const _ as *mut _;
         sublayer.weight = 0x8000;
+        // persistent like the filters: a non-persistent sublayer rejects
+        // persistent filter adds with FWP_E_LIFETIME_MISMATCH
+        sublayer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT;
         let _ = FwpmSubLayerAdd0(self.engine, &sublayer, None);
         Ok(())
     }

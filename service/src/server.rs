@@ -726,55 +726,76 @@ async fn handle_admin(
     while let Some(msg) = transport::read_frame::<_, ClientMessage>(&mut recv).await? {
         match msg {
             ClientMessage::AddRule { req, rule } => {
-                let result = match rules.lock() {
-                    Ok(mut rules) => match rules.add(rule) {
-                        Ok(stored) => Reply::RuleAdded(stored),
-                        Err(e) => Reply::Error(e.to_string()),
-                    },
-                    Err(_) => Reply::Error("rule store unavailable".into()),
-                };
+                let rules = rules.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    match rules.lock() {
+                        Ok(mut rules) => match rules.add(rule) {
+                            Ok(stored) => Reply::RuleAdded(stored),
+                            Err(e) => Reply::Error(e.to_string()),
+                        },
+                        Err(_) => Reply::Error("rule store unavailable".into()),
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| Reply::Error("the rule change failed".into()));
                 reply(&mut send, req, result).await?;
             }
             ClientMessage::RemoveRule { req, id } => {
-                let result = match rules.lock() {
-                    Ok(mut rules) => match rules.remove(id) {
-                        Ok(true) => Reply::Ok,
-                        Ok(false) => Reply::Error("no rule with that id".into()),
-                        Err(e) => Reply::Error(e.to_string()),
-                    },
-                    Err(_) => Reply::Error("rule store unavailable".into()),
-                };
+                let rules = rules.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    match rules.lock() {
+                        Ok(mut rules) => match rules.remove(id) {
+                            Ok(true) => Reply::Ok,
+                            Ok(false) => Reply::Error("no rule with that id".into()),
+                            Err(e) => Reply::Error(e.to_string()),
+                        },
+                        Err(_) => Reply::Error("rule store unavailable".into()),
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| Reply::Error("the rule change failed".into()));
                 reply(&mut send, req, result).await?;
             }
             ClientMessage::SetRuleEnabled { req, id, enabled } => {
-                let result = match rules.lock() {
-                    Ok(mut rules) => match rules.set_enabled(id, enabled) {
-                        Ok(Some(_)) => Reply::Ok,
-                        Ok(None) => Reply::Error("no rule with that id".into()),
-                        Err(e) => Reply::Error(e.to_string()),
-                    },
-                    Err(_) => Reply::Error("rule store unavailable".into()),
-                };
+                let rules = rules.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    match rules.lock() {
+                        Ok(mut rules) => match rules.set_enabled(id, enabled) {
+                            Ok(Some(_)) => Reply::Ok,
+                            Ok(None) => Reply::Error("no rule with that id".into()),
+                            Err(e) => Reply::Error(e.to_string()),
+                        },
+                        Err(_) => Reply::Error("rule store unavailable".into()),
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| Reply::Error("the rule change failed".into()));
                 reply(&mut send, req, result).await?;
             }
             // the elevated half of proposal review: settle it, and on accept
             // enforce the proposed rule through the one path that touches WFP
             ClientMessage::ResolveProposal { req, id, accept } => {
-                let settled = store
-                    .lock()
-                    .map(|s| s.resolve_proposal(id, accept))
-                    .unwrap_or(None);
-                let result = match settled {
-                    Some(p) if accept => match rules.lock() {
-                        Ok(mut rules) => match rules.add(p.rule) {
-                            Ok(stored) => Reply::RuleAdded(stored),
-                            Err(e) => Reply::Error(e.to_string()),
+                let rules = rules.clone();
+                let store = store.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let settled = store
+                        .lock()
+                        .map(|s| s.resolve_proposal(id, accept))
+                        .unwrap_or(None);
+                    match settled {
+                        Some(p) if accept => match rules.lock() {
+                            Ok(mut rules) => match rules.add(p.rule) {
+                                Ok(stored) => Reply::RuleAdded(stored),
+                                Err(e) => Reply::Error(e.to_string()),
+                            },
+                            Err(_) => Reply::Error("rule store unavailable".into()),
                         },
-                        Err(_) => Reply::Error("rule store unavailable".into()),
-                    },
-                    Some(_) => Reply::Ok,
-                    None => Reply::Error("no pending proposal with that id".into()),
-                };
+                        Some(_) => Reply::Ok,
+                        None => Reply::Error("no pending proposal with that id".into()),
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| Reply::Error("the rule change failed".into()));
                 reply(&mut send, req, result).await?;
             }
             // the one elevated step that buys the user out of every later

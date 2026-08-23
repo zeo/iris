@@ -299,7 +299,15 @@ impl Wfp {
     pub fn remove(&mut self, filter_ids: &[u64]) -> EngineResult<()> {
         unsafe {
             for id in filter_ids {
-                let _ = FwpmFilterDeleteById0(self.engine, *id);
+                // a delete that fails silently leaves the filter enforcing in
+                // BFE while the rules file says otherwise; surface it so the
+                // caller can report and retry instead of trusting a lie
+                let rc = FwpmFilterDeleteById0(self.engine, *id);
+                if !ok(rc) {
+                    return Err(EngineError::Os(format!(
+                        "FwpmFilterDeleteById0({id}) failed: {rc:#x}"
+                    )));
+                }
             }
         }
         Ok(())

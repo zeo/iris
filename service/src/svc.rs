@@ -39,8 +39,11 @@ fn status(
         controls_accepted: accepted,
         exit_code,
         checkpoint: u32::from(starting),
+        // start-pending covers store integrity checks and a full rules
+        // re-apply (over a thousand filters on a loaded install), which can
+        // outlast 15s on cold boot; SCM kills the process if the hint lapses
         wait_hint: if starting {
-            Duration::from_secs(15)
+            Duration::from_secs(60)
         } else {
             Duration::default()
         },

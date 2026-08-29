@@ -304,7 +304,6 @@ pub fn spawn(
     };
 
     #[cfg(has_platform)]
-    #[cfg(has_platform)]
     // the first monitor handle moves into the first spawned sampler; later
     // respawns start with no capture and their ETW restart path brings it
     // back within 30 ticks, the same self-heal a degraded boot gets
@@ -370,12 +369,18 @@ fn sample_forever(
     enrich: Arc<EnrichmentRegistry>,
     #[cfg(has_platform)] agg: Arc<Mutex<Aggregator>>,
     #[cfg(has_platform)] dns: crate::platform::DnsMap,
-    #[cfg(has_platform)] mut byte_monitor: Option<crate::platform::Monitor>,
+
+    #[cfg(has_platform)] byte_monitor: Option<crate::platform::Monitor>,
 ) {
     #[cfg(has_platform)]
     let mut tracker = Tracker::new(agg.clone(), dns.clone());
     #[cfg(not(has_platform))]
     let mut tracker = Tracker::new(agg);
+
+    // the ETW restart loop on Windows reassigns this; every other target only
+    // reads it, so mutability lives in a local instead of the signature
+    #[cfg(all(has_platform, target_os = "windows"))]
+    let mut byte_monitor = byte_monitor;
 
     let mut ticks: u64 = 0;
     // register everything already connected silently on the first tick so a

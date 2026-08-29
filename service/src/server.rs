@@ -727,14 +727,12 @@ async fn handle_admin(
         match msg {
             ClientMessage::AddRule { req, rule } => {
                 let rules = rules.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    match rules.lock() {
-                        Ok(mut rules) => match rules.add(rule) {
-                            Ok(stored) => Reply::RuleAdded(stored),
-                            Err(e) => Reply::Error(e.to_string()),
-                        },
-                        Err(_) => Reply::Error("rule store unavailable".into()),
-                    }
+                let result = tokio::task::spawn_blocking(move || match rules.lock() {
+                    Ok(mut rules) => match rules.add(rule) {
+                        Ok(stored) => Reply::RuleAdded(stored),
+                        Err(e) => Reply::Error(e.to_string()),
+                    },
+                    Err(_) => Reply::Error("rule store unavailable".into()),
                 })
                 .await
                 .unwrap_or_else(|_| Reply::Error("the rule change failed".into()));
@@ -742,15 +740,13 @@ async fn handle_admin(
             }
             ClientMessage::RemoveRule { req, id } => {
                 let rules = rules.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    match rules.lock() {
-                        Ok(mut rules) => match rules.remove(id) {
-                            Ok(true) => Reply::Ok,
-                            Ok(false) => Reply::Error("no rule with that id".into()),
-                            Err(e) => Reply::Error(e.to_string()),
-                        },
-                        Err(_) => Reply::Error("rule store unavailable".into()),
-                    }
+                let result = tokio::task::spawn_blocking(move || match rules.lock() {
+                    Ok(mut rules) => match rules.remove(id) {
+                        Ok(true) => Reply::Ok,
+                        Ok(false) => Reply::Error("no rule with that id".into()),
+                        Err(e) => Reply::Error(e.to_string()),
+                    },
+                    Err(_) => Reply::Error("rule store unavailable".into()),
                 })
                 .await
                 .unwrap_or_else(|_| Reply::Error("the rule change failed".into()));
@@ -758,15 +754,13 @@ async fn handle_admin(
             }
             ClientMessage::SetRuleEnabled { req, id, enabled } => {
                 let rules = rules.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    match rules.lock() {
-                        Ok(mut rules) => match rules.set_enabled(id, enabled) {
-                            Ok(Some(_)) => Reply::Ok,
-                            Ok(None) => Reply::Error("no rule with that id".into()),
-                            Err(e) => Reply::Error(e.to_string()),
-                        },
-                        Err(_) => Reply::Error("rule store unavailable".into()),
-                    }
+                let result = tokio::task::spawn_blocking(move || match rules.lock() {
+                    Ok(mut rules) => match rules.set_enabled(id, enabled) {
+                        Ok(Some(_)) => Reply::Ok,
+                        Ok(None) => Reply::Error("no rule with that id".into()),
+                        Err(e) => Reply::Error(e.to_string()),
+                    },
+                    Err(_) => Reply::Error("rule store unavailable".into()),
                 })
                 .await
                 .unwrap_or_else(|_| Reply::Error("the rule change failed".into()));

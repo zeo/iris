@@ -7,11 +7,14 @@ on:
   pull_request:
     branches: [main]
     paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
+  schedule:
+    - cron: '0 0 * * 0'
   workflow_dispatch:
 
-# the self-hosted runners build the whole (heavy) Rust workspace, so back-to-back
-# pushes would otherwise stack full runs. collapse a ref to its latest run: a new
-# push cancels the older in-progress or queued run for the same branch or PR.
+# the windows and linux jobs build the whole (heavy) Rust workspace on hosted
+# runners, so back-to-back pushes would otherwise stack full runs. collapse a
+# ref to its latest run: a new push cancels the older in-progress or queued run
+# for the same branch or PR.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -30,7 +33,7 @@ jobs:
   # frontend and validates the bundled engine binary, so the frontend is built and
   # the release engine produced before the cargo steps.
   windows:
-    if: github.actor == 'zeo' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -74,7 +77,7 @@ jobs:
   # nftables, NFQUEUE, the sandboxed spawn) is actually compiled and linted, since
   # it is empty on Windows.
   linux:
-    if: github.actor == 'zeo'
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -120,9 +123,10 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
 
-  # security advisory scan of the dependency tree (RUSTSEC database)
+  # security advisory scan of the dependency tree (RUSTSEC database); the
+  # weekly schedule catches advisories published after the last push
   audit:
-    if: github.actor == 'zeo'
+    if: github.event_name == 'schedule' || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

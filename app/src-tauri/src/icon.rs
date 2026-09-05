@@ -295,8 +295,8 @@ mod win {
 
         // GetDIBits gives BGRA. if the icon carried no alpha (legacy), make it
         // opaque; otherwise keep it.
-        let has_alpha = buf.chunks_exact(4).any(|p| p[3] != 0);
-        for px in buf.chunks_exact_mut(4) {
+        let has_alpha = buf.as_chunks::<4>().0.iter().any(|p| p[3] != 0);
+        for px in buf.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
             if !has_alpha {
                 px[3] = 255;

@@ -32,8 +32,9 @@ own pending alert through the active desktop session.
   (allow and notify), or everything off the machine is blocked (lockdown).
 - **Profiles**: rule sets and a firewall mode that switch with the network,
   recognized by the gateway's hardware address.
-- **Limits**: per-app upload caps through Windows QoS policies. Windows can
-  only shape what an app sends, so there are no download caps.
+- **Limits**: per-app upload caps, through QoS policies on Windows and an htb
+  class per app on Linux, keyed by a mark the engine puts on each new flow.
+  Only what an app sends is shaped, so there are no download caps.
 - **Activity**: a live table of every app's up and down rate, open connections,
   and the remote endpoints it is talking to. Open a connection for its host name,
   network scope, country, and a one-click kill.

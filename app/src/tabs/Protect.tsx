@@ -433,7 +433,7 @@ export function Protect() {
               <label class="field">
                 <input aria-label="Upload limit in KB/s" inputMode="numeric" value={limitKb()} onInput={(event) => setLimitKb(event.currentTarget.value)} />
               </label>
-              <small class="picker-note">KB/s upload. Windows can only cap what an app sends, not what it downloads.</small>
+              <small class="picker-note">KB/s upload. Caps limit what an app sends, not what it downloads, and take hold on its next connection.</small>
             </div>
           </Show>
           <div class="picker-scope" classList={{ hidden: action() === "limit" }}>

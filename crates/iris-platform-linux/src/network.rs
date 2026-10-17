@@ -28,6 +28,13 @@ pub fn current_network() -> Option<NetworkIdentity> {
     })
 }
 
+/// the interface the default route leaves through, which upload caps shape
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn default_device() -> Option<String> {
+    let routes = std::fs::read_to_string("/proc/net/route").ok()?;
+    default_route(&routes).map(|(interface, _)| interface)
+}
+
 /// `/proc/net/route` rows are `Iface Destination Gateway Flags RefCnt Use
 /// Metric ...` with addresses as little-endian hex
 fn default_route(table: &str) -> Option<(String, Option<Ipv4Addr>)> {

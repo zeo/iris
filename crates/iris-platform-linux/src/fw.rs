@@ -87,6 +87,8 @@ struct RuleMap {
     scoped: HashMap<u64, ScopedRule>,
     trusted: HashSet<String>,
     mode: FirewallMode,
+    /// upload cap marks by app key; an accepted first packet carries its mark
+    marks: HashMap<String, u32>,
 }
 
 struct ScopedRule {
@@ -158,6 +160,11 @@ impl RuleMap {
                 Direction::Inbound => self.inbound.remove(&key),
             };
         }
+    }
+
+    /// the cap mark for an app's accepted flows, or 0 for none
+    fn mark(&self, key: &str) -> u32 {
+        self.marks.get(key).copied().unwrap_or(0)
     }
 
     fn trust(&mut self, paths: &[String]) {
@@ -271,7 +278,8 @@ impl Wfp {
         {
             let mut map = self.rules.lock().unwrap_or_else(|e| e.into_inner());
             let mode = map.mode;
-            *map = RuleMap { mode, ..RuleMap::default() };
+            let marks = std::mem::take(&mut map.marks);
+            *map = RuleMap { mode, marks, ..RuleMap::default() };
         }
         self.revision.fetch_add(1, Ordering::Release);
         remove_table();
@@ -367,6 +375,16 @@ impl Wfp {
         self.revision.fetch_add(1, Ordering::Release);
     }
 
+    /// tag new flows of `path` with a cap mark, or stop tagging them
+    pub fn set_cap_mark(&self, path: &str, mark: Option<u32>) {
+        let key = AppId::from_path(path).0;
+        let mut map = self.rules.lock().unwrap_or_else(|error| error.into_inner());
+        match mark {
+            Some(mark) => map.marks.insert(key, mark),
+            None => map.marks.remove(&key),
+        };
+    }
+
     pub fn mode(&self) -> FirewallMode {
         self.rules
             .lock()
@@ -417,6 +435,7 @@ fn install_table() -> EngineResult<()> {
 }
 
 fn ruleset() -> String {
+    let marks = crate::shape::mark_chains();
     format!(
         "table inet {TABLE} {{
     chain output {{
@@ -429,7 +448,7 @@ fn ruleset() -> String {
         iifname \"lo\" accept
         ct state new queue num {QUEUE_IN}
     }}
-}}
+{marks}}}
 "
     )
 }
@@ -549,23 +568,27 @@ fn verdict_loop(
         }
         let current_revision = revision.load(Ordering::Acquire);
         if !held.is_empty() && (current_revision != seen_revision || now >= next_held_scan) {
-            let outcomes: Vec<Outcome> = {
+            let outcomes: Vec<(Outcome, u32)> = {
                 let map = rules.lock().unwrap_or_else(|error| error.into_inner());
                 held.iter()
                     .map(|packet| {
                         let outcome = map.lookup(dir, &packet.app, &remote_of(packet.flow, dir));
                         // switching to notify releases what ask was holding
-                        match (outcome, map.mode) {
+                        let outcome = match (outcome, map.mode) {
                             (Outcome::Undecided, FirewallMode::Notify) => {
                                 Outcome::Enforce(Enforce::Allow)
                             }
                             _ => outcome,
-                        }
+                        };
+                        (outcome, map.mark(&packet.app))
                     })
                     .collect()
             };
             let mut waiting = Vec::with_capacity(held.len());
-            for (mut packet, outcome) in held.drain(..).zip(outcomes) {
+            for (mut packet, (outcome, mark)) in held.drain(..).zip(outcomes) {
+                if outcome == Outcome::Enforce(Enforce::Allow) && mark != 0 {
+                    packet.message.set_nfmark(mark);
+                }
                 let verdict = match outcome {
                     Outcome::Enforce(Enforce::Allow) => Some(nfq::Verdict::Accept),
                     Outcome::Enforce(Enforce::Block) => Some(nfq::Verdict::Drop),
@@ -657,9 +680,21 @@ fn verdict_loop(
                         break;
                     }
                 }
-                PacketDecision::Report(connection) => {
+                PacketDecision::Accept { mark } => {
+                    message.set_nfmark(mark);
+                    message.set_verdict(nfq::Verdict::Accept);
+                    if let Err(error) = nfq.verdict(message) {
+                        tracing::debug!("NFQUEUE {queue} verdict failed: {error}");
+                        worker_failed = true;
+                        break;
+                    }
+                }
+                PacketDecision::Report { connection, mark } => {
                     if notified.insert(connection.app.0.clone()) {
                         let _ = pending_tx.send(connection);
+                    }
+                    if mark != 0 {
+                        message.set_nfmark(mark);
                     }
                     message.set_verdict(nfq::Verdict::Accept);
                     if let Err(error) = nfq.verdict(message) {
@@ -722,8 +757,10 @@ type PacketFlow = (IpAddr, u16, IpAddr, u16, Protocol);
 
 enum PacketDecision {
     Verdict(nfq::Verdict),
+    /// accepted with an upload cap mark on the flow's first packet
+    Accept { mark: u32 },
     /// accepted, but the app has no decision yet, so the user hears about it
-    Report(PendingConnection),
+    Report { connection: PendingConnection, mark: u32 },
     Pending {
         connection: PendingConnection,
         flow: PacketFlow,
@@ -757,7 +794,10 @@ fn decide(
     let map = rules.lock().unwrap_or_else(|e| e.into_inner());
     match map.lookup(dir, &key, &remote) {
         Outcome::Enforce(Enforce::Block) => Some(PacketDecision::Verdict(nfq::Verdict::Drop)),
-        Outcome::Enforce(Enforce::Allow) => Some(PacketDecision::Verdict(nfq::Verdict::Accept)),
+        Outcome::Enforce(Enforce::Allow) => Some(match map.mark(&key) {
+            0 => PacketDecision::Verdict(nfq::Verdict::Accept),
+            mark => PacketDecision::Accept { mark },
+        }),
         Outcome::Undecided => {
             let connection = PendingConnection {
                 app: AppId(key),
@@ -765,7 +805,8 @@ fn decide(
                 direction: dir,
             };
             Some(if map.mode == FirewallMode::Notify {
-                PacketDecision::Report(connection)
+                let mark = map.mark(&connection.app.0);
+                PacketDecision::Report { connection, mark }
             } else {
                 PacketDecision::Pending { connection, flow }
             })

@@ -28,6 +28,9 @@ mod netlink;
 mod network;
 #[cfg(target_os = "linux")]
 mod proc;
+// tc and nft text only, so its tests run on any host
+#[cfg(any(target_os = "linux", test))]
+mod shape;
 #[cfg(target_os = "linux")]
 mod sockets;
 #[cfg(target_os = "linux")]
@@ -50,7 +53,9 @@ pub use fw::{PendingConnection, Wfp};
 #[cfg(target_os = "linux")]
 pub use monitor::{Monitor, RecentFlow};
 #[cfg(target_os = "linux")]
-pub use network::current_network;
+pub use network::{current_network, default_device};
+#[cfg(target_os = "linux")]
+pub use shape::{mark_for, Shaper};
 #[cfg(target_os = "linux")]
 pub use spawn::{random_token, spawn_restricted, RestrictedChild};
 #[cfg(target_os = "linux")]

@@ -225,6 +225,12 @@ impl RuleStore {
             active,
             caps: crate::caps::CapStore::open(),
         };
+        #[cfg(target_os = "linux")]
+        if let Some(wfp) = store.wfp.as_ref() {
+            for (app, mark) in store.caps.marks() {
+                wfp.set_cap_mark(app.as_str(), Some(mark));
+            }
+        }
         // persist the drops above so a session rule cannot return on a crash.
         // only then: rewriting after a corrupt file would replace the fail-safe
         // with an empty rule set
@@ -263,7 +269,18 @@ impl RuleStore {
     }
 
     pub fn set_cap(&mut self, app: iris_core::AppId, up_bytes_per_sec: Option<u64>) -> anyhow::Result<()> {
-        self.caps.set(app, up_bytes_per_sec)
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+        let mark = self.caps.set(app.clone(), up_bytes_per_sec)?;
+        #[cfg(target_os = "linux")]
+        if let Some(wfp) = self.wfp.as_ref() {
+            wfp.set_cap_mark(app.as_str(), mark);
+        }
+        Ok(())
+    }
+
+    /// keep upload caps on the interface the default route uses
+    pub fn follow_route(&mut self) {
+        self.caps.follow_route();
     }
 
     pub fn profile_state(&self) -> ProfileState {

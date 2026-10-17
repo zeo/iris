@@ -247,6 +247,7 @@ pub(crate) async fn watch_rules(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<
         if let Err(error) = rules.observe_network(network) {
             tracing::warn!("could not switch network profile: {error}");
         }
+        rules.follow_route();
         match rules.expire(now) {
             Ok(0) => {}
             Ok(count) => tracing::info!(count, "removed expired firewall rules"),

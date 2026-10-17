@@ -60,6 +60,8 @@ pub enum EngineCmd {
     SetRuleEnabled(i64, bool),
     GetRuleGrant,
     GetFirewallMode,
+    GetProfiles,
+    SetProfiles(Vec<iris_core::Profile>, Option<String>),
     SetFirewallMode(iris_core::FirewallMode),
     GetUsage(UsageQuery),
     GetAdapterUsage(u64, u64),
@@ -178,6 +180,15 @@ pub async fn rule_grant(app: AppHandle) -> Result<bool, String> {
     }
 }
 
+#[tauri::command]
+pub async fn get_profiles(app: AppHandle) -> Result<iris_core::ProfileState, String> {
+    match dispatch(&app, EngineCmd::GetProfiles).await? {
+        Reply::Profiles(state) => Ok(state),
+        Reply::Error(error) => Err(error),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
 pub(crate) async fn firewall_mode(app: &AppHandle) -> Result<iris_core::FirewallMode, String> {
     match dispatch(app, EngineCmd::GetFirewallMode).await? {
         Reply::FirewallMode(mode) => Ok(mode),
@@ -191,7 +202,7 @@ pub(crate) async fn firewall_mode(app: &AppHandle) -> Result<iris_core::Firewall
 /// elevation, so the caller falls back to the elevated one-shot.
 pub(crate) async fn try_unelevated(app: &AppHandle, cmd: EngineCmd) -> Result<bool, String> {
     match dispatch(app, cmd).await {
-        Ok(Reply::Ok) | Ok(Reply::RuleAdded(_)) => Ok(true),
+        Ok(Reply::Ok) | Ok(Reply::RuleAdded(_)) | Ok(Reply::Profiles(_)) => Ok(true),
         Ok(Reply::Error(error)) if error == NEEDS_ELEVATION => Ok(false),
         Ok(Reply::Error(error)) => Err(error),
         Ok(_) => Err("unexpected reply".into()),
@@ -550,6 +561,9 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                         ClientMessage::SetRuleEnabled { req, id, enabled },
                     EngineCmd::GetRuleGrant => ClientMessage::GetRuleGrant { req },
                     EngineCmd::GetFirewallMode => ClientMessage::GetFirewallMode { req },
+                    EngineCmd::GetProfiles => ClientMessage::GetProfiles { req },
+                    EngineCmd::SetProfiles(profiles, manual) =>
+                        ClientMessage::SetProfiles { req, profiles, manual },
                     EngineCmd::SetFirewallMode(mode) => ClientMessage::SetFirewallMode { req, mode },
                     EngineCmd::GetUsage(query) => ClientMessage::GetUsage { req, query },
                     EngineCmd::GetHostUsage(app, from_ms, to_ms) => ClientMessage::GetHostUsage {

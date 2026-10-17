@@ -7,6 +7,7 @@ export interface RuleScope {
   ports?: { start: number; end: number };
   protocol?: "tcp" | "udp";
 }
+export type FirewallMode = "ask" | "notify" | "lockdown";
 export type RuleLifetime =
   | { kind: "permanent" }
   | { kind: "until_restart" }
@@ -18,6 +19,7 @@ export interface Rule {
   label: string | null;
   scope?: RuleScope;
   lifetime?: RuleLifetime;
+  profile?: string;
 }
 
 /// what the rule editor sends besides app, direction, and action
@@ -27,6 +29,7 @@ export interface RuleOptions {
   protocol?: "tcp" | "udp";
   /// minutes until it lapses; 0 lasts until the engine restarts
   minutes?: number;
+  profile?: string;
 }
 export interface StoredRule {
   id: number;
@@ -45,6 +48,9 @@ export const coversWholeApp = (rule: Rule): boolean =>
 
 export const isPermanent = (rule: Rule): boolean => (rule.lifetime?.kind ?? "permanent") === "permanent";
 
+/// whether the engine enforces the rule while `active` is the profile in force
+export const appliesIn = (rule: Rule, active: string | null): boolean => !rule.profile || rule.profile === active;
+
 export function describeScope(rule: Rule): string {
   const { remote, ports, protocol } = rule.scope ?? {};
   const parts = [
@@ -52,6 +58,7 @@ export function describeScope(rule: Rule): string {
     ports && (ports.start === ports.end ? `port ${ports.start}` : `ports ${ports.start}-${ports.end}`),
     protocol?.toUpperCase(),
   ].filter(Boolean);
+  if (rule.profile) parts.push(`${rule.profile} profile`);
   return parts.length ? parts.join(" · ") : "all traffic";
 }
 

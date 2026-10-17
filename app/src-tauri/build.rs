@@ -11,6 +11,8 @@ fn main() {
         "set_prompt_hit_region",
         "firewall_mode",
         "get_host_usage",
+        "get_profiles",
+        "set_profiles",
         "set_tray_graph",
         "forget_apps",
         "rule_grant",

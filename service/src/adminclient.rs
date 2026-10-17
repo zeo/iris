@@ -43,6 +43,17 @@ fn build_op(args: &[String]) -> anyhow::Result<Op> {
             }
             Ok(Op::Single(ClientMessage::AddRule { req: 1, rule }))
         }
+        Some("--profiles-json") => {
+            #[derive(serde::Deserialize)]
+            struct Profiles {
+                profiles: Vec<iris_core::Profile>,
+                manual: Option<String>,
+            }
+            let json = args.get(1).context("profiles-json: missing profiles")?;
+            let Profiles { profiles, manual } =
+                serde_json::from_str(json).context("profiles-json: not a profile list")?;
+            Ok(Op::Single(ClientMessage::SetProfiles { req: 1, profiles, manual }))
+        }
         Some("--firewall-mode") => {
             let mode = args
                 .get(1)

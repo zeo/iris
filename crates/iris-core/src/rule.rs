@@ -171,6 +171,10 @@ pub struct Rule {
     pub scope: RuleScope,
     #[serde(default, skip_serializing_if = "RuleLifetime::is_permanent")]
     pub lifetime: RuleLifetime,
+    /// the network profile this rule belongs to; enforced only while that
+    /// profile is active. none applies everywhere
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 impl Rule {
@@ -182,6 +186,7 @@ impl Rule {
             label: None,
             scope: RuleScope::default(),
             lifetime: RuleLifetime::Permanent,
+            profile: None,
         }
     }
 
@@ -191,8 +196,75 @@ impl Rule {
 
     /// two rules occupy the same slot, so adding one replaces the other
     pub fn same_slot(&self, other: &Rule) -> bool {
-        self.app == other.app && self.direction == other.direction && self.scope == other.scope
+        self.app == other.app
+            && self.direction == other.direction
+            && self.scope == other.scope
+            && self.profile == other.profile
     }
+
+    /// whether the rule is in force under `active`, the current profile
+    pub fn applies_in(&self, active: Option<&str>) -> bool {
+        self.profile.as_deref().is_none_or(|profile| Some(profile) == active)
+    }
+}
+
+/// the network the machine reaches the internet through, as far as profiles
+/// care: `key` is stable for one network (its gateway's hardware address when
+/// there is one), `label` is what the user recognizes it by
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkIdentity {
+    pub key: String,
+    pub label: String,
+}
+
+/// a named set of networks that switches on rules tagged with its name, and
+/// optionally its own firewall mode
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    pub name: String,
+    pub networks: Vec<NetworkIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<FirewallMode>,
+}
+
+/// what the profiles screen shows
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileState {
+    pub profiles: Vec<Profile>,
+    /// the profile chosen by hand, overriding network matching
+    pub manual: Option<String>,
+    /// the profile in force now
+    pub active: Option<String>,
+    pub network: Option<NetworkIdentity>,
+    /// the mode actually enforced after the active profile and lockdown
+    pub mode: FirewallMode,
+}
+
+/// the profile in force: a manual choice that still exists, else the first
+/// profile listing the current network
+pub fn active_profile<'a>(
+    profiles: &'a [Profile],
+    manual: Option<&str>,
+    network: Option<&NetworkIdentity>,
+) -> Option<&'a Profile> {
+    if let Some(manual) = manual {
+        if let Some(profile) = profiles.iter().find(|profile| profile.name == manual) {
+            return Some(profile);
+        }
+    }
+    let network = network?;
+    profiles
+        .iter()
+        .find(|profile| profile.networks.iter().any(|known| known.key == network.key))
+}
+
+/// the mode to enforce: lockdown picked globally always holds, otherwise the
+/// active profile's own mode, otherwise the global one
+pub fn effective_mode(global: FirewallMode, profile: Option<&Profile>) -> FirewallMode {
+    if global == FirewallMode::Lockdown {
+        return global;
+    }
+    profile.and_then(|profile| profile.mode).unwrap_or(global)
 }
 
 /// how a plugin-proposed rule was disposed
@@ -358,6 +430,40 @@ mod tests {
         assert!(rule.scope.is_whole_app());
         assert!(rule.lifetime.is_permanent());
         assert_eq!(serde_json::to_string(&rule).unwrap(), json);
+    }
+
+    #[test]
+    fn profiles_match_manual_choice_then_network_and_lockdown_always_wins() {
+        let home = NetworkIdentity { key: "aa:bb".into(), label: "home".into() };
+        let cafe = NetworkIdentity { key: "cc:dd".into(), label: "cafe".into() };
+        let profiles = vec![
+            Profile { name: "Home".into(), networks: vec![home.clone()], mode: Some(FirewallMode::Notify) },
+            Profile { name: "Public".into(), networks: vec![cafe.clone()], mode: None },
+        ];
+        let name = |profile: Option<&Profile>| profile.map(|p| p.name.clone());
+        assert_eq!(name(active_profile(&profiles, None, Some(&home))).as_deref(), Some("Home"));
+        assert_eq!(name(active_profile(&profiles, Some("Public"), Some(&home))).as_deref(), Some("Public"));
+        assert_eq!(name(active_profile(&profiles, Some("Gone"), Some(&cafe))).as_deref(), Some("Public"));
+        let unknown = NetworkIdentity { key: "ee".into(), label: "x".into() };
+        assert!(active_profile(&profiles, None, Some(&unknown)).is_none());
+        assert!(active_profile(&profiles, None, None).is_none());
+
+        assert_eq!(effective_mode(FirewallMode::Ask, Some(&profiles[0])), FirewallMode::Notify);
+        assert_eq!(effective_mode(FirewallMode::Ask, Some(&profiles[1])), FirewallMode::Ask);
+        assert_eq!(effective_mode(FirewallMode::Lockdown, Some(&profiles[0])), FirewallMode::Lockdown);
+    }
+
+    #[test]
+    fn profile_rules_apply_only_in_their_profile() {
+        let mut rule = Rule::block_outbound(AppId::from_path("c:/a.exe"));
+        assert!(rule.applies_in(None));
+        rule.profile = Some("Public".into());
+        assert!(rule.applies_in(Some("Public")));
+        assert!(!rule.applies_in(Some("Home")));
+        assert!(!rule.applies_in(None));
+        let mut other = rule.clone();
+        other.profile = None;
+        assert!(!rule.same_slot(&other));
     }
 
     #[test]

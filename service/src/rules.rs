@@ -3,7 +3,10 @@
 //! on startup it wipes any leftover iris filters and re-applies the enabled
 //! rules, so the JSON file is the single source of truth.
 
-use iris_core::{EngineError, FirewallMode, Rule, RuleLifetime, StoredRule};
+use iris_core::{
+    active_profile, effective_mode, EngineError, FirewallMode, NetworkIdentity, Profile,
+    ProfileState, Rule, RuleLifetime, StoredRule,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -60,10 +63,55 @@ pub struct RuleStore {
     next_id: i64,
     path: PathBuf,
     mode: FirewallMode,
+    profiles: SavedProfiles,
+    network: Option<NetworkIdentity>,
+    /// the profile in force, which decides which profile-tagged rules apply
+    active: Option<String>,
 }
 
 fn mode_path() -> PathBuf {
     crate::paths::rules_file().with_file_name("mode.json")
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SavedProfiles {
+    #[serde(default)]
+    profiles: Vec<Profile>,
+    #[serde(default)]
+    manual: Option<String>,
+}
+
+fn profiles_path() -> PathBuf {
+    crate::paths::rules_file().with_file_name("profiles.json")
+}
+
+fn load_profiles() -> SavedProfiles {
+    std::fs::read_to_string(profiles_path())
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+/// write json beside the rules file through a temp file, so a crash mid-write
+/// never leaves a truncated one behind
+fn write_atomic(path: &Path, json: &[u8]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+#[cfg(has_platform)]
+fn current_network() -> Option<NetworkIdentity> {
+    crate::platform::current_network()
+}
+
+#[cfg(not(has_platform))]
+fn current_network() -> Option<NetworkIdentity> {
+    None
 }
 
 /// the saved mode, or the ask-first default when none was saved or it is unreadable
@@ -113,6 +161,10 @@ impl RuleStore {
         for p in &persisted {
             next_id = next_id.max(p.id + 1);
         }
+        let profiles = load_profiles();
+        let network = current_network();
+        let active = active_profile(&profiles.profiles, profiles.manual.as_deref(), network.as_ref())
+            .map(|profile| profile.name.clone());
         let mut rules = Vec::new();
         let now = now_ms();
         let mut dropped = false;
@@ -130,7 +182,7 @@ impl RuleStore {
                 next_id += 1;
                 x
             };
-            let filter_ids = if p.enabled {
+            let filter_ids = if p.enabled && p.rule.applies_in(active.as_deref()) {
                 #[cfg(has_platform)]
                 {
                     match apply(wfp.as_mut(), &p.rule) {
@@ -167,6 +219,9 @@ impl RuleStore {
             next_id,
             path,
             mode: load_mode(),
+            profiles,
+            network,
+            active,
         };
         // persist the drops above so a session rule cannot return on a crash.
         // only then: rewriting after a corrupt file would replace the fail-safe
@@ -177,27 +232,113 @@ impl RuleStore {
         Ok(store)
     }
 
+    /// the mode in force: the global choice, unless the active profile sets
+    /// its own and the global choice is not lockdown
     pub fn mode(&self) -> FirewallMode {
-        self.mode
+        effective_mode(self.mode, self.active_profile())
+    }
+
+    fn active_profile(&self) -> Option<&Profile> {
+        let name = self.active.as_deref()?;
+        self.profiles.profiles.iter().find(|profile| profile.name == name)
     }
 
     /// switch how undecided apps are treated, or lock everything down, and
     /// remember it across restarts
     pub fn set_mode(&mut self, mode: FirewallMode) -> anyhow::Result<()> {
-        self.enforce_mode(mode)?;
+        self.enforce_mode(effective_mode(mode, self.active_profile()))?;
         self.mode = mode;
-        if let Some(parent) = mode_path().parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = mode_path().with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(&mode)?)?;
-        std::fs::rename(&tmp, mode_path())?;
-        Ok(())
+        write_atomic(&mode_path(), &serde_json::to_vec(&mode)?)
     }
 
     /// bring the platform in line with the saved mode; run once at startup
     pub fn restore_mode(&mut self) -> anyhow::Result<()> {
-        self.enforce_mode(self.mode)
+        self.enforce_mode(self.mode())
+    }
+
+    pub fn profile_state(&self) -> ProfileState {
+        ProfileState {
+            profiles: self.profiles.profiles.clone(),
+            manual: self.profiles.manual.clone(),
+            active: self.active.clone(),
+            network: self.network.clone(),
+            mode: self.mode(),
+        }
+    }
+
+    /// replace the profile list and the manual choice, then re-evaluate
+    pub fn set_profiles(&mut self, profiles: Vec<Profile>, manual: Option<String>) -> anyhow::Result<()> {
+        let mut names = std::collections::HashSet::new();
+        for profile in &profiles {
+            if profile.name.trim().is_empty() {
+                anyhow::bail!("a profile needs a name");
+            }
+            if !names.insert(profile.name.as_str()) {
+                anyhow::bail!("two profiles are named {}", profile.name);
+            }
+        }
+        let saved = SavedProfiles { profiles, manual };
+        write_atomic(&profiles_path(), &serde_json::to_vec_pretty(&saved)?)?;
+        self.profiles = saved;
+        self.settle_profile()
+    }
+
+    /// note the network now in use; switches profile when it changed which one
+    /// applies
+    pub fn observe_network(&mut self, network: Option<NetworkIdentity>) -> anyhow::Result<()> {
+        if network == self.network {
+            return Ok(());
+        }
+        tracing::info!(
+            network = network.as_ref().map_or("none", |network| network.label.as_str()),
+            "network changed"
+        );
+        self.network = network;
+        self.settle_profile()
+    }
+
+    /// recompute the active profile and, when it moved, enforce exactly the
+    /// rules that belong to it and its mode
+    fn settle_profile(&mut self) -> anyhow::Result<()> {
+        let active = active_profile(
+            &self.profiles.profiles,
+            self.profiles.manual.as_deref(),
+            self.network.as_ref(),
+        )
+        .map(|profile| profile.name.clone());
+        let mode_before = self.mode();
+        let switched = active != self.active;
+        if switched {
+            tracing::info!(profile = active.as_deref().unwrap_or("none"), "network profile active");
+            self.active = active;
+            self.sync_profile_rules()?;
+        }
+        let mode = self.mode();
+        if switched || mode != mode_before {
+            self.enforce_mode(mode)?;
+        }
+        Ok(())
+    }
+
+    fn sync_profile_rules(&mut self) -> anyhow::Result<()> {
+        for index in 0..self.rules.len() {
+            let stored = &self.rules[index];
+            let wanted = stored.enabled && stored.rule.applies_in(self.active.as_deref());
+            let applied = !stored.filter_ids.is_empty();
+            if wanted && !applied {
+                let rule = stored.rule.clone();
+                match self.apply_rule(&rule) {
+                    Ok(ids) => self.rules[index].filter_ids = ids,
+                    // the app is gone; the deferred retry picks it up later
+                    Err(error) if is_not_found(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            } else if !wanted && applied {
+                let ids = std::mem::take(&mut self.rules[index].filter_ids);
+                self.unapply(&ids)?;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(windows)]
@@ -252,7 +393,11 @@ impl RuleStore {
             .rules
             .iter()
             .enumerate()
-            .filter(|(_, stored)| stored.enabled && stored.filter_ids.is_empty())
+            .filter(|(_, stored)| {
+                stored.enabled
+                    && stored.filter_ids.is_empty()
+                    && stored.rule.applies_in(self.active.as_deref())
+            })
             .map(|(index, stored)| (index, stored.rule.clone()))
             .collect();
         let mut restored = 0;
@@ -358,7 +503,11 @@ impl RuleStore {
 
         let id = self.next_id;
         self.next_id += 1;
-        let filter_ids = self.apply_rule(&rule)?;
+        let filter_ids = if rule.applies_in(self.active.as_deref()) {
+            self.apply_rule(&rule)?
+        } else {
+            Vec::new()
+        };
         let stored = StoredRule {
             id,
             rule,
@@ -389,8 +538,9 @@ impl RuleStore {
         };
         if enabled && !self.rules[pos].enabled {
             let rule = self.rules[pos].rule.clone();
-            let ids = self.apply_rule(&rule)?;
-            self.rules[pos].filter_ids = ids;
+            if rule.applies_in(self.active.as_deref()) {
+                self.rules[pos].filter_ids = self.apply_rule(&rule)?;
+            }
             self.rules[pos].enabled = true;
         } else if !enabled && self.rules[pos].enabled {
             let ids = std::mem::take(&mut self.rules[pos].filter_ids);
@@ -456,6 +606,10 @@ fn apply(wfp: Option<&mut crate::platform::Wfp>, rule: &Rule) -> iris_core::Engi
         Some(w) => w.apply(rule.app.as_str(), rule.direction, rule.action, &rule.scope),
         None => Err(iris_core::EngineError::NotInitialized),
     }
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    matches!(error.downcast_ref::<EngineError>(), Some(EngineError::NotFound(_)))
 }
 
 fn now_ms() -> u64 {

@@ -23,6 +23,9 @@ mod fw;
 mod monitor;
 #[cfg(target_os = "linux")]
 mod netlink;
+// procfs parsing only, so its tests run on any host
+#[cfg(any(target_os = "linux", test))]
+mod network;
 #[cfg(target_os = "linux")]
 mod proc;
 #[cfg(target_os = "linux")]
@@ -46,6 +49,8 @@ pub use egress::{AppPin, PluginNet};
 pub use fw::{PendingConnection, Wfp};
 #[cfg(target_os = "linux")]
 pub use monitor::{Monitor, RecentFlow};
+#[cfg(target_os = "linux")]
+pub use network::current_network;
 #[cfg(target_os = "linux")]
 pub use spawn::{random_token, spawn_restricted, RestrictedChild};
 #[cfg(target_os = "linux")]

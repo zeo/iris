@@ -16,6 +16,8 @@ mod etw;
 #[cfg(windows)]
 mod netevent;
 #[cfg(windows)]
+mod network;
+#[cfg(windows)]
 mod proc;
 #[cfg(windows)]
 mod spawn;
@@ -36,6 +38,8 @@ pub use egress::{AppPin, PluginNet};
 pub use etw::Monitor;
 #[cfg(windows)]
 pub use netevent::DeniedConnection as PendingConnection;
+#[cfg(windows)]
+pub use network::current_network;
 #[cfg(windows)]
 pub use spawn::{random_token, spawn_restricted, RestrictedChild};
 #[cfg(windows)]

@@ -355,6 +355,21 @@ async fn handle(
                         };
                         reply(&mut send, req, result).await?;
                     }
+                    ClientMessage::GetProfiles { req } => {
+                        let state = rules
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .profile_state();
+                        reply(&mut send, req, Reply::Profiles(state)).await?;
+                    }
+                    ClientMessage::SetProfiles { req, profiles, manual } => {
+                        let result = if peer.may_manage_rules() {
+                            set_profiles(&rules, profiles, manual).await
+                        } else {
+                            Reply::Error(NEEDS_ELEVATION.into())
+                        };
+                        reply(&mut send, req, result).await?;
+                    }
                     // establishing or revoking the grant is itself privileged, so
                     // it only happens on the admin channel
                     ClientMessage::SetRuleGrant { req, .. } => {
@@ -836,6 +851,10 @@ async fn handle_admin(
                 let result = set_mode(&rules, mode).await;
                 reply(&mut send, req, result).await?;
             }
+            ClientMessage::SetProfiles { req, profiles, manual } => {
+                let result = set_profiles(&rules, profiles, manual).await;
+                reply(&mut send, req, result).await?;
+            }
             ClientMessage::Ping { req } => reply(&mut send, req, Reply::Pong).await?,
             other => {
                 if let Some(req) = req_of(&other) {
@@ -906,6 +925,23 @@ async fn set_mode(rules: &Arc<Mutex<RuleStore>>, mode: iris_core::FirewallMode) 
     .unwrap_or_else(|_| Reply::Error("the mode change failed".into()))
 }
 
+async fn set_profiles(
+    rules: &Arc<Mutex<RuleStore>>,
+    profiles: Vec<iris_core::Profile>,
+    manual: Option<String>,
+) -> Reply {
+    let rules = rules.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut rules = rules.lock().unwrap_or_else(|error| error.into_inner());
+        match rules.set_profiles(profiles, manual) {
+            Ok(()) => Reply::Profiles(rules.profile_state()),
+            Err(error) => Reply::Error(format!("could not save profiles: {error}")),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Reply::Error("the profile change failed".into()))
+}
+
 async fn reply(send: &mut transport::SendHalf, req: u64, result: Reply) -> io::Result<()> {
     transport::write_frame(send, &ServerMessage::Reply { req, result }).await
 }
@@ -921,6 +957,8 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::SetRuleGrant { req, .. }
         | ClientMessage::AddRule { req, .. }
         | ClientMessage::GetFirewallMode { req }
+        | ClientMessage::GetProfiles { req }
+        | ClientMessage::SetProfiles { req, .. }
         | ClientMessage::SetFirewallMode { req, .. }
         | ClientMessage::RemoveRule { req, .. }
         | ClientMessage::SetRuleEnabled { req, .. }

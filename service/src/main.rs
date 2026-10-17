@@ -210,8 +210,6 @@ pub(crate) async fn watch_rules(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         #[cfg(target_os = "linux")]
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        #[cfg(windows)]
-        let mut rules = rules.lock().unwrap_or_else(|error| error.into_inner());
         #[cfg(target_os = "linux")]
         {
             let healthy = rules
@@ -238,8 +236,15 @@ pub(crate) async fn watch_rules(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as u64)
             .unwrap_or(0);
-        #[cfg(target_os = "linux")]
+        // read outside the lock and off the reactor: resolving the gateway's
+        // hardware address can wait on an arp reply
+        let network = tokio::task::spawn_blocking(crate::platform::current_network)
+            .await
+            .unwrap_or(None);
         let mut rules = rules.lock().unwrap_or_else(|error| error.into_inner());
+        if let Err(error) = rules.observe_network(network) {
+            tracing::warn!("could not switch network profile: {error}");
+        }
         match rules.expire(now) {
             Ok(0) => {}
             Ok(count) => tracing::info!(count, "removed expired firewall rules"),

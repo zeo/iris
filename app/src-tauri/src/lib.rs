@@ -104,6 +104,8 @@ pub fn run() {
             prompt::set_prompt_hit_region,
             rulectl::firewall_mode,
             ipc::get_host_usage,
+            ipc::get_profiles,
+            rulectl::set_profiles,
             traygraph::set_tray_graph,
             rulectl::set_firewall_mode,
             notify::set_notifications_enabled,

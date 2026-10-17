@@ -34,6 +34,8 @@ pub struct RuleOptions {
     protocol: Option<String>,
     /// minutes until the rule lapses, or 0 for until the engine restarts
     minutes: Option<u64>,
+    /// the network profile the rule belongs to
+    profile: Option<String>,
 }
 
 impl RuleOptions {
@@ -95,15 +97,31 @@ pub async fn rule_add(
     let rule = Rule {
         scope: options.scope()?,
         lifetime: options.lifetime(),
+        profile: options.profile.filter(|profile| !profile.trim().is_empty()),
         ..Rule::new(AppId::from_path(&path), direction, action)
     };
-    let args = if rule.scope.is_whole_app() && rule.lifetime.is_permanent() {
+    let args = if rule.scope.is_whole_app() && rule.lifetime.is_permanent() && rule.profile.is_none() {
         vec!["--rule-add".into(), path, dir.into(), act.into()]
     } else {
         let json = serde_json::to_string(&rule).map_err(|error| error.to_string())?;
         vec!["--rule-add-json".into(), json]
     };
     mutate(app, EngineCmd::AddRule(rule), args).await
+}
+
+#[tauri::command]
+pub async fn set_profiles(
+    app: tauri::AppHandle,
+    profiles: Vec<iris_core::Profile>,
+    manual: Option<String>,
+) -> Result<(), String> {
+    let json = serde_json::json!({ "profiles": profiles, "manual": manual }).to_string();
+    let args = vec!["--profiles-json".into(), json];
+    mutate(app.clone(), EngineCmd::SetProfiles(profiles, manual), args).await?;
+    if let Ok(mode) = crate::ipc::firewall_mode(&app).await {
+        crate::refresh_mode_menu(&app, mode);
+    }
+    Ok(())
 }
 
 #[tauri::command]

@@ -32,6 +32,8 @@
     "allow-list-prompt-alerts",
     "allow-firewall-mode",
     "allow-get-host-usage",
+    "allow-get-profiles",
+    "allow-set-profiles",
     "allow-set-tray-graph",
     "allow-forget-apps",
     "allow-rule-grant",

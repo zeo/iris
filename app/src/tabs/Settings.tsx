@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { Icon } from "../components/Icon";
 import { engine } from "../lib/engine";
 import { checkNow } from "../lib/updater";
+import { profileState, refreshProfiles, saveProfiles, withNetwork, type Profile } from "../lib/profiles";
+import type { FirewallMode } from "../lib/rules";
 import {
   billingResetDay,
   dataCapGb,
@@ -16,8 +18,6 @@ import {
   trayGraph,
   type RateUnits,
 } from "../lib/settings";
-
-type FirewallMode = "ask" | "notify" | "lockdown";
 
 const MODE_OPTS: { id: FirewallMode; label: string }[] = [
   { id: "ask", label: "ask" },
@@ -54,6 +54,40 @@ export function Settings() {
     }
   };
 
+  const [profileName, setProfileName] = createSignal("");
+  const [profileMsg, setProfileMsg] = createSignal("");
+  const changeProfiles = async (profiles: Profile[], manual: string | null) => {
+    if (busy()) return;
+    setBusy("profiles");
+    setProfileMsg("");
+    try {
+      await saveProfiles(profiles, manual);
+    } catch (error) {
+      setProfileMsg(String(error));
+    }
+    await readMode();
+    setBusy("");
+  };
+  const profiles = () => profileState()?.profiles ?? [];
+  const manual = () => profileState()?.manual ?? null;
+  const addProfile = () => {
+    const name = profileName().trim();
+    const network = profileState()?.network;
+    if (!name) return;
+    if (profiles().some((profile) => profile.name === name)) {
+      setProfileMsg(`There is already a profile named ${name}.`);
+      return;
+    }
+    const added = [...profiles(), { name, networks: [] }];
+    setProfileName("");
+    void changeProfiles(network ? withNetwork(added, name, network) : added, manual());
+  };
+  const setProfileMode = (name: string, next: FirewallMode | undefined) =>
+    changeProfiles(
+      profiles().map((profile) => (profile.name === name ? { ...profile, mode: next } : profile)),
+      manual(),
+    );
+
   const chooseMode = async (next: FirewallMode) => {
     if (next === mode() || busy()) return;
     setBusy("mode");
@@ -83,6 +117,7 @@ export function Settings() {
     }
     void readGrant();
     void readMode();
+    void refreshProfiles();
   });
 
   const toggleGrant = async () => {
@@ -195,7 +230,12 @@ export function Settings() {
         <div class="set-row">
           <div class="set-meta">
             <span class="set-name">New applications</span>
-            <span class="set-desc">{MODE_DESC[mode() ?? "ask"]} The tray menu switches this too.</span>
+            <span class="set-desc">
+              {MODE_DESC[mode() ?? "ask"]} The tray menu switches this too.
+              <Show when={profiles().find((profile) => profile.name === profileState()?.active)?.mode}>
+                {" "}The {profileState()?.active} profile sets this mode while it is active; lockdown still overrides it.
+              </Show>
+            </span>
             <Show when={modeMsg()}><span class="set-desc">{modeMsg()}</span></Show>
           </div>
           <div class="seg" role="group" aria-label="Firewall mode">
@@ -213,6 +253,91 @@ export function Settings() {
             </For>
           </div>
         </div>
+      </div>
+
+      <div class="set-group">
+        <div class="set-section">Network profiles</div>
+        <div class="set-row">
+          <div class="set-meta">
+            <span class="set-name">This network</span>
+            <span class="set-desc">
+              {profileState()?.network?.label ?? "No default route right now."}
+              {profileState()?.active ? ` Profile in force: ${profileState()?.active}.` : " No profile matches it."}
+            </span>
+            <Show when={profileMsg()}><span class="set-desc">{profileMsg()}</span></Show>
+          </div>
+          <label class="field">
+            <input
+              aria-label="New profile name"
+              placeholder="profile for this network"
+              value={profileName()}
+              onInput={(event) => setProfileName(event.currentTarget.value)}
+              onKeyDown={(event) => event.key === "Enter" && addProfile()}
+            />
+          </label>
+          <button class="btn" disabled={busy() === "profiles" || !profileName().trim()} onClick={addProfile}>Add</button>
+        </div>
+        <For each={profiles()}>
+          {(profile) => (
+            <div class="set-row">
+              <div class="set-meta">
+                <span class="set-name">
+                  {profile.name}
+                  <Show when={profileState()?.active === profile.name}> · active</Show>
+                </span>
+                <span class="set-desc">
+                  {profile.networks.length ? profile.networks.map((network) => network.label).join(", ") : "no networks yet"}
+                </span>
+              </div>
+              <div class="seg" role="group" aria-label={`${profile.name} mode`}>
+                <For each={[undefined, ...MODE_OPTS.map((option) => option.id)]}>
+                  {(option) => (
+                    <button
+                      classList={{ on: profile.mode === option }}
+                      aria-pressed={profile.mode === option}
+                      disabled={busy() === "profiles"}
+                      onClick={() => void setProfileMode(profile.name, option)}
+                    >
+                      {option ? MODE_OPTS.find((choice) => choice.id === option)?.label : "global mode"}
+                    </button>
+                  )}
+                </For>
+              </div>
+              <Show when={profileState()?.network && !profile.networks.some((network) => network.key === profileState()?.network?.key)}>
+                <button
+                  class="btn"
+                  disabled={busy() === "profiles"}
+                  onClick={() => void changeProfiles(withNetwork(profiles(), profile.name, profileState()!.network!), manual())}
+                >
+                  Use here
+                </button>
+              </Show>
+              <button
+                class="btn"
+                classList={{ on: manual() === profile.name }}
+                aria-pressed={manual() === profile.name}
+                disabled={busy() === "profiles"}
+                title="Keep this profile active on every network until unpinned"
+                onClick={() => void changeProfiles(profiles(), manual() === profile.name ? null : profile.name)}
+              >
+                {manual() === profile.name ? "Unpin" : "Pin"}
+              </button>
+              <button
+                class="iconbtn"
+                aria-label={`Delete ${profile.name}`}
+                disabled={busy() === "profiles"}
+                onClick={() =>
+                  void changeProfiles(
+                    profiles().filter((other) => other.name !== profile.name),
+                    manual() === profile.name ? null : manual(),
+                  )
+                }
+              >
+                <Icon name="x" />
+              </button>
+            </div>
+          )}
+        </For>
       </div>
 
       <div class="set-group">

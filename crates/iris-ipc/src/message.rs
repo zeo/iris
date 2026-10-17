@@ -1,5 +1,5 @@
 use iris_core::{
-    AdapterKind, Alert, Annotation, AppId, ByteCounts, EnrichTarget, FirewallMode, HostUsage, KnownApp,
+    AdapterKind, Alert, Annotation, AppId, ByteCounts, EnrichTarget, FirewallMode, HostUsage, KnownApp, Profile, ProfileState,
     LiveConnection, Panel, Rule, RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket,
     UsageQuery,
 };
@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 /// v9 adds the byte-capture degraded push.
 /// v10 adds rule scopes and lifetimes, and the firewall mode.
 /// v11 adds per-host usage history.
-pub const PROTOCOL_VERSION: u32 = 11;
+/// v12 adds network profiles.
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// what the UI shows for one installed plugin: its declared identity and
 /// capabilities, plus whether the user has consented and enabled it
@@ -83,6 +84,16 @@ pub enum ClientMessage {
     },
     GetFirewallMode {
         req: u64,
+    },
+    GetProfiles {
+        req: u64,
+    },
+    /// replace the network profiles and the manual choice. privileged, since
+    /// switching profile changes which rules are enforced
+    SetProfiles {
+        req: u64,
+        profiles: Vec<Profile>,
+        manual: Option<String>,
     },
     /// ask, notify, or lockdown. privileged like a rule change
     SetFirewallMode {
@@ -246,6 +257,7 @@ pub enum Reply {
     /// whether the delegated rule-management grant is in force
     RuleGrant(bool),
     FirewallMode(FirewallMode),
+    Profiles(ProfileState),
     /// per-host totals, biggest first
     HostUsage(Vec<HostUsage>),
 }

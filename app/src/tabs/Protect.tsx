@@ -8,8 +8,10 @@ import { forgetKnownApp, forgetKnownApps, knownApps, refreshKnownApps } from "..
 import { engine, type AppSample } from "../lib/engine";
 import { bytes, rate } from "../lib/format";
 import { acceptProposal, pendingProposals, refreshProposals, rejectProposal } from "../lib/proposals";
+import { activeProfile, profileState, refreshProfiles } from "../lib/profiles";
 import {
   addRule,
+  appliesIn,
   coversWholeApp,
   describeLifetime,
   describeScope,
@@ -36,10 +38,12 @@ export interface AppRow {
   installed?: boolean;
 }
 
-// scoped and temporary rules are listed apart; the matrix shows each
-// direction's whole-app decision
+// scoped, temporary, and profile rules are listed apart; the matrix shows each
+// direction's whole-app decision that holds on every network
+const isSpecial = (stored: StoredRule) =>
+  !coversWholeApp(stored.rule) || !isPermanent(stored.rule) || Boolean(stored.rule.profile);
 const wholeAppRules = (row: AppRow, direction: Direction) =>
-  row.rules.filter((stored) => stored.rule.direction === direction && coversWholeApp(stored.rule));
+  row.rules.filter((stored) => stored.rule.direction === direction && !isSpecial(stored));
 
 const DURATIONS: Array<{ label: string; minutes?: number }> = [
   { label: "permanent" },
@@ -59,10 +63,13 @@ function decisionFor(row: AppRow, direction: Direction): Decision {
 // it decides nothing. the usual cause is an executable that has been uninstalled
 // or moved, which the engine retries until the image comes back. showing this as
 // a confident block would be a lie about what the firewall is doing.
-export function isDormantRule(row: AppRow, direction: Direction): boolean {
+export function isDormantRule(row: AppRow, direction: Direction, active: string | null = null): boolean {
   return row.rules.some(
     (stored) =>
-      stored.rule.direction === direction && stored.enabled && stored.filter_ids.length === 0,
+      stored.rule.direction === direction &&
+      stored.enabled &&
+      stored.filter_ids.length === 0 &&
+      appliesIn(stored.rule, active),
   );
 }
 
@@ -96,14 +103,17 @@ export function Protect() {
   const [ports, setPorts] = createSignal("");
   const [protocol, setProtocol] = createSignal<"" | "tcp" | "udp">("");
   const [duration, setDuration] = createSignal(0);
+  const [ruleProfile, setRuleProfile] = createSignal("");
+  void refreshProfiles();
   const ruleOptions = (): RuleOptions => ({
     remote: remote().trim() || undefined,
     ports: ports().trim() || undefined,
     protocol: protocol() || undefined,
     minutes: DURATIONS[duration()].minutes,
+    profile: ruleProfile() || undefined,
   });
-  const narrowed = () => Boolean(remote().trim() || ports().trim() || protocol());
-  const specialRules = () => rules().filter((stored) => !coversWholeApp(stored.rule) || !isPermanent(stored.rule));
+  const narrowed = () => Boolean(remote().trim() || ports().trim() || protocol() || ruleProfile());
+  const specialRules = () => rules().filter(isSpecial);
   const [toolError, setToolError] = createSignal("");
   const [toolNote, setToolNote] = createSignal("");
   const [ioBusy, setIoBusy] = createSignal(false);
@@ -428,6 +438,24 @@ export function Protect() {
                 )}
               </For>
             </div>
+            <Show when={(profileState()?.profiles.length ?? 0) > 0}>
+              <div class="seg" role="group" aria-label="profile">
+                <button classList={{ on: ruleProfile() === "" }} aria-pressed={ruleProfile() === ""} onClick={() => setRuleProfile("")}>
+                  every network
+                </button>
+                <For each={profileState()?.profiles ?? []}>
+                  {(profile) => (
+                    <button
+                      classList={{ on: ruleProfile() === profile.name }}
+                      aria-pressed={ruleProfile() === profile.name}
+                      onClick={() => setRuleProfile(profile.name)}
+                    >
+                      {profile.name}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
             <div class="seg" role="group" aria-label="duration">
               <For each={DURATIONS}>
                 {(choice, index) => (
@@ -468,7 +496,7 @@ export function Protect() {
           <span class="label">scoped and temporary rules</span>
           <For each={specialRules()}>
             {(stored) => (
-              <div class="scoped-rule" classList={{ paused: !stored.enabled }}>
+              <div class="scoped-rule" classList={{ paused: !stored.enabled || !appliesIn(stored.rule, activeProfile()) }}>
                 <AppIcon path={stored.rule.app} />
                 <span><b>{fileName(stored.rule.app)}</b><small>{describeScope(stored.rule)}</small></span>
                 <span class={`decision-mark ${stored.rule.action}`}>{stored.rule.action} {stored.rule.direction === "outbound" ? "out" : "in"}</span>
@@ -700,7 +728,7 @@ function DecisionSelect(props: {
   const busy = () => props.changing === `${props.row.app}:${props.direction}`;
   // a rule with no backing filter is not deciding anything yet; say so instead
   // of rendering the same confident state as an enforced one
-  const dormant = () => isDormantRule(props.row, props.direction);
+  const dormant = () => isDormantRule(props.row, props.direction, activeProfile());
   const label = () => {
     const base = `${props.direction} rule for ${fileName(props.row.app)}`;
     return dormant() ? `${base}, waiting for the program to return` : base;

@@ -30,8 +30,9 @@ pub use model::{
 };
 pub use panel::{Panel, Widget};
 pub use rule::{
-    parse_backup, BackupRule, Cidr, FirewallMode, PortRange, ProposalState, Rule, RuleAction,
-    RuleLifetime, RuleProposal, RuleScope, StoredRule,
+    active_profile, effective_mode, parse_backup, BackupRule, Cidr, FirewallMode, NetworkIdentity,
+    PortRange, Profile, ProfileState, ProposalState, Rule, RuleAction, RuleLifetime, RuleProposal,
+    RuleScope, StoredRule,
     BACKUP_MAX_BYTES,
 };
 pub use usage::{Granularity, HostUsage, UsageBucket, UsageQuery};

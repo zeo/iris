@@ -267,6 +267,13 @@ pub fn effective_mode(global: FirewallMode, profile: Option<&Profile>) -> Firewa
     profile.and_then(|profile| profile.mode).unwrap_or(global)
 }
 
+/// an app's upload ceiling, enforced by the os traffic shaper
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateCap {
+    pub app: AppId,
+    pub up_bytes_per_sec: u64,
+}
+
 /// how a plugin-proposed rule was disposed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

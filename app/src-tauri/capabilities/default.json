@@ -33,6 +33,8 @@
     "allow-firewall-mode",
     "allow-get-host-usage",
     "allow-get-profiles",
+    "allow-list-caps",
+    "allow-set-cap",
     "allow-set-profiles",
     "allow-set-tray-graph",
     "allow-forget-apps",

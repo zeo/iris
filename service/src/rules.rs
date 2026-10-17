@@ -67,6 +67,7 @@ pub struct RuleStore {
     network: Option<NetworkIdentity>,
     /// the profile in force, which decides which profile-tagged rules apply
     active: Option<String>,
+    caps: crate::caps::CapStore,
 }
 
 fn mode_path() -> PathBuf {
@@ -222,6 +223,7 @@ impl RuleStore {
             profiles,
             network,
             active,
+            caps: crate::caps::CapStore::open(),
         };
         // persist the drops above so a session rule cannot return on a crash.
         // only then: rewriting after a corrupt file would replace the fail-safe
@@ -254,6 +256,14 @@ impl RuleStore {
     /// bring the platform in line with the saved mode; run once at startup
     pub fn restore_mode(&mut self) -> anyhow::Result<()> {
         self.enforce_mode(self.mode())
+    }
+
+    pub fn caps(&self) -> Vec<iris_core::RateCap> {
+        self.caps.list()
+    }
+
+    pub fn set_cap(&mut self, app: iris_core::AppId, up_bytes_per_sec: Option<u64>) -> anyhow::Result<()> {
+        self.caps.set(app, up_bytes_per_sec)
     }
 
     pub fn profile_state(&self) -> ProfileState {

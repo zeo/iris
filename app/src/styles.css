@@ -2777,3 +2777,10 @@ button.row.usage[aria-expanded="true"] {
   color: var(--faint);
   font-size: var(--fz-sm);
 }
+.picker-scope.hidden {
+  display: none;
+}
+.picker-note {
+  color: var(--muted);
+  font-size: var(--fz-sm);
+}

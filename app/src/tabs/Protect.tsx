@@ -12,6 +12,9 @@ import { activeProfile, profileState, refreshProfiles } from "../lib/profiles";
 import {
   addRule,
   appliesIn,
+  caps,
+  refreshCaps,
+  setCap,
   coversWholeApp,
   describeLifetime,
   describeScope,
@@ -97,7 +100,9 @@ export function Protect() {
   const [query, setQuery] = createSignal("");
   const [filter, setFilter] = createSignal<"all" | "active" | "ruled">("all");
   const [adding, setAdding] = createSignal(false);
-  const [action, setAction] = createSignal<"block" | "allow">("block");
+  const [action, setAction] = createSignal<"block" | "allow" | "limit">("block");
+  const [limitKb, setLimitKb] = createSignal("512");
+  void refreshCaps();
   const [direction, setDirection] = createSignal<Direction>("outbound");
   const [remote, setRemote] = createSignal("");
   const [ports, setPorts] = createSignal("");
@@ -239,7 +244,7 @@ export function Protect() {
   const candidates = createMemo(() => {
     // a narrowed rule can sit beside an app's whole-app rule, so every live app
     // stays pickable for one
-    if (narrowed()) return engine.apps();
+    if (narrowed() || action() === "limit") return engine.apps();
     const covered = new Set(
       rules()
         .filter((stored) => stored.rule.direction === direction() && coversWholeApp(stored.rule))
@@ -414,6 +419,7 @@ export function Protect() {
               <div class="seg" role="group" aria-label="action">
                 <button classList={{ on: action() === "block" }} aria-pressed={action() === "block"} onClick={() => setAction("block")}>block</button>
                 <button classList={{ on: action() === "allow" }} aria-pressed={action() === "allow"} onClick={() => setAction("allow")}>allow</button>
+                <button classList={{ on: action() === "limit" }} aria-pressed={action() === "limit"} onClick={() => setAction("limit")} title="Cap how fast the app can upload">limit</button>
               </div>
               <div class="seg" role="group" aria-label="direction">
                 <button classList={{ on: direction() === "outbound" }} aria-pressed={direction() === "outbound"} onClick={() => setDirection("outbound")}>out</button>
@@ -422,7 +428,15 @@ export function Protect() {
             </div>
             <button class="iconbtn" onClick={() => setAdding(false)} aria-label="close"><Icon name="x" /></button>
           </div>
-          <div class="picker-scope">
+          <Show when={action() === "limit"}>
+            <div class="picker-scope">
+              <label class="field">
+                <input aria-label="Upload limit in KB/s" inputMode="numeric" value={limitKb()} onInput={(event) => setLimitKb(event.currentTarget.value)} />
+              </label>
+              <small class="picker-note">KB/s upload. Windows can only cap what an app sends, not what it downloads.</small>
+            </div>
+          </Show>
+          <div class="picker-scope" classList={{ hidden: action() === "limit" }}>
             <label class="field">
               <input aria-label="Remote address or network" placeholder="any host, or 203.0.113.0/24" value={remote()} onInput={(event) => setRemote(event.currentTarget.value)} />
             </label>
@@ -474,7 +488,14 @@ export function Protect() {
                   onClick={async () => {
                     setToolError("");
                     try {
-                      await addRule(sample.app, direction(), action(), ruleOptions());
+                      const choice = action();
+                      if (choice === "limit") {
+                        const kb = Number(limitKb());
+                        if (!Number.isFinite(kb) || kb <= 0) throw new Error("Enter an upload limit above 0 KB/s.");
+                        await setCap(sample.app, Math.round(kb * 1024));
+                      } else {
+                        await addRule(sample.app, direction(), choice, ruleOptions());
+                      }
                     } catch (error) {
                       setToolError(String(error));
                     }
@@ -483,11 +504,43 @@ export function Protect() {
                   <AppIcon path={sample.app} />
                   <span class="name">{sample.name ?? fileName(sample.app)}</span>
                   <span class="grow" />
-                  <span class={`decision-mark ${action()}`}>{action()} {direction() === "outbound" ? "out" : "in"}</span>
+                  <span class={`decision-mark ${action()}`}>
+                    {action() === "limit" ? `${limitKb()} KB/s up` : `${action()} ${direction() === "outbound" ? "out" : "in"}`}
+                  </span>
                 </button>
               )}
             </For>
           </div>
+        </div>
+      </Show>
+
+      <Show when={caps().length > 0}>
+        <div class="panel scoped-rules">
+          <span class="label">upload limits</span>
+          <For each={caps()}>
+            {(cap) => (
+              <div class="scoped-rule">
+                <AppIcon path={cap.app} />
+                <span><b>{fileName(cap.app)}</b><small>{cap.app}</small></span>
+                <span class="decision-mark limit">{bytes(cap.up_bytes_per_sec)}/s up</span>
+                <small class="scoped-life">until lifted</small>
+                <button
+                  class="iconbtn"
+                  aria-label="lift upload limit"
+                  onClick={async () => {
+                    setToolError("");
+                    try {
+                      await setCap(cap.app, null);
+                    } catch (error) {
+                      setToolError(String(error));
+                    }
+                  }}
+                >
+                  <Icon name="x" />
+                </button>
+              </div>
+            )}
+          </For>
         </div>
       </Show>
 

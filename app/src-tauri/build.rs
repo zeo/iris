@@ -12,6 +12,8 @@ fn main() {
         "firewall_mode",
         "get_host_usage",
         "get_profiles",
+        "list_caps",
+        "set_cap",
         "set_profiles",
         "set_tray_graph",
         "forget_apps",

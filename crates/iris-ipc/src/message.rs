@@ -1,5 +1,5 @@
 use iris_core::{
-    AdapterKind, Alert, Annotation, AppId, ByteCounts, EnrichTarget, FirewallMode, HostUsage, KnownApp, Profile, ProfileState,
+    AdapterKind, Alert, Annotation, AppId, ByteCounts, EnrichTarget, FirewallMode, HostUsage, KnownApp, Profile, ProfileState, RateCap,
     LiveConnection, Panel, Rule, RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket,
     UsageQuery,
 };
@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 /// v10 adds rule scopes and lifetimes, and the firewall mode.
 /// v11 adds per-host usage history.
 /// v12 adds network profiles.
-pub const PROTOCOL_VERSION: u32 = 12;
+/// v13 adds per-app upload caps.
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// what the UI shows for one installed plugin: its declared identity and
 /// capabilities, plus whether the user has consented and enabled it
@@ -87,6 +88,15 @@ pub enum ClientMessage {
     },
     GetProfiles {
         req: u64,
+    },
+    ListCaps {
+        req: u64,
+    },
+    /// cap an app's upload, or lift the cap with none. privileged
+    SetCap {
+        req: u64,
+        app: AppId,
+        up_bytes_per_sec: Option<u64>,
     },
     /// replace the network profiles and the manual choice. privileged, since
     /// switching profile changes which rules are enforced
@@ -258,6 +268,7 @@ pub enum Reply {
     RuleGrant(bool),
     FirewallMode(FirewallMode),
     Profiles(ProfileState),
+    Caps(Vec<RateCap>),
     /// per-host totals, biggest first
     HostUsage(Vec<HostUsage>),
 }

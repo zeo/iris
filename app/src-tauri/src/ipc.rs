@@ -61,6 +61,8 @@ pub enum EngineCmd {
     GetRuleGrant,
     GetFirewallMode,
     GetProfiles,
+    ListCaps,
+    SetCap(String, Option<u64>),
     SetProfiles(Vec<iris_core::Profile>, Option<String>),
     SetFirewallMode(iris_core::FirewallMode),
     GetUsage(UsageQuery),
@@ -175,6 +177,15 @@ pub async fn forget_apps(app: AppHandle, paths: Vec<String>) -> Result<usize, St
 pub async fn rule_grant(app: AppHandle) -> Result<bool, String> {
     match dispatch(&app, EngineCmd::GetRuleGrant).await? {
         Reply::RuleGrant(granted) => Ok(granted),
+        Reply::Error(error) => Err(error),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn list_caps(app: AppHandle) -> Result<Vec<iris_core::RateCap>, String> {
+    match dispatch(&app, EngineCmd::ListCaps).await? {
+        Reply::Caps(caps) => Ok(caps),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
@@ -562,6 +573,12 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     EngineCmd::GetRuleGrant => ClientMessage::GetRuleGrant { req },
                     EngineCmd::GetFirewallMode => ClientMessage::GetFirewallMode { req },
                     EngineCmd::GetProfiles => ClientMessage::GetProfiles { req },
+                    EngineCmd::ListCaps => ClientMessage::ListCaps { req },
+                    EngineCmd::SetCap(path, up_bytes_per_sec) => ClientMessage::SetCap {
+                        req,
+                        app: iris_core::AppId::from_path(&path),
+                        up_bytes_per_sec,
+                    },
                     EngineCmd::SetProfiles(profiles, manual) =>
                         ClientMessage::SetProfiles { req, profiles, manual },
                     EngineCmd::SetFirewallMode(mode) => ClientMessage::SetFirewallMode { req, mode },

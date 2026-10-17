@@ -105,6 +105,8 @@ pub fn run() {
             rulectl::firewall_mode,
             ipc::get_host_usage,
             ipc::get_profiles,
+            ipc::list_caps,
+            rulectl::set_cap,
             rulectl::set_profiles,
             traygraph::set_tray_graph,
             rulectl::set_firewall_mode,

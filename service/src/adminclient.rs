@@ -43,6 +43,15 @@ fn build_op(args: &[String]) -> anyhow::Result<Op> {
             }
             Ok(Op::Single(ClientMessage::AddRule { req: 1, rule }))
         }
+        Some("--cap") => {
+            let path = args.get(1).context("cap: missing app path")?;
+            let up_bytes_per_sec = match args.get(2).map(String::as_str) {
+                Some("off") => None,
+                Some(rate) => Some(rate.parse().context("cap: rate must be bytes per second")?),
+                None => bail!("cap: missing rate"),
+            };
+            Ok(Op::Single(ClientMessage::SetCap { req: 1, app: AppId::from_path(path), up_bytes_per_sec }))
+        }
         Some("--profiles-json") => {
             #[derive(serde::Deserialize)]
             struct Profiles {

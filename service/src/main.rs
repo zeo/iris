@@ -3,6 +3,7 @@
 //! (ETW monitor, WFP rules) and serves the UI over the named-pipe IPC.
 
 mod adminclient;
+mod caps;
 mod engine;
 mod grant;
 #[cfg(windows)]

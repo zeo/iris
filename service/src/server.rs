@@ -355,6 +355,18 @@ async fn handle(
                         };
                         reply(&mut send, req, result).await?;
                     }
+                    ClientMessage::ListCaps { req } => {
+                        let caps = rules.lock().unwrap_or_else(|error| error.into_inner()).caps();
+                        reply(&mut send, req, Reply::Caps(caps)).await?;
+                    }
+                    ClientMessage::SetCap { req, app, up_bytes_per_sec } => {
+                        let result = if peer.may_manage_rules() {
+                            set_cap(&rules, app, up_bytes_per_sec).await
+                        } else {
+                            Reply::Error(NEEDS_ELEVATION.into())
+                        };
+                        reply(&mut send, req, result).await?;
+                    }
                     ClientMessage::GetProfiles { req } => {
                         let state = rules
                             .lock()
@@ -851,6 +863,10 @@ async fn handle_admin(
                 let result = set_mode(&rules, mode).await;
                 reply(&mut send, req, result).await?;
             }
+            ClientMessage::SetCap { req, app, up_bytes_per_sec } => {
+                let result = set_cap(&rules, app, up_bytes_per_sec).await;
+                reply(&mut send, req, result).await?;
+            }
             ClientMessage::SetProfiles { req, profiles, manual } => {
                 let result = set_profiles(&rules, profiles, manual).await;
                 reply(&mut send, req, result).await?;
@@ -925,6 +941,26 @@ async fn set_mode(rules: &Arc<Mutex<RuleStore>>, mode: iris_core::FirewallMode) 
     .unwrap_or_else(|_| Reply::Error("the mode change failed".into()))
 }
 
+async fn set_cap(
+    rules: &Arc<Mutex<RuleStore>>,
+    app: iris_core::AppId,
+    up_bytes_per_sec: Option<u64>,
+) -> Reply {
+    let rules = rules.clone();
+    tokio::task::spawn_blocking(move || {
+        match rules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .set_cap(app, up_bytes_per_sec)
+        {
+            Ok(()) => Reply::Ok,
+            Err(error) => Reply::Error(format!("could not set the upload cap: {error}")),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Reply::Error("the cap change failed".into()))
+}
+
 async fn set_profiles(
     rules: &Arc<Mutex<RuleStore>>,
     profiles: Vec<iris_core::Profile>,
@@ -958,6 +994,8 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::AddRule { req, .. }
         | ClientMessage::GetFirewallMode { req }
         | ClientMessage::GetProfiles { req }
+        | ClientMessage::ListCaps { req }
+        | ClientMessage::SetCap { req, .. }
         | ClientMessage::SetProfiles { req, .. }
         | ClientMessage::SetFirewallMode { req, .. }
         | ClientMessage::RemoveRule { req, .. }

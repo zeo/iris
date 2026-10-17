@@ -1,5 +1,5 @@
 use iris_core::Alert;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
 
@@ -14,7 +14,22 @@ const MAX_VISIBLE: usize = 2;
 pub struct PromptState {
     count: AtomicUsize,
     visibility_lock: Mutex<()>,
+    /// card rectangles in css pixels; everything outside them passes input through
+    hit_region: Mutex<Vec<HitRect>>,
+    snoozed: AtomicBool,
+    deferred: AtomicBool,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize)]
+pub struct HitRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+const CARD_RADIUS: f64 = 12.0;
+const DEFER_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn stack_height(count: usize) -> f64 {
     let count = count.clamp(1, MAX_VISIBLE) as f64;
@@ -105,13 +120,171 @@ pub fn show(app: &tauri::AppHandle, alert: &Alert) {
         return;
     }
 
+    if snoozed(app) {
+        return;
+    }
+    if presentation_blocked() {
+        defer_until_clear(app);
+        return;
+    }
+
     let handle = app.clone();
     let alert_clone = alert.clone();
     let _ = app.run_on_main_thread(move || show_window(&handle, Some(&alert_clone)));
 }
 
+/// hold prompts back while an exclusive fullscreen app or presentation owns the
+/// display, then surface whatever is still pending once it lets go
+fn defer_until_clear(app: &tauri::AppHandle) {
+    if app
+        .state::<PromptState>()
+        .deferred
+        .swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        while presentation_blocked() {
+            std::thread::sleep(DEFER_POLL);
+        }
+        handle
+            .state::<PromptState>()
+            .deferred
+            .store(false, Ordering::Release);
+        let window_handle = handle.clone();
+        let _ = handle.run_on_main_thread(move || show_window(&window_handle, None));
+    });
+}
+
+/// true while windows reports a state where a topmost card is unseen or would
+/// interrupt: exclusive d3d fullscreen or presentation mode. borderless
+/// fullscreen (busy) still gets the card, clipped to its own pixels
+#[cfg(windows)]
+fn presentation_blocked() -> bool {
+    use windows::Win32::UI::Shell::{
+        SHQueryUserNotificationState, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+    };
+    matches!(
+        unsafe { SHQueryUserNotificationState() },
+        Ok(state) if state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE
+    )
+}
+
+#[cfg(not(windows))]
+fn presentation_blocked() -> bool {
+    false
+}
+
+pub fn snoozed(app: &tauri::AppHandle) -> bool {
+    app.state::<PromptState>().snoozed.load(Ordering::Acquire)
+}
+
+/// toggle prompt snooze; resuming surfaces anything that queued meanwhile
+pub fn set_snoozed(app: &tauri::AppHandle, snoozed: bool) {
+    app.state::<PromptState>()
+        .snoozed
+        .store(snoozed, Ordering::Release);
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if snoozed {
+            let state = handle.state::<PromptState>();
+            let _guard = state
+                .visibility_lock
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(window) = handle.get_webview_window(LABEL) {
+                let _ = hide_without_input(&window);
+            }
+        } else if presentation_blocked() {
+            defer_until_clear(&handle);
+        } else {
+            show_window(&handle, None);
+        }
+    });
+}
+
+/// the frontend's measured card rectangles; only these pixels take input
+#[tauri::command]
+pub fn set_prompt_hit_region(app: tauri::AppHandle, rects: Vec<HitRect>) -> Result<(), String> {
+    let state = app.state::<PromptState>();
+    let _visibility_guard = state
+        .visibility_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    *state
+        .hit_region
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = rects;
+    let Some(window) = app.get_webview_window(LABEL) else {
+        return Ok(());
+    };
+    apply_hit_region(&app, &window)
+}
+
+/// clip the host to the last reported card rectangles, the way a per-pixel
+/// alpha layered window passes clicks through its clear pixels. an empty set
+/// clips it to nothing, so a host shown before its cards render, or left up
+/// after they go, never swallows a click meant for the window beneath
+#[cfg(windows)]
+fn apply_hit_region(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Result<(), String> {
+    use windows::Win32::Graphics::Gdi::{
+        CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, RGN_OR,
+    };
+
+    let scale = current_scale(app);
+    let rects = physical_rects(
+        &app.state::<PromptState>()
+            .hit_region
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        scale,
+    );
+    let hwnd =
+        windows::Win32::Foundation::HWND(window.hwnd().map_err(|error| error.to_string())?.0);
+    let radius = (CARD_RADIUS * scale).round() as i32;
+    unsafe {
+        let region = CreateRectRgn(0, 0, 0, 0);
+        for (left, top, right, bottom) in rects {
+            let card = CreateRoundRectRgn(left, top, right + 1, bottom + 1, radius, radius);
+            CombineRgn(Some(region), Some(region), Some(card), RGN_OR);
+            let _ = DeleteObject(card.into());
+        }
+        // the system owns the region once it is set
+        if SetWindowRgn(hwnd, Some(region), true) == 0 {
+            let _ = DeleteObject(region.into());
+            return Err("could not clip connection prompt host".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn apply_hit_region(_app: &tauri::AppHandle, _window: &tauri::WebviewWindow) -> Result<(), String> {
+    Ok(())
+}
+
+/// css rectangles to physical (left, top, right, bottom), dropping empty ones
+fn physical_rects(rects: &[HitRect], scale: f64) -> Vec<(i32, i32, i32, i32)> {
+    rects
+        .iter()
+        .filter(|rect| rect.width > 0.0 && rect.height > 0.0)
+        .map(|rect| {
+            (
+                (rect.x * scale).floor() as i32,
+                (rect.y * scale).floor() as i32,
+                ((rect.x + rect.width) * scale).ceil() as i32,
+                ((rect.y + rect.height) * scale).ceil() as i32,
+            )
+        })
+        .collect()
+}
+
 fn show_window(app: &tauri::AppHandle, alert: Option<&Alert>) {
     let state = app.state::<PromptState>();
+    if state.snoozed.load(Ordering::Acquire) {
+        return;
+    }
     let _visibility_guard = state
         .visibility_lock
         .lock()
@@ -130,6 +303,7 @@ fn show_window(app: &tauri::AppHandle, alert: Option<&Alert>) {
         let _ = configure_prompt_window(&window);
         let _ = window.set_size(size);
         position_window_on_monitor(app, &window, monitor.as_ref(), size);
+        let _ = apply_hit_region(app, &window);
         let _ = show_without_focus(&window);
         let _ = window.set_ignore_cursor_events(false);
         let _ = window.emit("connection-prompts-refresh", ());
@@ -171,6 +345,7 @@ fn show_window(app: &tauri::AppHandle, alert: Option<&Alert>) {
     if let Err(error) = configure_prompt_window(&window) {
         tracing::debug!("could not configure connection prompt host: {error}");
     }
+    let _ = apply_hit_region(app, &window);
     let _ = show_without_focus(&window);
     let _ = window.set_ignore_cursor_events(false);
     if let Some(alert) = alert {
@@ -198,6 +373,13 @@ pub fn resize_connection_prompts(app: tauri::AppHandle, count: usize) -> Result<
 }
 
 fn hide_without_input(window: &tauri::WebviewWindow) -> Result<(), String> {
+    window
+        .state::<PromptState>()
+        .hit_region
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clear();
+    let _ = apply_hit_region(window.app_handle(), window);
     let cursor = window.set_ignore_cursor_events(true);
     let hidden = window.hide();
     #[cfg(windows)]
@@ -212,8 +394,13 @@ fn sync_window_visibility(
     window: &tauri::WebviewWindow,
 ) -> Result<(), String> {
     let count = app.state::<PromptState>().count.load(Ordering::Acquire);
-    if count == 0 {
+    if count == 0 || snoozed(app) {
         return hide_without_input(window);
+    }
+    if presentation_blocked() {
+        hide_without_input(window)?;
+        defer_until_clear(app);
+        return Ok(());
     }
 
     let monitor = target_monitor(app, window);
@@ -224,6 +411,7 @@ fn sync_window_visibility(
     let size = host_size(count, scale);
     window.set_size(size).map_err(|error| error.to_string())?;
     position_window_on_monitor(app, window, monitor.as_ref(), size);
+    apply_hit_region(app, window)?;
     show_without_focus(window)?;
     position_window_on_monitor(app, window, monitor.as_ref(), size);
     window
@@ -317,8 +505,10 @@ pub fn apply_scale(app: &tauri::AppHandle, scale: f64) {
         return;
     }
     let size = host_size(count, scale);
+    let monitor = target_monitor(app, &window);
     let _ = window.set_size(size);
-    position_window(app, &window, size);
+    position_window_on_monitor(app, &window, monitor.as_ref(), size);
+    let _ = apply_hit_region(app, &window);
 }
 
 fn target_monitor_app(app: &tauri::AppHandle) -> Option<tauri::Monitor> {
@@ -377,10 +567,6 @@ fn target_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Opti
         .or_else(|| window.current_monitor().ok().flatten())
         .or_else(|| window.primary_monitor().ok().flatten())
         .or_else(|| app.primary_monitor().ok().flatten())
-}
-
-fn position_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, size: PhysicalSize<f64>) {
-    position_window_on_monitor(app, window, None, size);
 }
 
 fn position_window_on_monitor(
@@ -456,7 +642,17 @@ fn anchor_wayland(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{host_size, stack_height, trailing_edge};
+    use super::{host_size, physical_rects, stack_height, trailing_edge, HitRect};
+
+    #[test]
+    fn hit_region_covers_only_cards_in_physical_pixels() {
+        let rects = [
+            HitRect { x: 0.0, y: 0.0, width: 420.0, height: 228.0 },
+            HitRect { x: 0.0, y: 238.0, width: 0.0, height: 228.0 },
+        ];
+        assert_eq!(physical_rects(&rects, 1.5), vec![(0, 0, 630, 342)]);
+        assert!(physical_rects(&[], 1.0).is_empty());
+    }
 
     #[test]
     fn sizes_the_visible_prompt_stack_without_exceeding_two_cards() {

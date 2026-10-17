@@ -13,6 +13,8 @@ import { AppIcon } from "./AppIcon";
 import { Icon } from "./Icon";
 
 const MAX_VISIBLE = 2;
+// an unanswered card steps aside into Alerts so it never parks over another app
+const PROMPT_TIMEOUT_MS = 30_000;
 
 function destination(remote: Extract<AlertKind, { kind: "new_app" }>["remote"]): string {
   return remote ? `${remote.addr}:${remote.port}` : "Network access";
@@ -34,23 +36,37 @@ export function ConnectionPrompt() {
     const sequence = ++refreshSequence;
     try {
       const next = await invoke<Alert[]>("list_prompt_alerts");
-      if (sequence === refreshSequence) {
-        setAlerts((current) => {
-          const map = new Map<number, Alert>();
-          for (const item of next) {
-            if (needsDecision(item)) map.set(item.id, item);
-          }
-          for (const item of current) {
-            if (needsDecision(item) && !map.has(item.id)) {
-              map.set(item.id, item);
-            }
-          }
-          return Array.from(map.values());
-        });
-      }
+      // the engine's pending list is authoritative: a card decided in the main
+      // window or acknowledged elsewhere has to leave this stack too
+      if (sequence === refreshSequence) setAlerts(next.filter(needsDecision));
     } catch (reason) {
       if (sequence === refreshSequence) setError({ id: 0, message: String(reason) });
     }
+    reportHitRegion();
+  };
+
+  let stack: HTMLElement | undefined;
+  // offset geometry forces layout and ignores the rise animation's transform,
+  // so the clip matches where each card settles, even while the host is hidden
+  const reportHitRegion = () => {
+    const rects = Array.from(stack?.querySelectorAll<HTMLElement>(".connection-prompt, .prompt-error") ?? [])
+      .map((element) => ({
+        x: element.offsetLeft,
+        y: element.offsetTop,
+        width: element.offsetWidth,
+        height: element.offsetHeight,
+      }));
+    void invoke("set_prompt_hit_region", { rects }).catch(() => undefined);
+  };
+
+  const timers = new Map<number, number>();
+  const holdTimeout = (id: number) => {
+    window.clearTimeout(timers.get(id));
+    timers.delete(id);
+  };
+  const armTimeout = (id: number) => {
+    holdTimeout(id);
+    timers.set(id, window.setTimeout(() => dismiss(id), PROMPT_TIMEOUT_MS));
   };
 
   onMount(() => {
@@ -90,15 +106,27 @@ export function ConnectionPrompt() {
       disposed = true;
       for (const unlisten of unlisteners) unlisten();
       window.removeEventListener("keydown", onKey);
+      for (const timer of timers.values()) window.clearTimeout(timer);
     });
     void refresh();
   });
 
   createEffect(() => {
-    const count = visible().length;
+    const shown = visible();
+    const count = shown.length;
+    for (const id of timers.keys()) {
+      if (!shown.some((alert) => alert.id === id)) holdTimeout(id);
+    }
+    for (const alert of shown) if (!timers.has(alert.id)) armTimeout(alert.id);
     resizeQueue = resizeQueue
       .then(() => invoke<void>("resize_connection_prompts", { count }))
+      .then(reportHitRegion)
       .catch(() => undefined);
+  });
+
+  createEffect(() => {
+    error();
+    reportHitRegion();
   });
 
   const dismiss = (id: number) => {
@@ -131,7 +159,7 @@ export function ConnectionPrompt() {
   };
 
   return (
-    <main class="connection-prompt-stack">
+    <main class="connection-prompt-stack" ref={stack}>
       <Show when={error()?.id === 0}>
         <div class="prompt-error">{error()?.message}</div>
       </Show>
@@ -144,6 +172,8 @@ export function ConnectionPrompt() {
               role="alertdialog"
               aria-modal="true"
               aria-label={`New network connection from ${fileName(application.app)}`}
+              onPointerEnter={() => holdTimeout(alert.id)}
+              onPointerLeave={() => armTimeout(alert.id)}
             >
               <header data-tauri-drag-region>
                 <span class="prompt-mark"><Icon name="shield" /></span>

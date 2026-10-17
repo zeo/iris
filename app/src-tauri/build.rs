@@ -8,6 +8,7 @@ fn main() {
         "list_alerts",
         "list_prompt_alerts",
         "resize_connection_prompts",
+        "set_prompt_hit_region",
         "report_display_scale",
         "ack_alert",
         "decide_alert",

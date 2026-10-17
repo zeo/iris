@@ -15,7 +15,7 @@ mod svcctl;
 mod updater;
 
 use std::sync::Mutex;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
@@ -77,6 +77,7 @@ pub fn run() {
             ipc::list_alerts,
             ipc::list_prompt_alerts,
             prompt::resize_connection_prompts,
+            prompt::set_prompt_hit_region,
             notify::set_notifications_enabled,
             report_display_scale,
             ipc::ack_alert,
@@ -215,16 +216,26 @@ fn main_dimension(preferred: f64, minimum: f64, available: f64, webview_scale: f
 /// a tray icon that restores the window on click and offers show / quit
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Iris", true, None::<&str>)?;
+    let pause = CheckMenuItem::with_id(
+        app,
+        "pause-prompts",
+        "Pause connection prompts",
+        true,
+        prompt::snoozed(app),
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&show, &pause, &separator, &quit])?;
 
     TrayIconBuilder::with_id("iris-tray")
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("Iris")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
+        .on_menu_event(move |app, event| match event.id.as_ref() {
             "show" => reveal(app),
+            "pause-prompts" => prompt::set_snoozed(app, pause.is_checked().unwrap_or(false)),
             "quit" => app.exit(0),
             _ => {}
         })

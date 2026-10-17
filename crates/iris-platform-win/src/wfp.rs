@@ -7,7 +7,8 @@
 //! FwpmGetAppIdFromFileName0 must stay alive across FwpmFilterAdd0, so it is
 //! freed only after the add returns.
 
-use iris_core::{Direction, EngineError, EngineResult, RuleAction};
+use iris_core::{Direction, EngineError, EngineResult, Protocol, RuleAction, RuleScope};
+use std::net::IpAddr;
 use std::ptr;
 use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -17,13 +18,16 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterCreateEnumHandle0,
     FwpmFilterDeleteById0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0,
     FwpmGetAppIdFromFileName0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0,
-    FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_FLAGS, FWPM_DISPLAY_DATA0,
+    FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_FLAGS, FWPM_CONDITION_IP_PROTOCOL,
+    FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_DISPLAY_DATA0,
     FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_ENUM_TEMPLATE0, FWPM_FILTER_FLAG_PERSISTENT,
     FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
     FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0,
     FWPM_SUBLAYER0, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE,
     FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0, FWP_FILTER_ENUM_OVERLAPPING,
-    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_NONE_SET, FWP_UINT32, FWP_UINT64, FWP_VALUE0,
+    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_NONE_SET, FWP_MATCH_RANGE, FWP_RANGE0, FWP_RANGE_TYPE,
+    FWP_UINT16, FWP_UINT32, FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK,
+    FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0,
     FWPM_PROVIDER_FLAG_PERSISTENT, FWPM_SUBLAYER_FLAG_PERSISTENT,
 };
 use windows::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
@@ -49,6 +53,12 @@ const IRIS_SUBLAYER: GUID = GUID::from_values(
 /// see: Filter Arbitration, learn.microsoft.com/windows/win32/fwp/filter-arbitration
 /// an explicit decision the user made, which must win over everything below
 const WEIGHT_APP_RULE: u64 = 0x2000;
+/// a decision limited to some hosts, ports, or a protocol. it must outrank the
+/// app's whole-traffic rule, or "allow this app, but block it reaching x" could
+/// never take effect
+const WEIGHT_SCOPED_RULE: u64 = 0x3000;
+/// lockdown denies everything non-loopback, above every rule the user made
+const WEIGHT_LOCKDOWN: u64 = 0x4000;
 /// a permit seeded for an app the user had already accepted before ask mode
 /// existed. it has to beat the catch-all deny but lose to a real block rule, or
 /// a block could be shadowed by the app's own grandfathered permit.
@@ -67,9 +77,14 @@ pub struct Wfp {
     events: Option<crate::netevent::NetEvents>,
     /// the receiving end of that subscription, handed to the service once
     denied: Option<std::sync::mpsc::Receiver<crate::netevent::DeniedConnection>>,
+    /// the sending end, kept for the engine's life so ask mode switched off and
+    /// back on feeds the receiver the service already holds
+    denied_tx: std::sync::mpsc::Sender<crate::netevent::DeniedConnection>,
     /// permits seeded for apps accepted before ask mode existed, so turning it
     /// on does not retroactively cut off the whole machine
     trusted_filters: Vec<u64>,
+    /// the deny-everything filters behind lockdown, empty when it is off
+    lockdown_filters: Vec<u64>,
 }
 
 // a WFP engine handle is safe to use from any thread; the rule store guards all
@@ -88,6 +103,7 @@ impl Wfp {
     /// open the engine and ensure iris's provider + sublayer exist
     pub fn open() -> EngineResult<Wfp> {
         unsafe {
+            let (denied_tx, denied) = std::sync::mpsc::channel();
             let mut engine = HANDLE::default();
             let rc = FwpmEngineOpen0(None, RPC_C_AUTHN_WINNT, None, None, &mut engine);
             if !ok(rc) {
@@ -97,8 +113,10 @@ impl Wfp {
                 engine,
                 ask_filters: Vec::new(),
                 events: None,
-                denied: None,
+                denied: Some(denied),
+                denied_tx,
                 trusted_filters: Vec::new(),
+                lockdown_filters: Vec::new(),
             };
             wfp.ensure_objects()?;
             Ok(wfp)
@@ -142,6 +160,7 @@ impl Wfp {
         unsafe {
             self.clear_filters();
             self.ask_filters.clear();
+            self.lockdown_filters.clear();
             // now that the sublayer is empty this succeeds; a fresh install
             // reports FWP_E_SUBLAYER_NOT_FOUND, which ensure_objects then fixes
             let _ = FwpmSubLayerDeleteByKey0(self.engine, &IRIS_SUBLAYER);
@@ -214,14 +233,20 @@ impl Wfp {
     }
 
     /// enforce a rule for one app; returns the backing filter ids (one per ip
-    /// family) to store for later removal
+    /// family the scope reaches) to store for later removal
     pub fn apply(
         &mut self,
         path: &str,
         direction: Direction,
         action: RuleAction,
+        scope: &RuleScope,
     ) -> EngineResult<Vec<u64>> {
-        self.apply_weighted(path, direction, action, &WEIGHT_APP_RULE)
+        let rule_weight = if scope.is_whole_app() {
+            WEIGHT_APP_RULE
+        } else {
+            WEIGHT_SCOPED_RULE
+        };
+        self.apply_weighted(path, direction, action, scope, &rule_weight)
     }
 
     fn apply_weighted(
@@ -229,6 +254,7 @@ impl Wfp {
         path: &str,
         direction: Direction,
         action: RuleAction,
+        scope: &RuleScope,
         rule_weight: &u64,
     ) -> EngineResult<Vec<u64>> {
         unsafe {
@@ -244,13 +270,20 @@ impl Wfp {
                 RuleAction::Allow => FWP_ACTION_PERMIT,
             };
 
+            // condition values are passed by pointer, so they live out here
+            // until every add that references them has returned
+            let mut values = ScopeValues::default();
             let mut ids = Vec::with_capacity(2);
             let mut result = Ok(());
-            for layer in Self::layers(direction) {
+            for (layer, v6) in Self::layers(direction).into_iter().zip([false, true]) {
+                if scope.remote.is_some_and(|remote| remote.addr.is_ipv6() != v6) {
+                    continue;
+                }
                 let mut conditions = vec![app_condition(app_id)];
                 if action == RuleAction::Block {
                     conditions.push(non_loopback_condition());
                 }
+                conditions.extend(scope_conditions(scope, &mut values));
 
                 let mut name = wide("Iris rule");
                 let mut filter: FWPM_FILTER0 = std::mem::zeroed();
@@ -329,8 +362,13 @@ impl Wfp {
         let mut seeded = 0usize;
         for path in paths {
             for direction in [Direction::Outbound, Direction::Inbound] {
-                match self.apply_weighted(path, direction, RuleAction::Allow, &WEIGHT_SEEDED_TRUST)
-                {
+                match self.apply_weighted(
+                    path,
+                    direction,
+                    RuleAction::Allow,
+                    &RuleScope::default(),
+                    &WEIGHT_SEEDED_TRUST,
+                ) {
                     Ok(ids) => {
                         seeded += 1;
                         self.trusted_filters.extend(ids);
@@ -379,36 +417,17 @@ impl Wfp {
             ];
             let mut ids = Vec::with_capacity(LAYERS.len());
             for (layer, direction) in LAYERS {
-                let mut conditions = vec![non_loopback_condition()];
-                let mut name = wide("Iris ask mode");
-                let mut filter: FWPM_FILTER0 = std::mem::zeroed();
-                filter.displayData = FWPM_DISPLAY_DATA0 {
-                    name: PWSTR(name.as_mut_ptr()),
-                    description: PWSTR(name.as_mut_ptr()),
-                };
-                filter.providerKey = &IRIS_PROVIDER as *const _ as *mut _;
-                filter.layerKey = layer;
-                filter.subLayerKey = IRIS_SUBLAYER;
-                filter.weight = weight(&WEIGHT_ASK_FALLBACK);
-                filter.numFilterConditions = conditions.len() as u32;
-                filter.filterCondition = conditions.as_mut_ptr();
-                filter.action = FWPM_ACTION0 {
-                    r#type: FWP_ACTION_BLOCK,
-                    Anonymous: std::mem::zeroed(),
-                };
-                let mut id: u64 = 0;
-                let rc = FwpmFilterAdd0(self.engine, &filter, None, Some(&mut id));
-                if !ok(rc) {
-                    // never leave a half-installed default-deny in place: it would
-                    // block one address family and not the other
-                    for (id, _) in &ids {
-                        let _ = FwpmFilterDeleteById0(self.engine, *id);
+                match self.add_catch_all(layer, "Iris ask mode", &WEIGHT_ASK_FALLBACK) {
+                    Ok(id) => ids.push((id, direction)),
+                    Err(error) => {
+                        // never leave a half-installed default-deny in place: it
+                        // would block one address family and not the other
+                        for (id, _) in &ids {
+                            let _ = FwpmFilterDeleteById0(self.engine, *id);
+                        }
+                        return Err(error);
                     }
-                    return Err(EngineError::Os(format!(
-                        "could not install ask mode: {rc:#x}"
-                    )));
                 }
-                ids.push((id, direction));
             }
 
             // the prompt source has to be live before the deny takes effect, or
@@ -416,12 +435,12 @@ impl Wfp {
             match self.events.as_ref() {
                 Some(_) => crate::netevent::set_ask_filters(&ids),
                 None => {
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    match crate::netevent::NetEvents::subscribe(self.engine, &ids, tx) {
-                        Ok(events) => {
-                            self.events = Some(events);
-                            self.denied = Some(rx);
-                        }
+                    match crate::netevent::NetEvents::subscribe(
+                        self.engine,
+                        &ids,
+                        self.denied_tx.clone(),
+                    ) {
+                        Ok(events) => self.events = Some(events),
                         Err(error) => {
                             for (id, _) in &ids {
                                 let _ = FwpmFilterDeleteById0(self.engine, *id);
@@ -434,6 +453,70 @@ impl Wfp {
             self.ask_filters = ids;
         }
         Ok(())
+    }
+
+    pub fn lockdown_active(&self) -> bool {
+        !self.lockdown_filters.is_empty()
+    }
+
+    /// deny every non-loopback connection in both directions, above every rule
+    pub fn set_lockdown(&mut self, enabled: bool) -> EngineResult<()> {
+        if enabled == self.lockdown_active() {
+            return Ok(());
+        }
+        if !enabled {
+            let ids = std::mem::take(&mut self.lockdown_filters);
+            return self.remove(&ids);
+        }
+        let mut ids = Vec::with_capacity(4);
+        for layer in [Direction::Outbound, Direction::Inbound]
+            .into_iter()
+            .flat_map(Self::layers)
+        {
+            match unsafe { self.add_catch_all(layer, "Iris lockdown", &WEIGHT_LOCKDOWN) } {
+                Ok(id) => ids.push(id),
+                Err(error) => {
+                    // a half lockdown would block one family and not the other
+                    let _ = self.remove(&ids);
+                    return Err(error);
+                }
+            }
+        }
+        self.lockdown_filters = ids;
+        Ok(())
+    }
+
+    /// one non-persistent block of all non-loopback traffic at `layer`
+    unsafe fn add_catch_all(
+        &mut self,
+        layer: GUID,
+        label: &str,
+        filter_weight: &u64,
+    ) -> EngineResult<u64> {
+        let mut conditions = vec![non_loopback_condition()];
+        let mut name = wide(label);
+        let mut filter: FWPM_FILTER0 = std::mem::zeroed();
+        filter.displayData = FWPM_DISPLAY_DATA0 {
+            name: PWSTR(name.as_mut_ptr()),
+            description: PWSTR(name.as_mut_ptr()),
+        };
+        filter.providerKey = &IRIS_PROVIDER as *const _ as *mut _;
+        filter.layerKey = layer;
+        filter.subLayerKey = IRIS_SUBLAYER;
+        filter.weight = weight(filter_weight);
+        filter.numFilterConditions = conditions.len() as u32;
+        filter.filterCondition = conditions.as_mut_ptr();
+        filter.action = FWPM_ACTION0 {
+            r#type: FWP_ACTION_BLOCK,
+            Anonymous: std::mem::zeroed(),
+        };
+        let mut id: u64 = 0;
+        let rc = FwpmFilterAdd0(self.engine, &filter, None, Some(&mut id));
+        if ok(rc) {
+            Ok(id)
+        } else {
+            Err(EngineError::Os(format!("could not add {label} filter: {rc:#x}")))
+        }
     }
 
     /// the stream of connections ask mode denied, taken once by the service
@@ -476,6 +559,102 @@ fn app_condition(app_id: *mut FWP_BYTE_BLOB) -> FWPM_FILTER_CONDITION0 {
             },
         },
     }
+}
+
+/// owned storage for the condition values WFP takes by pointer
+#[derive(Default)]
+struct ScopeValues {
+    v4: FWP_V4_ADDR_AND_MASK,
+    v6: FWP_V6_ADDR_AND_MASK,
+    ports: FWP_RANGE0,
+}
+
+/// the remote address, port, and protocol conditions a scope adds. the values
+/// are written into `values`, which must outlive the filter add
+fn scope_conditions(scope: &RuleScope, values: &mut ScopeValues) -> Vec<FWPM_FILTER_CONDITION0> {
+    use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
+        FWP_CONDITION_VALUE0_0 as Value, FWP_VALUE0_0,
+    };
+
+    let mut conditions = Vec::new();
+    if let Some(remote) = scope.remote {
+        let value = match remote.addr {
+            IpAddr::V4(addr) => {
+                // wfp takes ipv4 condition values in host byte order
+                values.v4 = FWP_V4_ADDR_AND_MASK {
+                    addr: u32::from(addr),
+                    mask: u32::MAX
+                        .checked_shl(32 - u32::from(remote.prefix))
+                        .unwrap_or(0),
+                };
+                FWP_CONDITION_VALUE0 {
+                    r#type: FWP_V4_ADDR_MASK,
+                    Anonymous: Value { v4AddrMask: &mut values.v4 },
+                }
+            }
+            IpAddr::V6(addr) => {
+                values.v6 = FWP_V6_ADDR_AND_MASK {
+                    addr: addr.octets(),
+                    prefixLength: remote.prefix,
+                };
+                FWP_CONDITION_VALUE0 {
+                    r#type: FWP_V6_ADDR_MASK,
+                    Anonymous: Value { v6AddrMask: &mut values.v6 },
+                }
+            }
+        };
+        conditions.push(FWPM_FILTER_CONDITION0 {
+            fieldKey: FWPM_CONDITION_IP_REMOTE_ADDRESS,
+            matchType: FWP_MATCH_EQUAL,
+            conditionValue: value,
+        });
+    }
+    if let Some(ports) = scope.ports {
+        let condition = if ports.start == ports.end {
+            FWPM_FILTER_CONDITION0 {
+                fieldKey: FWPM_CONDITION_IP_REMOTE_PORT,
+                matchType: FWP_MATCH_EQUAL,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: FWP_UINT16,
+                    Anonymous: Value { uint16: ports.start },
+                },
+            }
+        } else {
+            let bound = |port: u16| FWP_VALUE0 {
+                r#type: FWP_UINT16,
+                Anonymous: FWP_VALUE0_0 { uint16: port },
+            };
+            values.ports = FWP_RANGE0 {
+                valueLow: bound(ports.start),
+                valueHigh: bound(ports.end),
+            };
+            FWPM_FILTER_CONDITION0 {
+                fieldKey: FWPM_CONDITION_IP_REMOTE_PORT,
+                matchType: FWP_MATCH_RANGE,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: FWP_RANGE_TYPE,
+                    Anonymous: Value { rangeValue: &mut values.ports },
+                },
+            }
+        };
+        conditions.push(condition);
+    }
+    if let Some(protocol) = scope.protocol {
+        conditions.push(FWPM_FILTER_CONDITION0 {
+            fieldKey: FWPM_CONDITION_IP_PROTOCOL,
+            matchType: FWP_MATCH_EQUAL,
+            conditionValue: FWP_CONDITION_VALUE0 {
+                r#type: FWP_UINT8,
+                Anonymous: Value {
+                    uint8: match protocol {
+                        Protocol::Tcp => 6,
+                        Protocol::Udp => 17,
+                    },
+                },
+            },
+        });
+    }
+    conditions
 }
 
 fn non_loopback_condition() -> FWPM_FILTER_CONDITION0 {
@@ -555,6 +734,41 @@ mod tests {
             app > fallback,
             "app rule {app} must outweigh ask mode {fallback}"
         );
+    }
+
+    #[test]
+    fn lockdown_outranks_scoped_rules_which_outrank_whole_app_rules() {
+        let lockdown = weight_value(&weight(&WEIGHT_LOCKDOWN));
+        let scoped = weight_value(&weight(&WEIGHT_SCOPED_RULE));
+        let app = weight_value(&weight(&WEIGHT_APP_RULE));
+        assert!(lockdown > scoped && scoped > app);
+    }
+
+    #[test]
+    fn scope_conditions_carry_host_order_masks_ranges_and_protocols() {
+        let scope = RuleScope {
+            remote: iris_core::Cidr::parse("10.0.0.0/8"),
+            ports: iris_core::PortRange::parse("8000-8100"),
+            protocol: Some(Protocol::Udp),
+        };
+        let mut values = ScopeValues::default();
+        let conditions = scope_conditions(&scope, &mut values);
+        assert_eq!(conditions.len(), 3);
+        assert_eq!(conditions[0].fieldKey, FWPM_CONDITION_IP_REMOTE_ADDRESS);
+        assert_eq!((values.v4.addr, values.v4.mask), (0x0A00_0000, 0xFF00_0000));
+        assert_eq!(conditions[1].matchType, FWP_MATCH_RANGE);
+        unsafe {
+            assert_eq!(values.ports.valueLow.Anonymous.uint16, 8000);
+            assert_eq!(values.ports.valueHigh.Anonymous.uint16, 8100);
+            assert_eq!(conditions[2].conditionValue.Anonymous.uint8, 17);
+        }
+        let everything = RuleScope {
+            remote: iris_core::Cidr::parse("0.0.0.0/0"),
+            ..RuleScope::default()
+        };
+        scope_conditions(&everything, &mut values);
+        assert_eq!(values.v4.mask, 0);
+        assert!(scope_conditions(&RuleScope::default(), &mut values).is_empty());
     }
 
     #[test]

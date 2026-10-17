@@ -9,6 +9,8 @@ fn main() {
         "list_prompt_alerts",
         "resize_connection_prompts",
         "set_prompt_hit_region",
+        "firewall_mode",
+        "set_firewall_mode",
         "report_display_scale",
         "ack_alert",
         "decide_alert",

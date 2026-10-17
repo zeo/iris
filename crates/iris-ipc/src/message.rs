@@ -1,6 +1,7 @@
 use iris_core::{
-    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, KnownApp, LiveConnection, Panel,
-    Rule, RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket, UsageQuery,
+    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, FirewallMode, KnownApp,
+    LiveConnection, Panel, Rule, RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket,
+    UsageQuery,
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +15,8 @@ use serde::{Deserialize, Serialize};
 /// rule-management grant that replaces a UAC prompt per rule change.
 /// v8 separates promptable alerts from decisions deferred during fullscreen.
 /// v9 adds the byte-capture degraded push.
-pub const PROTOCOL_VERSION: u32 = 9;
+/// v10 adds rule scopes and lifetimes, and the firewall mode.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// what the UI shows for one installed plugin: its declared identity and
 /// capabilities, plus whether the user has consented and enabled it
@@ -77,6 +79,14 @@ pub enum ClientMessage {
     AddRule {
         req: u64,
         rule: Rule,
+    },
+    GetFirewallMode {
+        req: u64,
+    },
+    /// ask, notify, or lockdown. privileged like a rule change
+    SetFirewallMode {
+        req: u64,
+        mode: FirewallMode,
     },
     RemoveRule {
         req: u64,
@@ -227,4 +237,5 @@ pub enum Reply {
     Forgotten(usize),
     /// whether the delegated rule-management grant is in force
     RuleGrant(bool),
+    FirewallMode(FirewallMode),
 }

@@ -10,7 +10,7 @@
 //! argv, so a path never needs shell quoting.
 
 use crate::ipc::{try_unelevated, EngineCmd};
-use iris_core::{AppId, Direction, Rule, RuleAction};
+use iris_core::{AppId, Cidr, Direction, FirewallMode, PortRange, Protocol, Rule, RuleAction, RuleLifetime, RuleScope};
 
 /// run `cmd` over the telemetry channel, falling back to one elevated run of
 /// the engine with `args` if the grant is not in force
@@ -25,12 +25,60 @@ async fn mutate(
     crate::elevate::run_engine(app, args).await
 }
 
+/// the optional narrowing and lifetime the Protect tab's rule editor sends
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleOptions {
+    remote: Option<String>,
+    ports: Option<String>,
+    protocol: Option<String>,
+    /// minutes until the rule lapses, or 0 for until the engine restarts
+    minutes: Option<u64>,
+}
+
+impl RuleOptions {
+    fn scope(&self) -> Result<RuleScope, String> {
+        fn text(value: &Option<String>) -> Option<&str> {
+            value.as_deref().map(str::trim).filter(|v| !v.is_empty())
+        }
+        Ok(RuleScope {
+            remote: text(&self.remote)
+                .map(|remote| Cidr::parse(remote).ok_or(format!("{remote} is not an IP address or network")))
+                .transpose()?,
+            ports: text(&self.ports)
+                .map(|ports| PortRange::parse(ports).ok_or(format!("{ports} is not a port or port range")))
+                .transpose()?,
+            protocol: match text(&self.protocol) {
+                None => None,
+                Some("tcp") => Some(Protocol::Tcp),
+                Some("udp") => Some(Protocol::Udp),
+                Some(other) => return Err(format!("{other} is not tcp or udp")),
+            },
+        })
+    }
+
+    fn lifetime(&self) -> RuleLifetime {
+        match self.minutes {
+            None => RuleLifetime::Permanent,
+            Some(0) => RuleLifetime::UntilRestart,
+            Some(minutes) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_millis() as u64)
+                    .unwrap_or(0);
+                RuleLifetime::Until { at_ms: now.saturating_add(minutes.saturating_mul(60_000)) }
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn rule_add(
     app: tauri::AppHandle,
     path: String,
     direction: String,
     action: String,
+    options: Option<RuleOptions>,
 ) -> Result<(), String> {
     // map to a fixed vocabulary so only known tokens reach the elevated run
     let (dir, direction) = if direction == "inbound" {
@@ -43,14 +91,33 @@ pub async fn rule_add(
     } else {
         ("block", RuleAction::Block)
     };
+    let options = options.unwrap_or_default();
     let rule = Rule {
-        app: AppId::from_path(&path),
-        direction,
-        action,
-        label: None,
+        scope: options.scope()?,
+        lifetime: options.lifetime(),
+        ..Rule::new(AppId::from_path(&path), direction, action)
     };
-    let args = vec!["--rule-add".into(), path, dir.into(), act.into()];
+    let args = if rule.scope.is_whole_app() && rule.lifetime.is_permanent() {
+        vec!["--rule-add".into(), path, dir.into(), act.into()]
+    } else {
+        let json = serde_json::to_string(&rule).map_err(|error| error.to_string())?;
+        vec!["--rule-add-json".into(), json]
+    };
     mutate(app, EngineCmd::AddRule(rule), args).await
+}
+
+#[tauri::command]
+pub async fn firewall_mode(app: tauri::AppHandle) -> Result<FirewallMode, String> {
+    crate::ipc::firewall_mode(&app).await
+}
+
+#[tauri::command]
+pub async fn set_firewall_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
+    let mode = FirewallMode::parse(&mode).ok_or("unknown firewall mode")?;
+    let args = vec!["--firewall-mode".into(), mode.as_str().into()];
+    mutate(app.clone(), EngineCmd::SetFirewallMode(mode), args).await?;
+    crate::refresh_mode_menu(&app, mode);
+    Ok(())
 }
 
 #[tauri::command]

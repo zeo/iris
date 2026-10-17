@@ -4,7 +4,7 @@
 //! the engine here, so changing a firewall rule requires elevation.
 
 use anyhow::{bail, Context};
-use iris_core::{AppId, BackupRule, Direction, Rule, RuleAction, BACKUP_MAX_BYTES};
+use iris_core::{AppId, BackupRule, Direction, FirewallMode, Rule, RuleAction, BACKUP_MAX_BYTES};
 use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
 use std::path::Path;
@@ -30,13 +30,25 @@ fn build_op(args: &[String]) -> anyhow::Result<Op> {
             let action = parse_action(args.get(3).map(String::as_str))?;
             Ok(Op::Single(ClientMessage::AddRule {
                 req: 1,
-                rule: Rule {
-                    app: AppId::from_path(path),
-                    direction,
-                    action,
-                    label: None,
-                },
+                rule: Rule::new(AppId::from_path(path), direction, action),
             }))
+        }
+        // a rule limited to hosts, ports, or a protocol, or one that expires,
+        // travels whole as json
+        Some("--rule-add-json") => {
+            let json = args.get(1).context("rule-add-json: missing rule")?;
+            let rule: Rule = serde_json::from_str(json).context("rule-add-json: not a rule")?;
+            if rule.app.0.trim().is_empty() {
+                bail!("rule-add-json: empty application path");
+            }
+            Ok(Op::Single(ClientMessage::AddRule { req: 1, rule }))
+        }
+        Some("--firewall-mode") => {
+            let mode = args
+                .get(1)
+                .and_then(|mode| FirewallMode::parse(mode))
+                .context("firewall mode must be ask, notify, or lockdown")?;
+            Ok(Op::Single(ClientMessage::SetFirewallMode { req: 1, mode }))
         }
         Some("--rule-remove") => {
             let id = parse_id(args.get(1))?;

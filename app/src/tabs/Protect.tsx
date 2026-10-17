@@ -8,7 +8,18 @@ import { forgetKnownApp, forgetKnownApps, knownApps, refreshKnownApps } from "..
 import { engine, type AppSample } from "../lib/engine";
 import { bytes, rate } from "../lib/format";
 import { acceptProposal, pendingProposals, refreshProposals, rejectProposal } from "../lib/proposals";
-import { addRule, refreshRules, removeRule, rules, type StoredRule } from "../lib/rules";
+import {
+  addRule,
+  coversWholeApp,
+  describeLifetime,
+  describeScope,
+  isPermanent,
+  refreshRules,
+  removeRule,
+  rules,
+  type RuleOptions,
+  type StoredRule,
+} from "../lib/rules";
 import { fileName, pathKey } from "../lib/path";
 
 type Direction = "inbound" | "outbound";
@@ -25,8 +36,20 @@ export interface AppRow {
   installed?: boolean;
 }
 
+// scoped and temporary rules are listed apart; the matrix shows each
+// direction's whole-app decision
+const wholeAppRules = (row: AppRow, direction: Direction) =>
+  row.rules.filter((stored) => stored.rule.direction === direction && coversWholeApp(stored.rule));
+
+const DURATIONS: Array<{ label: string; minutes?: number }> = [
+  { label: "permanent" },
+  { label: "1 hour", minutes: 60 },
+  { label: "1 day", minutes: 1440 },
+  { label: "until restart", minutes: 0 },
+];
+
 function decisionFor(row: AppRow, direction: Direction): Decision {
-  const directional = row.rules.filter((stored) => stored.rule.direction === direction);
+  const directional = wholeAppRules(row, direction);
   if (directional.some((stored) => stored.enabled && stored.rule.action === "block")) return "block";
   if (directional.some((stored) => stored.enabled && stored.rule.action === "allow")) return "allow";
   return directional.length ? "paused" : "open";
@@ -69,6 +92,18 @@ export function Protect() {
   const [adding, setAdding] = createSignal(false);
   const [action, setAction] = createSignal<"block" | "allow">("block");
   const [direction, setDirection] = createSignal<Direction>("outbound");
+  const [remote, setRemote] = createSignal("");
+  const [ports, setPorts] = createSignal("");
+  const [protocol, setProtocol] = createSignal<"" | "tcp" | "udp">("");
+  const [duration, setDuration] = createSignal(0);
+  const ruleOptions = (): RuleOptions => ({
+    remote: remote().trim() || undefined,
+    ports: ports().trim() || undefined,
+    protocol: protocol() || undefined,
+    minutes: DURATIONS[duration()].minutes,
+  });
+  const narrowed = () => Boolean(remote().trim() || ports().trim() || protocol());
+  const specialRules = () => rules().filter((stored) => !coversWholeApp(stored.rule) || !isPermanent(stored.rule));
   const [toolError, setToolError] = createSignal("");
   const [toolNote, setToolNote] = createSignal("");
   const [ioBusy, setIoBusy] = createSignal(false);
@@ -192,16 +227,23 @@ export function Protect() {
   };
 
   const candidates = createMemo(() => {
+    // a narrowed rule can sit beside an app's whole-app rule, so every live app
+    // stays pickable for one
+    if (narrowed()) return engine.apps();
     const covered = new Set(
       rules()
-        .filter((stored) => stored.rule.direction === direction())
+        .filter((stored) => stored.rule.direction === direction() && coversWholeApp(stored.rule))
         .map((stored) => pathKey(stored.rule.app)),
     );
     return engine.apps().filter((sample) => !covered.has(pathKey(sample.app)));
   });
 
   const blockedCount = () =>
-    new Set(rules().filter((stored) => stored.enabled && stored.rule.action === "block").map((stored) => pathKey(stored.rule.app))).size;
+    new Set(
+      rules()
+        .filter((stored) => stored.enabled && stored.rule.action === "block" && coversWholeApp(stored.rule))
+        .map((stored) => pathKey(stored.rule.app)),
+    ).size;
   const activeCount = () => engine.apps().filter((sample) => sample.online).length;
   const connectionCount = () => engine.apps().reduce((sum, sample) => sum + sample.connections, 0);
 
@@ -211,7 +253,7 @@ export function Protect() {
     setChanging(key);
     setToolError("");
     try {
-      for (const stored of row.rules.filter((rule) => rule.rule.direction === direction)) {
+      for (const stored of wholeAppRules(row, direction)) {
         await removeRule(stored.id);
       }
       if (next === "allow" || next === "block") await addRule(row.app, direction, next);
@@ -233,7 +275,10 @@ export function Protect() {
     setToolNote("");
     try {
       const contents = JSON.stringify(
-        rules().map((stored) => ({ ...stored.rule, enabled: stored.enabled })),
+        // a temporary rule is not worth restoring on another machine
+        rules()
+          .filter((stored) => isPermanent(stored.rule))
+          .map((stored) => ({ ...stored.rule, enabled: stored.enabled })),
         null,
         2,
       );
@@ -367,6 +412,32 @@ export function Protect() {
             </div>
             <button class="iconbtn" onClick={() => setAdding(false)} aria-label="close"><Icon name="x" /></button>
           </div>
+          <div class="picker-scope">
+            <label class="field">
+              <input aria-label="Remote address or network" placeholder="any host, or 203.0.113.0/24" value={remote()} onInput={(event) => setRemote(event.currentTarget.value)} />
+            </label>
+            <label class="field">
+              <input aria-label="Remote port" placeholder="any port, or 443, 8000-8100" value={ports()} onInput={(event) => setPorts(event.currentTarget.value)} />
+            </label>
+            <div class="seg" role="group" aria-label="protocol">
+              <For each={["", "tcp", "udp"] as const}>
+                {(value) => (
+                  <button classList={{ on: protocol() === value }} aria-pressed={protocol() === value} onClick={() => setProtocol(value)}>
+                    {value || "any"}
+                  </button>
+                )}
+              </For>
+            </div>
+            <div class="seg" role="group" aria-label="duration">
+              <For each={DURATIONS}>
+                {(choice, index) => (
+                  <button classList={{ on: duration() === index() }} aria-pressed={duration() === index()} onClick={() => setDuration(index())}>
+                    {choice.label}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
           <div class="picker-list">
             <For each={candidates()} fallback={<div class="picker-empty">no uncovered live applications</div>}>
               {(sample) => (
@@ -375,7 +446,7 @@ export function Protect() {
                   onClick={async () => {
                     setToolError("");
                     try {
-                      await addRule(sample.app, direction(), action());
+                      await addRule(sample.app, direction(), action(), ruleOptions());
                     } catch (error) {
                       setToolError(String(error));
                     }
@@ -389,6 +460,36 @@ export function Protect() {
               )}
             </For>
           </div>
+        </div>
+      </Show>
+
+      <Show when={specialRules().length > 0}>
+        <div class="panel scoped-rules">
+          <span class="label">scoped and temporary rules</span>
+          <For each={specialRules()}>
+            {(stored) => (
+              <div class="scoped-rule" classList={{ paused: !stored.enabled }}>
+                <AppIcon path={stored.rule.app} />
+                <span><b>{fileName(stored.rule.app)}</b><small>{describeScope(stored.rule)}</small></span>
+                <span class={`decision-mark ${stored.rule.action}`}>{stored.rule.action} {stored.rule.direction === "outbound" ? "out" : "in"}</span>
+                <small class="scoped-life">{describeLifetime(stored.rule, now())}</small>
+                <button
+                  class="iconbtn"
+                  aria-label="remove rule"
+                  onClick={async () => {
+                    setToolError("");
+                    try {
+                      await removeRule(stored.id);
+                    } catch (error) {
+                      setToolError(String(error));
+                    }
+                  }}
+                >
+                  <Icon name="x" />
+                </button>
+              </div>
+            )}
+          </For>
         </div>
       </Show>
 

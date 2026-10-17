@@ -15,6 +15,20 @@ import {
   type RateUnits,
 } from "../lib/settings";
 
+type FirewallMode = "ask" | "notify" | "lockdown";
+
+const MODE_OPTS: { id: FirewallMode; label: string }[] = [
+  { id: "ask", label: "ask" },
+  { id: "notify", label: "allow + notify" },
+  { id: "lockdown", label: "lockdown" },
+];
+
+const MODE_DESC: Record<FirewallMode, string> = {
+  ask: "A new app stays blocked until you allow it from its prompt.",
+  notify: "A new app connects right away and its prompt arrives afterwards.",
+  lockdown: "Every connection off this machine is blocked, whatever the rules say.",
+};
+
 const UNIT_OPTS: { id: RateUnits; label: string }[] = [
   { id: "bytes", label: "bytes/s" },
   { id: "bits", label: "bits/s" },
@@ -27,6 +41,29 @@ export function Settings() {
   const [svcMsg, setSvcMsg] = createSignal("");
   const [granted, setGranted] = createSignal(false);
   const [grantMsg, setGrantMsg] = createSignal("");
+  const [mode, setMode] = createSignal<FirewallMode>();
+  const [modeMsg, setModeMsg] = createSignal("");
+
+  const readMode = async () => {
+    try {
+      setMode(await invoke<FirewallMode>("firewall_mode"));
+    } catch {
+      /* engine offline */
+    }
+  };
+
+  const chooseMode = async (next: FirewallMode) => {
+    if (next === mode() || busy()) return;
+    setBusy("mode");
+    setModeMsg("");
+    try {
+      await invoke("set_firewall_mode", { mode: next });
+    } catch (error) {
+      setModeMsg(String(error));
+    }
+    await readMode();
+    setBusy("");
+  };
 
   const readGrant = async () => {
     try {
@@ -43,6 +80,7 @@ export function Settings() {
       /* non-windows or unreadable */
     }
     void readGrant();
+    void readMode();
   });
 
   const toggleGrant = async () => {
@@ -132,6 +170,31 @@ export function Settings() {
           >
             <span class="knob" />
           </button>
+        </div>
+      </div>
+
+      <div class="set-group">
+        <div class="set-section">Firewall</div>
+        <div class="set-row">
+          <div class="set-meta">
+            <span class="set-name">New applications</span>
+            <span class="set-desc">{MODE_DESC[mode() ?? "ask"]} The tray menu switches this too.</span>
+            <Show when={modeMsg()}><span class="set-desc">{modeMsg()}</span></Show>
+          </div>
+          <div class="seg" role="group" aria-label="Firewall mode">
+            <For each={MODE_OPTS}>
+              {(option) => (
+                <button
+                  classList={{ on: mode() === option.id }}
+                  aria-pressed={mode() === option.id}
+                  disabled={busy() === "mode" || mode() === undefined}
+                  onClick={() => void chooseMode(option.id)}
+                >
+                  {option.label}
+                </button>
+              )}
+            </For>
+          </div>
         </div>
       </div>
 

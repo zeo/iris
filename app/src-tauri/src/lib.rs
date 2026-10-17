@@ -15,7 +15,8 @@ mod svcctl;
 mod updater;
 
 use std::sync::Mutex;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use iris_core::FirewallMode;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
@@ -24,6 +25,25 @@ use tauri::Manager;
 /// and the layout always gets its intended logical width, whatever GTK, XWayland,
 /// or the compositor does to the surface. seeded with a startup guess.
 pub struct DisplayScale(pub Mutex<f64>);
+
+/// the tray's firewall mode entries, kept so a change made anywhere ticks the
+/// right one
+struct ModeMenu(Vec<(FirewallMode, CheckMenuItem<tauri::Wry>)>);
+
+const MODES: [(FirewallMode, &str, &str); 3] = [
+    (FirewallMode::Ask, "mode-ask", "Ask before new apps connect"),
+    (FirewallMode::Notify, "mode-notify", "Allow new apps and notify"),
+    (FirewallMode::Lockdown, "mode-lockdown", "Lockdown: block everything"),
+];
+
+/// tick the tray entry for `mode` and untick the others
+pub(crate) fn refresh_mode_menu(app: &tauri::AppHandle, mode: FirewallMode) {
+    if let Some(menu) = app.try_state::<ModeMenu>() {
+        for (item_mode, item) in &menu.0 {
+            let _ = item.set_checked(*item_mode == mode);
+        }
+    }
+}
 
 fn valid_scale(scale: f64) -> Option<f64> {
     (scale.is_finite() && (0.5..=4.0).contains(&scale)).then_some(scale)
@@ -78,6 +98,8 @@ pub fn run() {
             ipc::list_prompt_alerts,
             prompt::resize_connection_prompts,
             prompt::set_prompt_hit_region,
+            rulectl::firewall_mode,
+            rulectl::set_firewall_mode,
             notify::set_notifications_enabled,
             report_display_scale,
             ipc::ack_alert,
@@ -224,9 +246,21 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         prompt::snoozed(app),
         None::<&str>,
     )?;
+    let mode_items = MODES
+        .iter()
+        .map(|(mode, id, label)| {
+            CheckMenuItem::with_id(app, *id, *label, true, *mode == FirewallMode::Ask, None::<&str>)
+                .map(|item| (*mode, item))
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let mode_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        mode_items.iter().map(|(_, item)| item as _).collect();
+    let modes = Submenu::with_items(app, "Firewall mode", true, &mode_refs)?;
+    app.manage(ModeMenu(mode_items));
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&show, &pause, &separator, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &modes, &pause, &separator, &quit])?;
+    sync_mode_menu(app);
 
     TrayIconBuilder::with_id("iris-tray")
         .icon(app.default_window_icon().unwrap().clone())
@@ -237,7 +271,11 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             "show" => reveal(app),
             "pause-prompts" => prompt::set_snoozed(app, pause.is_checked().unwrap_or(false)),
             "quit" => app.exit(0),
-            _ => {}
+            id => {
+                if let Some((mode, _, _)) = MODES.iter().find(|(_, mode_id, _)| *mode_id == id) {
+                    choose_mode(app, *mode);
+                }
+            }
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -250,6 +288,36 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// a check item flips itself on click; put the ticks back to the engine's truth
+/// until the change lands, so a refused elevation never leaves a false tick
+fn choose_mode(app: &tauri::AppHandle, mode: FirewallMode) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let current = ipc::firewall_mode(&app).await.unwrap_or_default();
+        refresh_mode_menu(&app, current);
+        if current == mode {
+            return;
+        }
+        if let Err(error) = rulectl::set_firewall_mode(app.clone(), mode.as_str().into()).await {
+            tracing::warn!(mode = mode.as_str(), "could not switch firewall mode: {error}");
+        }
+    });
+}
+
+/// read the engine's mode once it answers, so the tray starts out truthful
+fn sync_mode_menu(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for _ in 0..30 {
+            if let Ok(mode) = ipc::firewall_mode(&app).await {
+                refresh_mode_menu(&app, mode);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
 }
 
 fn reveal(app: &tauri::AppHandle) {

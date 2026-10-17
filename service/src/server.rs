@@ -343,6 +343,18 @@ async fn handle(
                     ClientMessage::GetRuleGrant { req } => {
                         reply(&mut send, req, Reply::RuleGrant(peer.may_manage_rules())).await?;
                     }
+                    ClientMessage::GetFirewallMode { req } => {
+                        let mode = rules.lock().unwrap_or_else(|error| error.into_inner()).mode();
+                        reply(&mut send, req, Reply::FirewallMode(mode)).await?;
+                    }
+                    ClientMessage::SetFirewallMode { req, mode } => {
+                        let result = if peer.may_manage_rules() {
+                            set_mode(&rules, mode).await
+                        } else {
+                            Reply::Error(NEEDS_ELEVATION.into())
+                        };
+                        reply(&mut send, req, result).await?;
+                    }
                     // establishing or revoking the grant is itself privileged, so
                     // it only happens on the admin channel
                     ClientMessage::SetRuleGrant { req, .. } => {
@@ -467,12 +479,11 @@ async fn handle(
                                     let needs_rule =
                                         asking || matches!(action, RuleAction::Block);
                                     let applied = if needs_rule {
-                                        let rule = Rule {
+                                        let rule = Rule::new(
                                             app,
-                                            direction: direction.unwrap_or(Direction::Outbound),
+                                            direction.unwrap_or(Direction::Outbound),
                                             action,
-                                            label: None,
-                                        };
+                                        );
                                         rules
                                             .lock()
                                             .unwrap_or_else(|error| error.into_inner())
@@ -809,6 +820,10 @@ async fn handle_admin(
             ClientMessage::GetRuleGrant { req } => {
                 reply(&mut send, req, Reply::RuleGrant(crate::grant::is_granted())).await?;
             }
+            ClientMessage::SetFirewallMode { req, mode } => {
+                let result = set_mode(&rules, mode).await;
+                reply(&mut send, req, result).await?;
+            }
             ClientMessage::Ping { req } => reply(&mut send, req, Reply::Pong).await?,
             other => {
                 if let Some(req) = req_of(&other) {
@@ -860,6 +875,25 @@ async fn negotiate(
     }
 }
 
+async fn set_mode(rules: &Arc<Mutex<RuleStore>>, mode: iris_core::FirewallMode) -> Reply {
+    let rules = rules.clone();
+    tokio::task::spawn_blocking(move || {
+        match rules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .set_mode(mode)
+        {
+            Ok(()) => {
+                tracing::info!(mode = mode.as_str(), "firewall mode changed");
+                Reply::Ok
+            }
+            Err(error) => Reply::Error(format!("could not switch firewall mode: {error}")),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Reply::Error("the mode change failed".into()))
+}
+
 async fn reply(send: &mut transport::SendHalf, req: u64, result: Reply) -> io::Result<()> {
     transport::write_frame(send, &ServerMessage::Reply { req, result }).await
 }
@@ -874,6 +908,8 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::GetRuleGrant { req }
         | ClientMessage::SetRuleGrant { req, .. }
         | ClientMessage::AddRule { req, .. }
+        | ClientMessage::GetFirewallMode { req }
+        | ClientMessage::SetFirewallMode { req, .. }
         | ClientMessage::RemoveRule { req, .. }
         | ClientMessage::SetRuleEnabled { req, .. }
         | ClientMessage::GetUsage { req, .. }

@@ -3,7 +3,7 @@
 //! on startup it wipes any leftover iris filters and re-applies the enabled
 //! rules, so the JSON file is the single source of truth.
 
-use iris_core::{EngineError, Rule, StoredRule};
+use iris_core::{EngineError, FirewallMode, Rule, RuleLifetime, StoredRule};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -59,6 +59,19 @@ pub struct RuleStore {
     rules: Vec<StoredRule>,
     next_id: i64,
     path: PathBuf,
+    mode: FirewallMode,
+}
+
+fn mode_path() -> PathBuf {
+    crate::paths::rules_file().with_file_name("mode.json")
+}
+
+/// the saved mode, or the ask-first default when none was saved or it is unreadable
+fn load_mode() -> FirewallMode {
+    std::fs::read_to_string(mode_path())
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
 }
 
 impl RuleStore {
@@ -101,7 +114,15 @@ impl RuleStore {
             next_id = next_id.max(p.id + 1);
         }
         let mut rules = Vec::new();
+        let now = now_ms();
+        let mut dropped = false;
         for p in persisted {
+            // a session rule ends with the engine run that made it, and a timed
+            // rule that ran out while the engine was down is simply gone
+            if p.rule.lifetime == RuleLifetime::UntilRestart || p.rule.lifetime.expired(now) {
+                dropped = true;
+                continue;
+            }
             let id = if p.id > 0 {
                 p.id
             } else {
@@ -139,13 +160,86 @@ impl RuleStore {
             });
         }
 
-        Ok(RuleStore {
+        let store = RuleStore {
             #[cfg(has_platform)]
             wfp,
             rules,
             next_id,
             path,
-        })
+            mode: load_mode(),
+        };
+        // persist the drops above so a session rule cannot return on a crash.
+        // only then: rewriting after a corrupt file would replace the fail-safe
+        // with an empty rule set
+        if dropped {
+            store.save()?;
+        }
+        Ok(store)
+    }
+
+    pub fn mode(&self) -> FirewallMode {
+        self.mode
+    }
+
+    /// switch how undecided apps are treated, or lock everything down, and
+    /// remember it across restarts
+    pub fn set_mode(&mut self, mode: FirewallMode) -> anyhow::Result<()> {
+        self.enforce_mode(mode)?;
+        self.mode = mode;
+        if let Some(parent) = mode_path().parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = mode_path().with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&mode)?)?;
+        std::fs::rename(&tmp, mode_path())?;
+        Ok(())
+    }
+
+    /// bring the platform in line with the saved mode; run once at startup
+    pub fn restore_mode(&mut self) -> anyhow::Result<()> {
+        self.enforce_mode(self.mode)
+    }
+
+    #[cfg(windows)]
+    fn enforce_mode(&mut self, mode: FirewallMode) -> anyhow::Result<()> {
+        let Some(wfp) = self.wfp.as_mut() else {
+            anyhow::bail!("firewall enforcement is unavailable");
+        };
+        // lockdown leaves ask in place underneath, so leaving it lands back on
+        // the safer of the two
+        wfp.set_ask_mode(mode != FirewallMode::Notify)?;
+        wfp.set_lockdown(mode == FirewallMode::Lockdown)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn enforce_mode(&mut self, mode: FirewallMode) -> anyhow::Result<()> {
+        match self.wfp.as_ref() {
+            Some(wfp) => {
+                wfp.set_mode(mode);
+                Ok(())
+            }
+            None => anyhow::bail!("firewall enforcement is unavailable"),
+        }
+    }
+
+    #[cfg(not(has_platform))]
+    fn enforce_mode(&mut self, _mode: FirewallMode) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// drop timed rules whose time is up; returns how many went
+    pub fn expire(&mut self, now_ms: u64) -> anyhow::Result<usize> {
+        let expired: Vec<i64> = self
+            .rules
+            .iter()
+            .filter(|stored| stored.rule.lifetime.expired(now_ms))
+            .map(|stored| stored.id)
+            .collect();
+        for id in &expired {
+            self.remove(*id)?;
+        }
+        Ok(expired.len())
     }
 
     pub fn list(&self) -> Vec<StoredRule> {
@@ -210,25 +304,16 @@ impl RuleStore {
     pub fn ask_mode(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
-            // the nfqueue hook always holds undecided flows, so Linux is only
-            // ever in ask mode
-            self.wfp.is_some()
+            // the nfqueue hook holds undecided flows unless notify lets them by
+            self.wfp
+                .as_ref()
+                .is_some_and(|wfp| wfp.mode() != FirewallMode::Notify)
         }
         #[cfg(windows)]
         {
             self.wfp
                 .as_ref()
                 .is_some_and(crate::platform::Wfp::ask_mode_active)
-        }
-    }
-
-    /// turn ask-before-connect on or off. Linux holds undecided connections
-    /// structurally, so only Windows has anything to switch.
-    #[cfg(windows)]
-    pub fn set_ask_mode(&mut self, enabled: bool) -> anyhow::Result<()> {
-        match self.wfp.as_mut() {
-            Some(wfp) => Ok(wfp.set_ask_mode(enabled)?),
-            None => anyhow::bail!("firewall enforcement is unavailable"),
         }
     }
 
@@ -257,14 +342,13 @@ impl RuleStore {
         }
     }
 
-    /// add (or replace) a rule for an app+direction and enforce it now
+    /// add (or replace) a rule for an app, direction, and scope and enforce it now
     pub fn add(&mut self, rule: Rule) -> anyhow::Result<StoredRule> {
-        // replace any existing rule for the same app + direction
         let dupes: Vec<usize> = self
             .rules
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.rule.app == rule.app && r.rule.direction == rule.direction)
+            .filter(|(_, r)| r.rule.same_slot(&rule))
             .map(|(i, _)| i)
             .collect();
         for i in dupes.into_iter().rev() {
@@ -369,9 +453,16 @@ impl RuleStore {
 #[cfg(has_platform)]
 fn apply(wfp: Option<&mut crate::platform::Wfp>, rule: &Rule) -> iris_core::EngineResult<Vec<u64>> {
     match wfp {
-        Some(w) => w.apply(rule.app.as_str(), rule.direction, rule.action),
+        Some(w) => w.apply(rule.app.as_str(), rule.direction, rule.action, &rule.scope),
         None => Err(iris_core::EngineError::NotInitialized),
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn store_path() -> PathBuf {

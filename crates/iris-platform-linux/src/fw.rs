@@ -12,7 +12,10 @@
 
 use crate::proc::PidCache;
 use crate::sockets;
-use iris_core::{AppId, Direction, Endpoint, EngineError, EngineResult, Protocol, RuleAction};
+use iris_core::{
+    AppId, Direction, Endpoint, EngineError, EngineResult, FirewallMode, Protocol, RuleAction,
+    RuleScope,
+};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::process::Command;
@@ -63,7 +66,7 @@ struct VerdictShared {
 }
 
 /// one enforced rule: which action applies to an app in a direction
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Enforce {
     Block,
     Allow,
@@ -78,19 +81,59 @@ struct RuleMap {
     out: HashMap<String, Enforce>,
     inbound: HashMap<String, Enforce>,
     by_id: HashMap<u64, (String, Direction)>,
+    /// rules limited to some hosts, ports, or a protocol, keyed by synthetic id.
+    /// they are consulted before the whole-app maps, the same precedence the
+    /// heavier WFP weight gives them on Windows
+    scoped: HashMap<u64, ScopedRule>,
     trusted: HashSet<String>,
+    mode: FirewallMode,
+}
+
+struct ScopedRule {
+    key: String,
+    dir: Direction,
+    scope: RuleScope,
+    action: Enforce,
+}
+
+/// what the verdict path does with one new flow
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Outcome {
+    Enforce(Enforce),
+    /// no decision on file: hold for the prompt (ask) or let it through and
+    /// report it (notify)
+    Undecided,
 }
 
 impl RuleMap {
-    fn lookup(&self, dir: Direction, key: &str) -> Option<Enforce> {
-        let explicit = match dir {
+    fn lookup(&self, dir: Direction, key: &str, remote: &Endpoint) -> Outcome {
+        if self.mode == FirewallMode::Lockdown && !remote.addr.is_loopback() {
+            return Outcome::Enforce(Enforce::Block);
+        }
+        // among overlapping scoped rules a block wins, matching WFP arbitration
+        let mut scoped = self
+            .scoped
+            .values()
+            .filter(|rule| rule.dir == dir && rule.key == key && rule.scope.matches(remote))
+            .map(|rule| rule.action);
+        let scoped = scoped
+            .clone()
+            .find(|action| *action == Enforce::Block)
+            .or_else(|| scoped.next());
+        let explicit = scoped.or_else(|| match dir {
             Direction::Outbound => self.out.get(key).copied(),
             Direction::Inbound => self.inbound.get(key).copied(),
-        };
-        explicit.or_else(|| self.trusted.contains(key).then_some(Enforce::Allow))
+        });
+        explicit
+            .or_else(|| self.trusted.contains(key).then_some(Enforce::Allow))
+            .map_or(Outcome::Undecided, Outcome::Enforce)
     }
 
-    fn insert(&mut self, id: u64, key: String, dir: Direction, action: Enforce) {
+    fn insert(&mut self, id: u64, key: String, dir: Direction, scope: RuleScope, action: Enforce) {
+        if !scope.is_whole_app() {
+            self.scoped.insert(id, ScopedRule { key, dir, scope, action });
+            return;
+        }
         match dir {
             Direction::Outbound => self.out.insert(key.clone(), action),
             Direction::Inbound => self.inbound.insert(key.clone(), action),
@@ -99,6 +142,9 @@ impl RuleMap {
     }
 
     fn remove_id(&mut self, id: u64) {
+        if self.scoped.remove(&id).is_some() {
+            return;
+        }
         if let Some((key, dir)) = self.by_id.remove(&id) {
             if self
                 .by_id
@@ -222,7 +268,11 @@ impl Wfp {
     /// called on startup before rules re-apply, so a previous run's table never
     /// keeps enforcing.
     pub fn reset(&mut self) -> EngineResult<()> {
-        *self.rules.lock().unwrap_or_else(|e| e.into_inner()) = RuleMap::default();
+        {
+            let mut map = self.rules.lock().unwrap_or_else(|e| e.into_inner());
+            let mode = map.mode;
+            *map = RuleMap { mode, ..RuleMap::default() };
+        }
         self.revision.fetch_add(1, Ordering::Release);
         remove_table();
         install_table()?;
@@ -239,6 +289,7 @@ impl Wfp {
         path: &str,
         direction: Direction,
         action: RuleAction,
+        scope: &RuleScope,
     ) -> EngineResult<Vec<u64>> {
         self.ensure_healthy()?;
         let key = AppId::from_path(path).0;
@@ -249,7 +300,7 @@ impl Wfp {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         {
             let mut map = self.rules.lock().unwrap_or_else(|e| e.into_inner());
-            map.insert(id, key, direction, enforce);
+            map.insert(id, key, direction, *scope, enforce);
         }
         if let Err(e) = self.sync_hook() {
             self.rules
@@ -305,6 +356,22 @@ impl Wfp {
         &mut self,
     ) -> Option<std::sync::mpsc::Receiver<PendingConnection>> {
         self.pending.take()
+    }
+
+    /// how undecided flows are treated; lockdown also overrides every rule
+    pub fn set_mode(&self, mode: FirewallMode) {
+        self.rules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .mode = mode;
+        self.revision.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn mode(&self) -> FirewallMode {
+        self.rules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .mode
     }
 
     pub fn trust_apps(&self, paths: &[String]) {
@@ -482,28 +549,33 @@ fn verdict_loop(
         }
         let current_revision = revision.load(Ordering::Acquire);
         if !held.is_empty() && (current_revision != seen_revision || now >= next_held_scan) {
-            let actions = {
+            let outcomes: Vec<Outcome> = {
                 let map = rules.lock().unwrap_or_else(|error| error.into_inner());
-                let mut actions = HashMap::new();
-                for packet in &held {
-                    actions
-                        .entry(packet.app.clone())
-                        .or_insert_with(|| map.lookup(dir, &packet.app));
-                }
-                actions
+                held.iter()
+                    .map(|packet| {
+                        let outcome = map.lookup(dir, &packet.app, &remote_of(packet.flow, dir));
+                        // switching to notify releases what ask was holding
+                        match (outcome, map.mode) {
+                            (Outcome::Undecided, FirewallMode::Notify) => {
+                                Outcome::Enforce(Enforce::Allow)
+                            }
+                            _ => outcome,
+                        }
+                    })
+                    .collect()
             };
             let mut waiting = Vec::with_capacity(held.len());
-            for mut packet in held.drain(..) {
-                let action = actions.get(&packet.app).copied().flatten();
-                let verdict = match action {
-                    Some(Enforce::Allow) => Some(nfq::Verdict::Accept),
-                    Some(Enforce::Block) => Some(nfq::Verdict::Drop),
-                    None if now.duration_since(packet.since)
-                        >= std::time::Duration::from_secs(120) =>
+            for (mut packet, outcome) in held.drain(..).zip(outcomes) {
+                let verdict = match outcome {
+                    Outcome::Enforce(Enforce::Allow) => Some(nfq::Verdict::Accept),
+                    Outcome::Enforce(Enforce::Block) => Some(nfq::Verdict::Drop),
+                    Outcome::Undecided
+                        if now.duration_since(packet.since)
+                            >= std::time::Duration::from_secs(120) =>
                     {
                         Some(nfq::Verdict::Drop)
                     }
-                    None => None,
+                    Outcome::Undecided => None,
                 };
                 if let Some(verdict) = verdict {
                     packet.message.set_verdict(verdict);
@@ -585,6 +657,17 @@ fn verdict_loop(
                         break;
                     }
                 }
+                PacketDecision::Report(connection) => {
+                    if notified.insert(connection.app.0.clone()) {
+                        let _ = pending_tx.send(connection);
+                    }
+                    message.set_verdict(nfq::Verdict::Accept);
+                    if let Err(error) = nfq.verdict(message) {
+                        tracing::debug!("NFQUEUE {queue} verdict failed: {error}");
+                        worker_failed = true;
+                        break;
+                    }
+                }
                 PacketDecision::Pending { connection, flow } => {
                     let app = connection.app.0.clone();
                     if notified.insert(app.clone()) {
@@ -639,6 +722,8 @@ type PacketFlow = (IpAddr, u16, IpAddr, u16, Protocol);
 
 enum PacketDecision {
     Verdict(nfq::Verdict),
+    /// accepted, but the app has no decision yet, so the user hears about it
+    Report(PendingConnection),
     Pending {
         connection: PendingConnection,
         flow: PacketFlow,
@@ -655,35 +740,45 @@ fn decide(
     rules: &Arc<Mutex<RuleMap>>,
     resolver: &mut Resolver,
 ) -> Option<PacketDecision> {
-    let (source, source_port, destination, destination_port, protocol) = flow;
+    let (source, source_port, destination, destination_port, _) = flow;
     let local = match dir {
         Direction::Outbound => (source, source_port),
         Direction::Inbound => (destination, destination_port),
     };
+    let remote = remote_of(flow, dir);
+    // lockdown needs no owner, so an unattributable flow is not held for it
+    if rules.lock().unwrap_or_else(|e| e.into_inner()).mode == FirewallMode::Lockdown
+        && !remote.addr.is_loopback()
+    {
+        return Some(PacketDecision::Verdict(nfq::Verdict::Drop));
+    }
     let exe = resolver.cached_exe(local)?;
     let key = AppId::from_path(&exe).0;
     let map = rules.lock().unwrap_or_else(|e| e.into_inner());
-    match map.lookup(dir, &key) {
-        Some(Enforce::Block) => Some(PacketDecision::Verdict(nfq::Verdict::Drop)),
-        Some(Enforce::Allow) => Some(PacketDecision::Verdict(nfq::Verdict::Accept)),
-        None => Some(PacketDecision::Pending {
-            connection: PendingConnection {
+    match map.lookup(dir, &key, &remote) {
+        Outcome::Enforce(Enforce::Block) => Some(PacketDecision::Verdict(nfq::Verdict::Drop)),
+        Outcome::Enforce(Enforce::Allow) => Some(PacketDecision::Verdict(nfq::Verdict::Accept)),
+        Outcome::Undecided => {
+            let connection = PendingConnection {
                 app: AppId(key),
-                remote: Endpoint {
-                    addr: match dir {
-                        Direction::Outbound => destination,
-                        Direction::Inbound => source,
-                    },
-                    port: match dir {
-                        Direction::Outbound => destination_port,
-                        Direction::Inbound => source_port,
-                    },
-                    protocol,
-                },
+                remote,
                 direction: dir,
-            },
-            flow,
-        }),
+            };
+            Some(if map.mode == FirewallMode::Notify {
+                PacketDecision::Report(connection)
+            } else {
+                PacketDecision::Pending { connection, flow }
+            })
+        }
+    }
+}
+
+/// the far end of a flow as seen from this host
+fn remote_of(flow: PacketFlow, dir: Direction) -> Endpoint {
+    let (source, source_port, destination, destination_port, protocol) = flow;
+    match dir {
+        Direction::Outbound => Endpoint { addr: destination, port: destination_port, protocol },
+        Direction::Inbound => Endpoint { addr: source, port: source_port, protocol },
     }
 }
 
@@ -887,16 +982,46 @@ impl Resolver {
 #[cfg(test)]
 mod packet_tests {
     use super::{
-        attribution_timeout_verdict, parse_tuple, publish_attribution, ruleset, Resolver, QUEUE_IN,
-        QUEUE_OUT,
+        attribution_timeout_verdict, parse_tuple, publish_attribution, ruleset, Enforce, Outcome,
+        Resolver, RuleMap, QUEUE_IN, QUEUE_OUT,
     };
     use crate::sockets::SockInfo;
-    use iris_core::Protocol;
+    use iris_core::{AppId, Direction, Endpoint, FirewallMode, Protocol, RuleScope};
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    fn endpoint(addr: &str, port: u16, protocol: Protocol) -> Endpoint {
+        Endpoint { addr: addr.parse().unwrap(), port, protocol }
+    }
+
+    #[test]
+    fn scoped_rules_outrank_whole_app_rules_and_lockdown_outranks_both() {
+        let mut map = RuleMap::default();
+        let key = AppId::from_path("/usr/bin/game").0;
+        map.insert(1, key.clone(), Direction::Outbound, RuleScope::default(), Enforce::Allow);
+        let telemetry = RuleScope {
+            remote: iris_core::Cidr::parse("203.0.113.0/24"),
+            ..RuleScope::default()
+        };
+        map.insert(2, key.clone(), Direction::Outbound, telemetry, Enforce::Block);
+        let blocked = endpoint("203.0.113.9", 443, Protocol::Tcp);
+        let open = endpoint("198.51.100.1", 443, Protocol::Tcp);
+        assert_eq!(map.lookup(Direction::Outbound, &key, &blocked), Outcome::Enforce(Enforce::Block));
+        assert_eq!(map.lookup(Direction::Outbound, &key, &open), Outcome::Enforce(Enforce::Allow));
+        assert_eq!(map.lookup(Direction::Inbound, &key, &open), Outcome::Undecided);
+
+        map.mode = FirewallMode::Lockdown;
+        assert_eq!(map.lookup(Direction::Outbound, &key, &open), Outcome::Enforce(Enforce::Block));
+        let local = endpoint("127.0.0.1", 80, Protocol::Tcp);
+        assert_eq!(map.lookup(Direction::Outbound, &key, &local), Outcome::Enforce(Enforce::Allow));
+
+        map.mode = FirewallMode::Ask;
+        map.remove_id(2);
+        assert_eq!(map.lookup(Direction::Outbound, &key, &blocked), Outcome::Enforce(Enforce::Allow));
+    }
 
     #[test]
     fn unresolved_owner_fails_closed() {

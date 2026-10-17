@@ -153,10 +153,8 @@ pub(crate) fn engine_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 /// switched on, or the catch-all deny would cut off a machine's worth of
 /// software that was working a moment ago.
 pub(crate) fn open_rules(store: &Arc<Mutex<Store>>) -> anyhow::Result<Arc<Mutex<RuleStore>>> {
-    #[cfg(windows)]
+    #[allow(unused_mut)]
     let mut rules = RuleStore::new()?;
-    #[cfg(not(windows))]
-    let rules = RuleStore::new()?;
 
     #[cfg(has_platform)]
     rules.trust_apps(
@@ -168,13 +166,12 @@ pub(crate) fn open_rules(store: &Arc<Mutex<Store>>) -> anyhow::Result<Arc<Mutex<
     #[cfg(not(has_platform))]
     let _ = store;
 
-    // ask-before-connect: an application with no decision is denied until the
-    // user answers, the same guarantee the Linux nfqueue hook gives structurally.
-    // a failure here must not take the engine down, or a WFP problem would leave
-    // the machine with no monitoring at all.
-    #[cfg(windows)]
-    if let Err(error) = rules.set_ask_mode(true) {
-        tracing::error!("ask-before-connect unavailable, new apps stay allowed: {error}");
+    // the saved firewall mode, ask-before-connect unless the user chose
+    // otherwise. a failure here must not take the engine down, or a WFP problem
+    // would leave the machine with no monitoring at all.
+    #[cfg(has_platform)]
+    if let Err(error) = rules.restore_mode() {
+        tracing::error!(mode = rules.mode().as_str(), "firewall mode unavailable: {error}");
     }
 
     Ok(Arc::new(Mutex::new(rules)))
@@ -236,6 +233,17 @@ pub(crate) async fn watch_rules(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<
             if unhealthy_streak >= MAX_UNHEALTHY_SAMPLES {
                 anyhow::bail!("firewall enforcement worker stopped");
             }
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        #[cfg(target_os = "linux")]
+        let mut rules = rules.lock().unwrap_or_else(|error| error.into_inner());
+        match rules.expire(now) {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(count, "removed expired firewall rules"),
+            Err(error) => tracing::warn!("could not remove expired firewall rules: {error}"),
         }
         #[cfg(windows)]
         match rules.retry_deferred() {

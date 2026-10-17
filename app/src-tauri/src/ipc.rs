@@ -59,6 +59,8 @@ pub enum EngineCmd {
     RemoveRule(i64),
     SetRuleEnabled(i64, bool),
     GetRuleGrant,
+    GetFirewallMode,
+    SetFirewallMode(iris_core::FirewallMode),
     GetUsage(UsageQuery),
     GetAdapterUsage(u64, u64),
     ListAlerts(bool),
@@ -170,6 +172,14 @@ pub async fn forget_apps(app: AppHandle, paths: Vec<String>) -> Result<usize, St
 pub async fn rule_grant(app: AppHandle) -> Result<bool, String> {
     match dispatch(&app, EngineCmd::GetRuleGrant).await? {
         Reply::RuleGrant(granted) => Ok(granted),
+        Reply::Error(error) => Err(error),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+pub(crate) async fn firewall_mode(app: &AppHandle) -> Result<iris_core::FirewallMode, String> {
+    match dispatch(app, EngineCmd::GetFirewallMode).await? {
+        Reply::FirewallMode(mode) => Ok(mode),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
@@ -523,6 +533,8 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     EngineCmd::SetRuleEnabled(id, enabled) =>
                         ClientMessage::SetRuleEnabled { req, id, enabled },
                     EngineCmd::GetRuleGrant => ClientMessage::GetRuleGrant { req },
+                    EngineCmd::GetFirewallMode => ClientMessage::GetFirewallMode { req },
+                    EngineCmd::SetFirewallMode(mode) => ClientMessage::SetFirewallMode { req, mode },
                     EngineCmd::GetUsage(query) => ClientMessage::GetUsage { req, query },
                     EngineCmd::GetAdapterUsage(from_ms, to_ms) =>
                         ClientMessage::GetAdapterUsage { req, from_ms, to_ms },

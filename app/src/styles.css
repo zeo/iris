@@ -2699,3 +2699,42 @@ html {
   white-space: pre-wrap;
   color: var(--muted);
 }
+.picker-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  align-items: center;
+  margin-bottom: var(--s2);
+}
+.picker-scope .seg button {
+  text-transform: lowercase;
+}
+.scoped-rules {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s3);
+}
+.scoped-rule {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto 96px 24px;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s1) 0;
+  border-top: 1px solid var(--line);
+}
+.scoped-rule > span:nth-child(2) {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+.scoped-rule small {
+  color: var(--muted);
+  font-size: var(--fz-sm);
+}
+.scoped-rule.paused {
+  opacity: 0.55;
+}
+.scoped-life {
+  text-align: right;
+}

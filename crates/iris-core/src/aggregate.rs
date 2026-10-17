@@ -1,6 +1,7 @@
 use crate::model::{AdapterKind, AdapterSample, ByteCounts};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::net::IpAddr;
 
 /// one process's byte deltas for a sample window, produced by [`Aggregator::flush`].
 /// the service's tracker groups these by app path and attaches connections.
@@ -14,12 +15,21 @@ pub struct PidSample {
     pub total: ByteCounts,
 }
 
-/// everything one flush produces: per-process samples plus the per-adapter
-/// rollup, both over the same window
+/// bytes one app exchanged with one remote address over a sample window
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteBytes {
+    pub path: String,
+    pub remote: IpAddr,
+    pub bytes: ByteCounts,
+}
+
+/// everything one flush produces: per-process samples, the per-adapter rollup,
+/// and the per-remote split, all over the same window
 #[derive(Debug, Clone, PartialEq)]
 pub struct Flushed {
     pub procs: Vec<PidSample>,
     pub adapters: Vec<AdapterSample>,
+    pub remotes: Vec<RemoteBytes>,
 }
 
 /// accumulates per-process byte deltas between sample ticks. the platform
@@ -35,6 +45,8 @@ pub struct Aggregator {
     /// per-adapter-kind rollup across all processes; ordered so every flush
     /// lists kinds stably
     adapters: BTreeMap<AdapterKind, KindAccum>,
+    /// this window's bytes per (app path, remote address); emptied every flush
+    remotes: HashMap<(String, IpAddr), ByteCounts>,
     window_start_ms: u64,
 }
 
@@ -56,6 +68,7 @@ impl Aggregator {
         Aggregator {
             procs: HashMap::new(),
             adapters: BTreeMap::new(),
+            remotes: HashMap::new(),
             window_start_ms: now_ms,
         }
     }
@@ -105,6 +118,18 @@ impl Aggregator {
         by_kind.window.add(delta);
     }
 
+    /// attribute bytes already passed to [`Aggregator::record`] to the remote
+    /// address they were exchanged with
+    pub fn record_remote(&mut self, path: &str, remote: IpAddr, sent: u64, recv: u64) {
+        if sent == 0 && recv == 0 {
+            return;
+        }
+        self.remotes
+            .entry((path.to_string(), remote))
+            .or_default()
+            .add(ByteCounts { sent, recv });
+    }
+
     /// ensure a process is tracked even with no bytes yet (it only holds open
     /// connections), so it appears in the next flush
     pub fn touch(&mut self, pid: u32, path: &str) {
@@ -150,8 +175,18 @@ impl Aggregator {
             accum.window = ByteCounts::default();
         }
 
+        let remotes = self
+            .remotes
+            .drain()
+            .map(|((path, remote), bytes)| RemoteBytes { path, remote, bytes })
+            .collect();
+
         self.window_start_ms = now_ms;
-        Flushed { procs, adapters }
+        Flushed {
+            procs,
+            adapters,
+            remotes,
+        }
     }
 }
 
@@ -170,6 +205,23 @@ mod tests {
         assert_eq!(out[0].rate_sent, 1000);
         assert_eq!(out[0].rate_recv, 2000);
         assert_eq!(out[0].total.sent, 1000);
+    }
+
+    #[test]
+    fn remote_bytes_split_by_app_and_address_and_reset_each_window() {
+        let mut agg = Aggregator::new(0);
+        let dns: IpAddr = "1.1.1.1".parse().unwrap();
+        let cdn: IpAddr = "203.0.113.5".parse().unwrap();
+        agg.record_remote("c:/x.exe", dns, 10, 20);
+        agg.record_remote("c:/x.exe", dns, 5, 0);
+        agg.record_remote("c:/x.exe", cdn, 0, 900);
+        agg.record_remote("c:/y.exe", dns, 0, 0);
+        let mut remotes = agg.flush(1000).remotes;
+        remotes.sort_by_key(|r| r.bytes.total());
+        assert_eq!(remotes.len(), 2);
+        assert_eq!((remotes[0].remote, remotes[0].bytes), (dns, ByteCounts { sent: 15, recv: 20 }));
+        assert_eq!(remotes[1].bytes.recv, 900);
+        assert!(agg.flush(2000).remotes.is_empty());
     }
 
     #[test]

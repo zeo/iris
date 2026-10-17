@@ -12,6 +12,7 @@ mod report;
 mod rulectl;
 mod startup;
 mod svcctl;
+mod traygraph;
 mod updater;
 
 use std::sync::Mutex;
@@ -25,6 +26,8 @@ use tauri::Manager;
 /// and the layout always gets its intended logical width, whatever GTK, XWayland,
 /// or the compositor does to the surface. seeded with a startup guess.
 pub struct DisplayScale(pub Mutex<f64>);
+
+pub(crate) const TRAY_ID: &str = "iris-tray";
 
 /// the tray's firewall mode entries, kept so a change made anywhere ticks the
 /// right one
@@ -84,6 +87,7 @@ pub fn run() {
         .manage(ipc::Commander(cmd_tx))
         .manage(DisplayScale(Mutex::new(1.0)))
         .manage(prompt::PromptState::default())
+        .manage(traygraph::TrayGraphState::default())
         .manage(notify::NotifyState::default())
         .invoke_handler(tauri::generate_handler![
             ipc::engine_status,
@@ -99,6 +103,8 @@ pub fn run() {
             prompt::resize_connection_prompts,
             prompt::set_prompt_hit_region,
             rulectl::firewall_mode,
+            ipc::get_host_usage,
+            traygraph::set_tray_graph,
             rulectl::set_firewall_mode,
             notify::set_notifications_enabled,
             report_display_scale,
@@ -262,7 +268,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&show, &modes, &pause, &separator, &quit])?;
     sync_mode_menu(app);
 
-    TrayIconBuilder::with_id("iris-tray")
+    TrayIconBuilder::with_id(TRAY_ID)
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("Iris")
         .menu(&menu)

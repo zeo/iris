@@ -216,21 +216,25 @@ fn on_net_event(
 
     // the event stamps the packet's addresses; hand the end expected to be
     // local first, and the map falls back to the other end on a miss
-    let kind = match (
+    let (kind, remote) = match (
         parser.try_parse::<IpAddr>("saddr"),
         parser.try_parse::<IpAddr>("daddr"),
     ) {
         (Ok(s), Ok(d)) => match dir {
-            Dir::Sent => adapters.kind_for(s, d),
-            Dir::Recv => adapters.kind_for(d, s),
+            Dir::Sent => (adapters.kind_for(s, d), Some(d)),
+            Dir::Recv => (adapters.kind_for(d, s), Some(s)),
         },
-        _ => AdapterKind::Other,
+        _ => (AdapterKind::Other, None),
+    };
+    let (sent, recv) = match dir {
+        Dir::Sent => (size as u64, 0),
+        Dir::Recv => (0, size as u64),
     };
 
     if let Ok(mut a) = agg.lock() {
-        match dir {
-            Dir::Sent => a.record(pid, &path, None, kind, size as u64, 0),
-            Dir::Recv => a.record(pid, &path, None, kind, 0, size as u64),
+        a.record(pid, &path, None, kind, sent, recv);
+        if let Some(remote) = remote.filter(|remote| !remote.is_loopback()) {
+            a.record_remote(&path, remote, sent, recv);
         }
     }
 }

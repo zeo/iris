@@ -4,7 +4,9 @@
 //! their app, and each process carries its own online/offline lifecycle: one
 //! that stops connecting enters a grace window (shown red) before it is dropped.
 
-use iris_core::{Aggregator, AppId, AppSample, ByteCounts, Conn, Flushed, ProcSample, StatsTick};
+use iris_core::{
+    Aggregator, AppId, AppSample, ByteCounts, Conn, Flushed, HostUsage, ProcSample, StatsTick,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -39,6 +41,8 @@ pub struct Tracker {
     conn_history: HashMap<u32, HashMap<ConnKey, (Conn, u64)>>,
     /// last known image path per PID, so graced connections keep their app
     pid_path: HashMap<u32, String>,
+    /// the last tick's traffic split by app and remote host, taken by the store
+    host_usage: Vec<HostUsage>,
 }
 
 impl Tracker {
@@ -52,6 +56,7 @@ impl Tracker {
             offline_since: HashMap::new(),
             conn_history: HashMap::new(),
             pid_path: HashMap::new(),
+            host_usage: Vec::new(),
         }
     }
 
@@ -63,6 +68,7 @@ impl Tracker {
             offline_since: HashMap::new(),
             conn_history: HashMap::new(),
             pid_path: HashMap::new(),
+            host_usage: Vec::new(),
         }
     }
 
@@ -128,7 +134,29 @@ impl Tracker {
         let Flushed {
             procs: pid_samples,
             adapters,
+            remotes,
         } = lock_agg(&self.agg).flush(now);
+
+        // name each remote by the hostname its connection resolved, when it did
+        let names: HashMap<std::net::IpAddr, &str> = conns_by_pid
+            .values()
+            .flat_map(|(_, conns)| conns)
+            .filter_map(|conn| Some((conn.remote.addr, conn.host.as_deref()?)))
+            .collect();
+        let mut by_host: HashMap<(String, String), ByteCounts> = HashMap::new();
+        for remote in remotes {
+            let host = names
+                .get(&remote.remote)
+                .map_or_else(|| remote.remote.to_string(), |name| name.to_string());
+            by_host
+                .entry((AppId::from_path(&remote.path).0, host))
+                .or_default()
+                .add(remote.bytes);
+        }
+        self.host_usage = by_host
+            .into_iter()
+            .map(|((app, host), bytes)| HostUsage { app: AppId(app), host, bytes })
+            .collect();
 
         let mut apps: HashMap<String, AppAcc> = HashMap::new();
         let mut expired: Vec<u32> = Vec::new();
@@ -230,6 +258,10 @@ impl Tracker {
             apps: out,
             adapters,
         }
+    }
+
+    pub fn take_host_usage(&mut self) -> Vec<HostUsage> {
+        std::mem::take(&mut self.host_usage)
     }
 
     pub fn clear_cache(&mut self) {

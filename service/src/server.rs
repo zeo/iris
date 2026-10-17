@@ -399,6 +399,18 @@ async fn handle(
                         .unwrap_or_default();
                         reply(&mut send, req, Reply::Usage(rows)).await?;
                     }
+                    ClientMessage::GetHostUsage { req, app, from_ms, to_ms } => {
+                        let store = store.clone();
+                        let rows = tokio::task::spawn_blocking(move || {
+                            store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .host_usage(app.as_ref(), from_ms, to_ms)
+                        })
+                        .await
+                        .unwrap_or_default();
+                        reply(&mut send, req, Reply::HostUsage(rows)).await?;
+                    }
                     ClientMessage::ListAlerts { req, unacked_only } => {
                         let store = store.clone();
                         let list = tokio::task::spawn_blocking(move || {
@@ -921,6 +933,7 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::KillConnection { req, .. }
         | ClientMessage::GetEnrichment { req, .. }
         | ClientMessage::GetAdapterUsage { req, .. }
+        | ClientMessage::GetHostUsage { req, .. }
         | ClientMessage::ListPlugins { req }
         | ClientMessage::GrantPlugin { req, .. }
         | ClientMessage::SetPluginEnabled { req, .. }

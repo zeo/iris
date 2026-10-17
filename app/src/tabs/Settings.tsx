@@ -12,6 +12,8 @@ import {
   setRateUnits,
   setShowNotifications,
   showNotifications,
+  setTrayGraph,
+  trayGraph,
   type RateUnits,
 } from "../lib/settings";
 
@@ -167,6 +169,21 @@ export function Settings() {
             aria-checked={showNotifications()}
             aria-label="Desktop notifications"
             onClick={() => setShowNotifications(!showNotifications())}
+          >
+            <span class="knob" />
+          </button>
+        </div>
+        <div class="set-row">
+          <div class="set-meta">
+            <span class="set-name">Live graph in the tray</span>
+            <span class="set-desc">Draw download and upload into the tray icon; hover it for the current rates.</span>
+          </div>
+          <button
+            class="rocker"
+            role="switch"
+            aria-checked={trayGraph()}
+            aria-label="Live graph in the tray"
+            onClick={() => setTrayGraph(!trayGraph())}
           >
             <span class="knob" />
           </button>

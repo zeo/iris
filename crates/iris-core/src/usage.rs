@@ -38,6 +38,15 @@ pub struct UsageQuery {
     pub granularity: Granularity,
 }
 
+/// an app's traffic with one remote host, by DNS name when the app looked it
+/// up and by address otherwise
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostUsage {
+    pub app: AppId,
+    pub host: String,
+    pub bytes: ByteCounts,
+}
+
 /// one rollup row: an app's bytes within a single time bucket
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageBucket {

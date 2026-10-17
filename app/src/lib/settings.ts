@@ -31,6 +31,22 @@ const setShowNotifications = (enabled: boolean): boolean => {
 };
 syncNotifications(showNotifications());
 
+// the live throughput graph in the tray icon, drawn by the Rust host
+const [trayGraph, setTrayGraphSignal] = persisted<boolean>("settings.trayGraph", true);
+const syncTrayGraph = (enabled: boolean) => {
+  try {
+    void invoke("set_tray_graph", { enabled }).catch(() => {});
+  } catch {
+    /* host command unavailable (tests, plain browser) */
+  }
+};
+const setTrayGraph = (enabled: boolean): boolean => {
+  setTrayGraphSignal(enabled);
+  syncTrayGraph(enabled);
+  return enabled;
+};
+syncTrayGraph(trayGraph());
+
 // optional monthly data plan: a cap in GB (0 = no plan) and the day of the month
 // the billing period resets. drives the quota meter and quota notifications.
 const [dataCapGb, setDataCapGb] = persisted<number>("settings.dataCapGb", 0);
@@ -41,6 +57,8 @@ export {
   setRateUnits,
   showNotifications,
   setShowNotifications,
+  trayGraph,
+  setTrayGraph,
   dataCapGb,
   setDataCapGb,
   billingResetDay,

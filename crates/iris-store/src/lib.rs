@@ -4,8 +4,8 @@
 //! is a handful of writes per second and the occasional query.
 
 use iris_core::{
-    AdapterKind, Alert, AlertKind, AppId, Granularity, KnownApp, ProposalState, Rule, RuleAction,
-    RuleProposal, StatsTick, UsageBucket, UsageQuery,
+    AdapterKind, Alert, AlertKind, AppId, Granularity, HostUsage, KnownApp, ProposalState, Rule,
+    RuleAction, RuleProposal, StatsTick, UsageBucket, UsageQuery,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -88,8 +88,25 @@ ALTER TABLE alerts ADD COLUMN prompt_suppressed INTEGER NOT NULL DEFAULT 0;
 UPDATE alerts SET prompt_suppressed = 1 WHERE acknowledged = 0;
 ";
 
+/// v8: traffic per app and remote host, in hour buckets so a chatty app that
+/// talks to hundreds of hosts still costs one row per host per hour
+const SCHEMA_V8_HOST_USAGE: &str = "
+CREATE TABLE IF NOT EXISTS host_usage (
+    path TEXT NOT NULL,
+    host TEXT NOT NULL,
+    bucket INTEGER NOT NULL,
+    sent INTEGER NOT NULL DEFAULT 0,
+    recv INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (path, host, bucket)
+);
+CREATE INDEX IF NOT EXISTS host_usage_bucket ON host_usage(bucket);
+";
+
+/// most rows a host breakdown returns, biggest first
+const HOST_USAGE_LIMIT: i64 = 500;
+
 /// bump when the schema changes; drives the migration ladder in [`Store::migrate`]
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 pub struct Store {
     conn: Connection,
@@ -192,6 +209,9 @@ impl Store {
         if version < 7 {
             self.conn
                 .execute_batch(SCHEMA_V7_ALERT_PROMPT_SUPPRESSION)?;
+        }
+        if version < 8 {
+            self.conn.execute_batch(SCHEMA_V8_HOST_USAGE)?;
         }
         if version < SCHEMA_VERSION {
             self.conn
@@ -385,6 +405,86 @@ impl Store {
 
         transaction.commit()?;
         Ok(fresh)
+    }
+
+    /// add one tick's per-host traffic to the current hour's buckets
+    pub fn record_host_usage(&mut self, at_ms: u64, rows: &[HostUsage]) {
+        if rows.is_empty() {
+            return;
+        }
+        let bucket = Granularity::Hour.bucket_start(at_ms) as i64;
+        let result = (|| -> rusqlite::Result<()> {
+            let transaction = self.conn.transaction()?;
+            {
+                let mut statement = transaction.prepare_cached(
+                    "INSERT INTO host_usage(path, host, bucket, sent, recv) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(path, host, bucket) DO UPDATE SET sent = sent + ?4, recv = recv + ?5",
+                )?;
+                for row in rows.iter().filter(|row| row.bytes.total() != 0) {
+                    statement.execute(params![
+                        row.app.as_str(),
+                        row.host,
+                        bucket,
+                        row.bytes.sent as i64,
+                        row.bytes.recv as i64
+                    ])?;
+                }
+            }
+            transaction.commit()
+        })();
+        if let Err(error) = result {
+            tracing::warn!("could not record host usage: {error}");
+        }
+    }
+
+    /// bytes per app and host over a window, biggest first, for one app or all
+    pub fn host_usage(&self, app: Option<&AppId>, from_ms: u64, to_ms: u64) -> Vec<HostUsage> {
+        let row = |r: &rusqlite::Row| {
+            let path: String = r.get(0)?;
+            let host: String = r.get(1)?;
+            let sent: i64 = r.get(2)?;
+            let recv: i64 = r.get(3)?;
+            Ok(HostUsage {
+                app: AppId(path),
+                host,
+                bytes: iris_core::ByteCounts {
+                    sent: sent as u64,
+                    recv: recv as u64,
+                },
+            })
+        };
+        // a window that starts mid-hour still counts that hour's bucket
+        let from = Granularity::Hour.bucket_start(from_ms) as i64;
+        let result = match app {
+            Some(app) => self
+                .conn
+                .prepare_cached(
+                    "SELECT path, host, SUM(sent), SUM(recv) FROM host_usage
+                     WHERE bucket >= ?1 AND bucket < ?2 AND path = ?3
+                     GROUP BY path, host ORDER BY SUM(sent) + SUM(recv) DESC LIMIT ?4",
+                )
+                .and_then(|mut statement| {
+                    statement
+                        .query_map(params![from, to_ms as i64, app.as_str(), HOST_USAGE_LIMIT], row)?
+                        .collect()
+                }),
+            None => self
+                .conn
+                .prepare_cached(
+                    "SELECT path, host, SUM(sent), SUM(recv) FROM host_usage
+                     WHERE bucket >= ?1 AND bucket < ?2
+                     GROUP BY path, host ORDER BY SUM(sent) + SUM(recv) DESC LIMIT ?3",
+                )
+                .and_then(|mut statement| {
+                    statement
+                        .query_map(params![from, to_ms as i64, HOST_USAGE_LIMIT], row)?
+                        .collect()
+                }),
+        };
+        result.unwrap_or_else(|error| {
+            tracing::warn!("could not read host usage: {error}");
+            Vec::new()
+        })
     }
 
     /// add bytes to an app's current-minute usage bucket
@@ -670,6 +770,12 @@ impl Store {
         ) {
             tracing::warn!("could not prune adapter usage: {e}");
         }
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM host_usage WHERE bucket < ?1",
+            params![older_than_ms as i64],
+        ) {
+            tracing::warn!("could not prune host usage: {e}");
+        }
     }
 
     /// record (or replace) the user's consent for a plugin
@@ -911,6 +1017,34 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_usage_accumulates_per_hour_and_ranks_biggest_first() {
+        use iris_core::{ByteCounts, HostUsage};
+        let mut store = super::Store::open_in_memory().expect("store");
+        let app = super::AppId::from_path("c:\\apps\\game.exe");
+        let row = |host: &str, recv| HostUsage {
+            app: app.clone(),
+            host: host.into(),
+            bytes: ByteCounts { sent: 1, recv },
+        };
+        let hour = 3_600_000;
+        store.record_host_usage(hour + 5, &[row("cdn.example", 100), row("api.example", 10)]);
+        store.record_host_usage(hour + 900, &[row("cdn.example", 50)]);
+        store.record_host_usage(2 * hour, &[row("api.example", 1000)]);
+
+        let first_hour = store.host_usage(Some(&app), hour + 30_000, 2 * hour);
+        assert_eq!(first_hour.len(), 2);
+        assert_eq!(first_hour[0].host, "cdn.example");
+        assert_eq!(first_hour[0].bytes, ByteCounts { sent: 2, recv: 150 });
+
+        let all = store.host_usage(None, 0, 3 * hour);
+        assert_eq!(all[0].host, "api.example");
+        assert_eq!(all[0].bytes.recv, 1010);
+
+        store.prune_usage(2 * hour);
+        assert_eq!(store.host_usage(None, 0, 3 * hour).len(), 1);
+    }
+
     use super::*;
 
     fn tick(

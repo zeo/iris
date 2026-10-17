@@ -1,5 +1,5 @@
 use iris_core::{
-    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, FirewallMode, KnownApp,
+    AdapterKind, Alert, Annotation, AppId, ByteCounts, EnrichTarget, FirewallMode, HostUsage, KnownApp,
     LiveConnection, Panel, Rule, RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket,
     UsageQuery,
 };
@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 /// v8 separates promptable alerts from decisions deferred during fullscreen.
 /// v9 adds the byte-capture degraded push.
 /// v10 adds rule scopes and lifetimes, and the firewall mode.
-pub const PROTOCOL_VERSION: u32 = 10;
+/// v11 adds per-host usage history.
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// what the UI shows for one installed plugin: its declared identity and
 /// capabilities, plus whether the user has consented and enabled it
@@ -141,6 +142,13 @@ pub enum ClientMessage {
     Ping {
         req: u64,
     },
+    /// traffic per app and remote host over a window, for one app or all
+    GetHostUsage {
+        req: u64,
+        app: Option<AppId>,
+        from_ms: u64,
+        to_ms: u64,
+    },
     /// per-adapter-kind traffic totals over a window
     GetAdapterUsage {
         req: u64,
@@ -238,4 +246,6 @@ pub enum Reply {
     /// whether the delegated rule-management grant is in force
     RuleGrant(bool),
     FirewallMode(FirewallMode),
+    /// per-host totals, biggest first
+    HostUsage(Vec<HostUsage>),
 }

@@ -17,7 +17,7 @@ pub mod panel;
 pub mod rule;
 pub mod usage;
 
-pub use aggregate::{Aggregator, Flushed, PidSample};
+pub use aggregate::{Aggregator, Flushed, PidSample, RemoteBytes};
 pub use alert::{Alert, AlertKind};
 pub use engine::{FirewallController, MonitorSink, NetworkMonitor};
 pub use enrich::{
@@ -34,4 +34,4 @@ pub use rule::{
     RuleLifetime, RuleProposal, RuleScope, StoredRule,
     BACKUP_MAX_BYTES,
 };
-pub use usage::{Granularity, UsageBucket, UsageQuery};
+pub use usage::{Granularity, HostUsage, UsageBucket, UsageQuery};

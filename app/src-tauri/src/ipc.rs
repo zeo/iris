@@ -63,6 +63,7 @@ pub enum EngineCmd {
     SetFirewallMode(iris_core::FirewallMode),
     GetUsage(UsageQuery),
     GetAdapterUsage(u64, u64),
+    GetHostUsage(Option<String>, u64, u64),
     ListAlerts(bool),
     ListPromptAlerts,
     AckAlert(i64),
@@ -201,6 +202,20 @@ pub(crate) async fn try_unelevated(app: &AppHandle, cmd: EngineCmd) -> Result<bo
 
 /// mirrors the engine's own wording for a rule change that needs elevation
 const NEEDS_ELEVATION: &str = "rule changes require elevation";
+
+#[tauri::command]
+pub async fn get_host_usage(
+    app: AppHandle,
+    path: Option<String>,
+    from_ms: u64,
+    to_ms: u64,
+) -> Result<Vec<iris_core::HostUsage>, String> {
+    match dispatch(&app, EngineCmd::GetHostUsage(path, from_ms, to_ms)).await? {
+        Reply::HostUsage(rows) => Ok(rows),
+        Reply::Error(error) => Err(error),
+        _ => Err("unexpected reply".into()),
+    }
+}
 
 #[tauri::command]
 pub async fn list_alerts(app: AppHandle, unacked_only: bool) -> Result<Vec<Alert>, String> {
@@ -476,6 +491,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                 let msg = incoming?;
                 match msg {
                     ServerMessage::Tick(mut tick) => {
+                        crate::traygraph::push(app, tick.total_rate_recv, tick.total_rate_sent);
                         let Some(state) = app.try_state::<TickDetailState>() else {
                             continue;
                         };
@@ -536,6 +552,12 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     EngineCmd::GetFirewallMode => ClientMessage::GetFirewallMode { req },
                     EngineCmd::SetFirewallMode(mode) => ClientMessage::SetFirewallMode { req, mode },
                     EngineCmd::GetUsage(query) => ClientMessage::GetUsage { req, query },
+                    EngineCmd::GetHostUsage(app, from_ms, to_ms) => ClientMessage::GetHostUsage {
+                        req,
+                        app: app.map(|path| iris_core::AppId::from_path(&path)),
+                        from_ms,
+                        to_ms,
+                    },
                     EngineCmd::GetAdapterUsage(from_ms, to_ms) =>
                         ClientMessage::GetAdapterUsage { req, from_ms, to_ms },
                     EngineCmd::ListAlerts(unacked_only) => ClientMessage::ListAlerts { req, unacked_only },

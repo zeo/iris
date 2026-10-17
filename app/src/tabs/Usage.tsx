@@ -29,6 +29,11 @@ interface AppTotal {
   sent: number;
   recv: number;
 }
+interface HostUsage {
+  app: string;
+  host: string;
+  bytes: { sent: number; recv: number };
+}
 interface AdapterUsageRow {
   kind: AdapterKind;
   bytes: { sent: number; recv: number };
@@ -91,6 +96,23 @@ export function Usage() {
       }
     },
   );
+
+  const [opened, setOpened] = createSignal<string>();
+  const [hosts] = createResource(
+    () => {
+      const path = opened();
+      return path ? { path, span: span(), online: engine.online() } : undefined;
+    },
+    async ({ path, span: s }): Promise<HostUsage[]> => {
+      try {
+        return await invoke<HostUsage[]>("get_host_usage", { path, fromMs: since(s), toMs: Date.now() });
+      } catch {
+        return [];
+      }
+    },
+  );
+  const HOSTS_SHOWN = 12;
+  const hostPeak = () => (hosts() ?? []).reduce((m, h) => Math.max(m, h.bytes.sent + h.bytes.recv), 1);
 
   const list = () => totals() ?? [];
   const adapterRows = () => (byAdapter() ?? []).filter((a) => a.bytes.sent + a.bytes.recv > 0);
@@ -207,7 +229,13 @@ export function Usage() {
         <div class="rows">
           <For each={list()}>
             {(a) => (
-              <div class="row usage">
+              <>
+              <button
+                class="row usage"
+                aria-expanded={opened() === a.app}
+                title="Show the hosts this app exchanged data with"
+                onClick={() => setOpened((current) => (current === a.app ? undefined : a.app))}
+              >
                 <AppIcon path={a.app} />
                 <div class="meta">
                   <span class="name">{fileName(a.app)}</span>
@@ -218,7 +246,32 @@ export function Usage() {
                   <span class="dn">↓ {bytes(a.recv)}</span>
                   <span class="up">↑ {bytes(a.sent)}</span>
                 </span>
-              </div>
+              </button>
+              <Show when={opened() === a.app}>
+                <div class="usage-hosts">
+                  <Show
+                    when={(hosts() ?? []).length > 0}
+                    fallback={<span class="usage-hosts-empty">{hosts.loading ? "loading hosts…" : "no per-host history for this period yet"}</span>}
+                  >
+                    <For each={(hosts() ?? []).slice(0, HOSTS_SHOWN)}>
+                      {(h) => (
+                        <div class="usage-host">
+                          <span class="name" title={h.host}>{h.host}</span>
+                          <div class="meter"><span style={{ width: `${((h.bytes.sent + h.bytes.recv) / hostPeak()) * 100}%` }} /></div>
+                          <span class="usage-nums">
+                            <span class="dn">↓ {bytes(h.bytes.recv)}</span>
+                            <span class="up">↑ {bytes(h.bytes.sent)}</span>
+                          </span>
+                        </div>
+                      )}
+                    </For>
+                    <Show when={(hosts() ?? []).length > HOSTS_SHOWN}>
+                      <span class="usage-hosts-empty">and {(hosts() ?? []).length - HOSTS_SHOWN} more</span>
+                    </Show>
+                  </Show>
+                </div>
+              </Show>
+              </>
             )}
           </For>
         </div>

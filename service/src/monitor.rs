@@ -419,6 +419,7 @@ fn sample_forever(
             let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
             let alerting = baseline_done;
             let fresh_apps = store.record_tick(&tick);
+            store.record_host_usage(tick.at_ms, &tracker.take_host_usage());
             baseline_done = true;
             for app in &tick.apps {
                 if app.online && fresh_apps.contains(&app.app) && alerting {

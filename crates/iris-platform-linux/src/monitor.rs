@@ -393,9 +393,9 @@ fn account_closed_tcp(
     if sent == 0 && recv == 0 {
         return true;
     }
-    agg.lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .record(owner.pid, &owner.path, None, owner.kind, sent, recv);
+    let mut agg = agg.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    agg.record(owner.pid, &owner.path, None, owner.kind, sent, recv);
+    agg.record_remote(&owner.path, socket.remote.0, sent, recv);
     true
 }
 
@@ -536,6 +536,7 @@ fn account_tcp(
         let kind = adapters.kind_for(s.local.0, s.remote.0);
         if let Ok(mut a) = agg.lock() {
             a.record(pid, &path, None, kind, d_sent, d_recv);
+            a.record_remote(&path, s.remote.0, d_sent, d_recv);
         }
     }
     *seen = live;
@@ -616,6 +617,7 @@ fn account_udp(
         let kind = adapters.kind_for(flow.orig_src, flow.orig_dst);
         if let Ok(mut a) = agg.lock() {
             a.record(pid, &path, None, kind, d_orig, d_reply);
+            a.record_remote(&path, flow.orig_dst, d_orig, d_reply);
         }
     }
     *seen = live;

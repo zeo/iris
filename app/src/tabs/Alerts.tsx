@@ -51,7 +51,7 @@ export function Alerts() {
     let a = alerts();
     if (f === "new apps") a = a.filter((x) => x.kind.kind === "new_app");
     else if (f === "blocks") a = a.filter((x) => x.kind.kind === "blocked");
-    else if (f === "flags") a = a.filter((x) => x.kind.kind === "plugin");
+    else if (f === "flags") a = a.filter((x) => x.kind.kind === "plugin" || x.kind.kind === "watch");
     return a;
   });
   const shown = createMemo(() => list().slice(0, RENDER_CAP));
@@ -88,6 +88,28 @@ export function Alerts() {
       <div class="alert-body">{k.message}</div>
       <div class="alert-when">
         <span class="alert-cat">{k.source}</span>
+        <span class="alert-time">{ago(a.at_ms, now())}</span>
+      </div>
+    </div>
+  );
+
+  const WATCH_LABEL = {
+    binary_changed: "App changed on disk",
+    traffic_spike: "Traffic spike",
+    new_host: "New destination",
+    gateway_changed: "Gateway changed",
+  } as const;
+
+  const watchRow = (a: Alert, k: Extract<Alert["kind"], { kind: "watch" }>) => (
+    <div class="row alert" classList={{ unread: !a.acknowledged }} onClick={() => ackAlert(a.id)}>
+      <span class="unread-dot" />
+      <span class="alert-badge block">
+        <Icon name="eye" size={13} />
+      </span>
+      <Show when={k.app}>{(path) => <AppIcon path={path()} />}</Show>
+      <div class="alert-body">{k.message}</div>
+      <div class="alert-when">
+        <span class="alert-cat">{WATCH_LABEL[k.reason]}</span>
         <span class="alert-time">{ago(a.at_ms, now())}</span>
       </div>
     </div>
@@ -132,6 +154,7 @@ export function Alerts() {
             {(a) => {
               const k = a.kind;
               if (k.kind === "plugin") return flagRow(a, k);
+              if (k.kind === "watch") return watchRow(a, k);
               const blocked = k.kind === "blocked";
               return (
                 <div

@@ -376,6 +376,7 @@ fn sample_forever(
     let mut tracker = Tracker::new(agg.clone(), dns.clone());
     #[cfg(not(has_platform))]
     let mut tracker = Tracker::new(agg);
+    let mut watcher = crate::watch::Watcher::default();
 
     // the ETW restart loop on Windows reassigns this; every other target only
     // reads it, so mutability lives in a local instead of the signature
@@ -419,7 +420,14 @@ fn sample_forever(
             let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
             let alerting = baseline_done;
             let fresh_apps = store.record_tick(&tick);
-            store.record_host_usage(tick.at_ms, &tracker.take_host_usage());
+            let host_usage = tracker.take_host_usage();
+            if baseline_done {
+                for kind in watcher.observe(&tick, &host_usage, &store) {
+                    let alert = store.insert_alert(&kind, tick.at_ms);
+                    engine.publish(ServerMessage::Alert(alert));
+                }
+            }
+            store.record_host_usage(tick.at_ms, &host_usage);
             baseline_done = true;
             for app in &tick.apps {
                 if app.online && fresh_apps.contains(&app.app) && alerting {

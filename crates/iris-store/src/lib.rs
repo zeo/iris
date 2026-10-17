@@ -102,11 +102,25 @@ CREATE TABLE IF NOT EXISTS host_usage (
 CREATE INDEX IF NOT EXISTS host_usage_bucket ON host_usage(bucket);
 ";
 
+/// v9: what the watchers remember between runs: each decided app's file
+/// fingerprint, and the hardware address each gateway answered from
+const SCHEMA_V9_WATCH: &str = "
+CREATE TABLE IF NOT EXISTS app_fingerprint (
+    path TEXT PRIMARY KEY,
+    size INTEGER NOT NULL,
+    modified_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS gateway_seen (
+    label TEXT PRIMARY KEY,
+    mac TEXT NOT NULL
+);
+";
+
 /// most rows a host breakdown returns, biggest first
 const HOST_USAGE_LIMIT: i64 = 500;
 
 /// bump when the schema changes; drives the migration ladder in [`Store::migrate`]
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 pub struct Store {
     conn: Connection,
@@ -212,6 +226,9 @@ impl Store {
         }
         if version < 8 {
             self.conn.execute_batch(SCHEMA_V8_HOST_USAGE)?;
+        }
+        if version < 9 {
+            self.conn.execute_batch(SCHEMA_V9_WATCH)?;
         }
         if version < SCHEMA_VERSION {
             self.conn
@@ -487,6 +504,59 @@ impl Store {
         })
     }
 
+    /// every host an app has exchanged data with, as recorded so far
+    pub fn hosts_for(&self, app: &AppId) -> Vec<String> {
+        self.conn
+            .prepare_cached("SELECT DISTINCT host FROM host_usage WHERE path = ?1")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([app.as_str()], |row| row.get(0))?
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// swap in an app's current file fingerprint, returning the one it replaces
+    pub fn replace_fingerprint(&self, path: &str, size: u64, modified_ms: u64) -> Option<(u64, u64)> {
+        let previous = self
+            .conn
+            .query_row(
+                "SELECT size, modified_ms FROM app_fingerprint WHERE path = ?1",
+                [path],
+                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        if let Err(error) = self.conn.execute(
+            "INSERT INTO app_fingerprint(path, size, modified_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET size = ?2, modified_ms = ?3",
+            params![path, size as i64, modified_ms as i64],
+        ) {
+            tracing::warn!("could not record fingerprint for {path}: {error}");
+        }
+        previous
+    }
+
+    /// remember the hardware address a gateway answered from, returning the
+    /// address it answered from before when that differs
+    pub fn replace_gateway_mac(&self, label: &str, mac: &str) -> Option<String> {
+        let previous: Option<String> = self
+            .conn
+            .query_row("SELECT mac FROM gateway_seen WHERE label = ?1", [label], |row| row.get(0))
+            .optional()
+            .ok()
+            .flatten();
+        if let Err(error) = self.conn.execute(
+            "INSERT INTO gateway_seen(label, mac) VALUES (?1, ?2)
+             ON CONFLICT(label) DO UPDATE SET mac = ?2",
+            params![label, mac],
+        ) {
+            tracing::warn!("could not record gateway address: {error}");
+        }
+        previous.filter(|previous| previous != mac)
+    }
+
     /// add bytes to an app's current-minute usage bucket
     pub fn add_usage(&self, path: &str, at_ms: u64, sent: u64, recv: u64) {
         if sent == 0 && recv == 0 {
@@ -662,6 +732,15 @@ impl Store {
                  (SELECT id FROM alerts WHERE acknowledged = 1 ORDER BY id DESC LIMIT ?1)",
                 params![KEEP_ACKED_ALERTS],
             );
+            if matches!(kind, AlertKind::Watch { .. }) {
+                const KEEP_WATCH_ALERTS: i64 = 1000;
+                let _ = self.conn.execute(
+                    "DELETE FROM alerts WHERE kind LIKE '{\"kind\":\"watch\",%' AND id NOT IN \
+                     (SELECT id FROM alerts WHERE kind LIKE '{\"kind\":\"watch\",%' \
+                      ORDER BY id DESC LIMIT ?1)",
+                    params![KEEP_WATCH_ALERTS],
+                );
+            }
             if matches!(kind, AlertKind::Plugin { .. }) {
                 const KEEP_PLUGIN_ALERTS: i64 = 1000;
                 let _ = self.conn.execute(
@@ -1017,6 +1096,19 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn watch_memory_reports_only_real_changes() {
+        let store = super::Store::open_in_memory().expect("store");
+        assert_eq!(store.replace_fingerprint("c:/a.exe", 10, 100), None);
+        assert_eq!(store.replace_fingerprint("c:/a.exe", 12, 200), Some((10, 100)));
+        assert_eq!(store.replace_gateway_mac("Ethernet via 192.168.1.1", "aa"), None);
+        assert_eq!(store.replace_gateway_mac("Ethernet via 192.168.1.1", "aa"), None);
+        assert_eq!(
+            store.replace_gateway_mac("Ethernet via 192.168.1.1", "bb").as_deref(),
+            Some("aa")
+        );
+    }
+
     #[test]
     fn host_usage_accumulates_per_hour_and_ranks_biggest_first() {
         use iris_core::{ByteCounts, HostUsage};

@@ -26,18 +26,30 @@ own pending alert through the active desktop session.
   whether or not the UI is open. Windows enforces them at the Filtering Platform;
   Linux decides each new connection in the engine behind an nftables queue.
   Decisions made from a live connection prompt apply immediately. General rule
-  editing asks for elevation.
+  editing asks for elevation. Rules can be narrowed to a remote address or
+  network, a port range, or TCP or UDP, and can last an hour, a day, or until
+  restart. New apps are held until you answer (ask), let through and reported
+  (allow and notify), or everything off the machine is blocked (lockdown).
+- **Profiles**: rule sets and a firewall mode that switch with the network,
+  recognized by the gateway's hardware address.
+- **Limits**: per-app upload caps through Windows QoS policies. Windows can
+  only shape what an app sends, so there are no download caps.
 - **Activity**: a live table of every app's up and down rate, open connections,
   and the remote endpoints it is talking to. Open a connection for its host name,
   network scope, country, and a one-click kill.
 - **Graph**: a scrolling picture of bandwidth over time, total and per app, with
   live and historical ranges and a live split by adapter (Ethernet, Wi-Fi, VPN).
 - **Usage**: rolling history of how much each app has sent and received, plus
-  per-adapter totals, downsampled as it ages so the store stays small, with CSV
-  export and an optional data-plan cap warning.
+  per-adapter totals and the hosts each app exchanged data with, downsampled as
+  it ages so the store stays small, with CSV export and an optional data-plan
+  cap warning. The tray icon can draw live throughput.
 - **Alerts**: the first time a new program reaches the network, Iris flags it
   and raises a tray notification. Watched addresses raise a flag the moment
-  anything contacts them.
+  anything contacts them. Iris also flags a decided app that changed on disk, a
+  minute of traffic far above an app's usual, an established app reaching a new
+  domain, and a gateway answering from a new hardware address. Prompts take
+  input only on their own cards, wait out exclusive fullscreen, and can be
+  paused from the tray.
 - **Plugins**: optional extensions run out of process in a restricted sandbox,
   with capabilities limited to the powers you approve. A plugin can annotate endpoints, raise
   alerts, suggest firewall rules for your review, and show its own panel tab.

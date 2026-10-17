@@ -20,6 +20,7 @@ mod svc;
 #[cfg(target_os = "linux")]
 mod systemd;
 mod tracker;
+mod watch;
 
 use engine::Engine;
 use iris_store::Store;

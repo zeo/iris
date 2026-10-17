@@ -18,7 +18,7 @@ pub mod rule;
 pub mod usage;
 
 pub use aggregate::{Aggregator, Flushed, PidSample, RemoteBytes};
-pub use alert::{Alert, AlertKind};
+pub use alert::{Alert, AlertKind, WatchReason};
 pub use engine::{FirewallController, MonitorSink, NetworkMonitor};
 pub use enrich::{
     Annotation, AnnotationValue, EnrichTarget, Enricher, IpSet, Observer, Severity, TargetKind,

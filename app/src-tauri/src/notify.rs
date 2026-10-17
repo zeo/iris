@@ -78,6 +78,16 @@ pub fn alert_toast(app: &tauri::AppHandle, alert: &Alert) {
     }
     let (title, body) = match &alert.kind {
         AlertKind::Plugin { source, message } => (source.clone(), message.clone()),
+        AlertKind::Watch { reason, message, .. } => (
+            match reason {
+                iris_core::WatchReason::BinaryChanged => "App changed on disk",
+                iris_core::WatchReason::TrafficSpike => "Traffic spike",
+                iris_core::WatchReason::NewHost => "New destination",
+                iris_core::WatchReason::GatewayChanged => "Gateway changed",
+            }
+            .to_string(),
+            message.clone(),
+        ),
         AlertKind::NewApp {
             app,
             remote,

@@ -11,7 +11,13 @@ export type AlertKind =
       direction: "inbound" | "outbound" | null;
     }
   | { kind: "blocked"; app: string; remote: { addr: string; port: number } }
-  | { kind: "plugin"; source: string; message: string };
+  | { kind: "plugin"; source: string; message: string }
+  | {
+      kind: "watch";
+      reason: "binary_changed" | "traffic_spike" | "new_host" | "gateway_changed";
+      app: string | null;
+      message: string;
+    };
 
 export interface Alert {
   id: number;

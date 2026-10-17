@@ -15,6 +15,26 @@ pub enum AlertKind {
     /// an enricher or plugin flagged activity it considers noteworthy; `source`
     /// is its human-readable name and `message` is the full sentence to show
     Plugin { source: String, message: String },
+    /// iris's own watchers noticed a change worth a look
+    Watch {
+        reason: WatchReason,
+        app: Option<AppId>,
+        message: String,
+    },
+}
+
+/// which watcher raised a [`AlertKind::Watch`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchReason {
+    /// an app with a decision on file was replaced on disk
+    BinaryChanged,
+    /// an app moved far more data in a minute than it usually does
+    TrafficSpike,
+    /// an established app reached a domain it never had before
+    NewHost,
+    /// the gateway answered from a different hardware address than before
+    GatewayChanged,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -35,6 +55,12 @@ enum HumanAlertKind {
         source: String,
         message: String,
     },
+    Watch {
+        reason: WatchReason,
+        #[serde(default)]
+        app: Option<AppId>,
+        message: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -50,6 +76,12 @@ enum BinaryAlertKind {
     },
     Plugin {
         source: String,
+        message: String,
+    },
+    Watch {
+        reason: WatchReason,
+        #[serde(default)]
+        app: Option<AppId>,
         message: String,
     },
 }
@@ -68,6 +100,15 @@ macro_rules! convert_alert_kind {
             },
             AlertKind::Blocked { app, remote } => $target::Blocked { app, remote },
             AlertKind::Plugin { source, message } => $target::Plugin { source, message },
+            AlertKind::Watch {
+                reason,
+                app,
+                message,
+            } => $target::Watch {
+                reason,
+                app,
+                message,
+            },
         }
     };
 }
@@ -103,6 +144,15 @@ impl<'de> Deserialize<'de> for AlertKind {
                 },
                 HumanAlertKind::Blocked { app, remote } => AlertKind::Blocked { app, remote },
                 HumanAlertKind::Plugin { source, message } => AlertKind::Plugin { source, message },
+                HumanAlertKind::Watch {
+                    reason,
+                    app,
+                    message,
+                } => AlertKind::Watch {
+                    reason,
+                    app,
+                    message,
+                },
             })
         } else {
             Ok(match BinaryAlertKind::deserialize(deserializer)? {
@@ -119,6 +169,15 @@ impl<'de> Deserialize<'de> for AlertKind {
                 BinaryAlertKind::Plugin { source, message } => {
                     AlertKind::Plugin { source, message }
                 }
+                BinaryAlertKind::Watch {
+                    reason,
+                    app,
+                    message,
+                } => AlertKind::Watch {
+                    reason,
+                    app,
+                    message,
+                },
             })
         }
     }

@@ -67,6 +67,7 @@ pub struct HitRect {
     height: f64,
 }
 
+#[cfg(windows)]
 const CARD_RADIUS: f64 = 12.0;
 const DEFER_POLL: Duration = Duration::from_secs(1);
 

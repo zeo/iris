@@ -10,9 +10,12 @@ use interprocess::local_socket::{GenericFilePath, ListenerOptions};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::io;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
-pub use interprocess::local_socket::tokio::{Listener, RecvHalf, SendHalf, Stream};
+pub use interprocess::local_socket::tokio::{Listener, Stream};
 
 // the security descriptors below apply only on Windows; on other targets the
 // endpoint access is enforced by unix socket and directory permissions, so these
@@ -126,10 +129,37 @@ pub async fn accept(listener: &Listener) -> io::Result<Stream> {
     listener.accept().await
 }
 
+/// the reading side of a stream shared with its [`SendHalf`]
+pub struct RecvHalf(Arc<Stream>);
+
+/// the writing side of a stream shared with its [`RecvHalf`]
+pub struct SendHalf(Arc<Stream>);
+
 /// split a duplex stream into independent recv/send halves for concurrent read
-/// and write.
+/// and write. both share the stream, which reads and writes through `&Stream`
 pub fn split(stream: Stream) -> (RecvHalf, SendHalf) {
-    stream.split()
+    let stream = Arc::new(stream);
+    (RecvHalf(stream.clone()), SendHalf(stream))
+}
+
+impl AsyncRead for RecvHalf {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut &*self.0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for SendHalf {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        Pin::new(&mut &*self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut &*self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut &*self.0).poll_shutdown(cx)
+    }
 }
 
 /// return the effective uid attached to a Unix-domain peer

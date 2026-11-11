@@ -4,6 +4,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # bincode 3 is an empty crate that only raises a compile error
+      - dependency-name: bincode
+        update-types: ["version-update:semver-major"]
     groups:
       routine-updates:
         patterns:

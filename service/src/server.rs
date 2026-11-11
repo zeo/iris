@@ -715,7 +715,18 @@ async fn handle(
                         }
                     }
                     Err(RecvError::Lagged(n)) => {
-                        tracing::trace!(dropped = n, "client fell behind on ticks");
+                        tracing::debug!(dropped = n, "client fell behind; resending pending decisions");
+                        // a decision alert lost in the gap would leave ask mode
+                        // denying with no card; clients drop repeats by id
+                        let store = store.clone();
+                        let pending = tokio::task::spawn_blocking(move || {
+                            store.lock().unwrap_or_else(|e| e.into_inner()).list_prompt_alerts()
+                        })
+                        .await
+                        .unwrap_or_default();
+                        for alert in pending {
+                            transport::write_frame(&mut send, &ServerMessage::Alert(alert)).await?;
+                        }
                     }
                     Err(RecvError::Closed) => break,
                 }

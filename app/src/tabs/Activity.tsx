@@ -4,10 +4,11 @@ import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import { ConnDetails } from "../components/ConnDetails";
 import { engine, type AppSample, type Conn } from "../lib/engine";
-import { blockApp, isBlocked, unblockApp } from "../lib/rules";
+import { blockApp, caps, isBlocked, setCap, unblockApp } from "../lib/rules";
+import { formatGb, GB, quota, setQuota, type QuotaPeriod } from "../lib/quota";
 import { persisted } from "../lib/persist";
 import { bytes, rate } from "../lib/format";
-import { fileName } from "../lib/path";
+import { fileName, pathKey } from "../lib/path";
 function label(s: AppSample): string {
   return s.name ?? fileName(s.app);
 }
@@ -150,6 +151,9 @@ export function Activity() {
                 {th("name", "", "Application")}
                 {th("down", "num", "↓ rate")}
                 {th("up", "num", "↑ rate")}
+                <th class="num">↓ limit</th>
+                <th class="num">↑ limit</th>
+                <th class="num">quota</th>
                 {th("conns", "num", "conns")}
                 <th class="num">session</th>
               </tr>
@@ -185,6 +189,9 @@ export function Activity() {
                       </td>
                       <td class="num">{rate(app().rate_recv)}</td>
                       <td class="num">{rate(app().rate_sent)}</td>
+                      <LimitCell app={app().app} name={label(app())} dir="down" onError={setRuleError} />
+                      <LimitCell app={app().app} name={label(app())} dir="up" onError={setRuleError} />
+                      <QuotaCell app={app().app} name={label(app())} onError={setRuleError} />
                       <td class="num">{app().connections}</td>
                       <td class="num">{bytes(app().total.sent + app().total.recv)}</td>
                     </tr>
@@ -209,6 +216,7 @@ export function Activity() {
                               </td>
                               <td class="num">{rate(proc().rate_recv)}</td>
                               <td class="num">{rate(proc().rate_sent)}</td>
+                              <td colSpan={3} />
                               <td class="num">{proc().conns.length}</td>
                               <td class="num">{bytes(proc().total.sent + proc().total.recv)}</td>
                             </tr>
@@ -217,7 +225,7 @@ export function Activity() {
                                 {(c) => <ConnRow c={c()} onSelect={() => setSel({ app: app().app, conn: c() })} />}
                               </Key>
                               <Show when={proc().conns.length === 0}>
-                                <tr class="conn-row"><td colSpan={5} class="conn-empty">no active connections</td></tr>
+                                <tr class="conn-row"><td colSpan={8} class="conn-empty">no active connections</td></tr>
                               </Show>
                             </Show>
                           </>
@@ -261,12 +269,177 @@ function ConnRow(props: { c: Conn; onSelect: () => void }) {
         <div class="conn-cell">
           <span class="dir"><Icon name={out() ? "out" : "in"} size={13} /></span>
           <span class="addr" classList={{ host: !!c.host }} title={connLabel(c)}>{connLabel(c)}</span>
+          <span class="proto">{c.remote.protocol}</span>
+          <span class="state">{c.state}</span>
         </div>
       </td>
-      <td class="proto">{c.remote.protocol.toUpperCase()}</td>
-      <td class="state">{c.state}</td>
+      <td class="num">{rate(c.rate_recv)}</td>
+      <td class="num">{rate(c.rate_sent)}</td>
+      <td colSpan={3} />
       <td class="num local">:{c.local_port}</td>
       <td />
     </tr>
+  );
+}
+
+// a table cell that shows its value as a button until clicked, then a field
+// that saves on enter and backs out on escape or a click elsewhere
+function useInlineEdit() {
+  const [editing, setEditing] = createSignal(false);
+  const leaveOnFocusOut = (event: FocusEvent) => {
+    const next = event.relatedTarget as Node | null;
+    if (!next || !(event.currentTarget as Node).contains(next)) setEditing(false);
+  };
+  const keys = (save: () => void) => (event: KeyboardEvent) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      save();
+    } else if (event.key === "Escape") setEditing(false);
+  };
+  return { editing, setEditing, leaveOnFocusOut, keys };
+}
+
+function LimitCell(props: { app: string; name: string; dir: "down" | "up"; onError: (message: string) => void }) {
+  const edit = useInlineEdit();
+  let input!: HTMLInputElement;
+  const cap = () => caps().find((c) => pathKey(c.app) === pathKey(props.app));
+  const value = () => (props.dir === "down" ? cap()?.down_bytes_per_sec : cap()?.up_bytes_per_sec) ?? null;
+  const word = () => (props.dir === "down" ? "download" : "upload");
+  const save = async () => {
+    const text = input.value.trim();
+    const kb = text === "" ? 0 : Number(text);
+    if (!Number.isFinite(kb) || kb < 0) {
+      props.onError("Enter a speed in KB/s, or clear the field to lift the limit.");
+      return;
+    }
+    edit.setEditing(false);
+    const next = kb > 0 ? Math.round(kb * 1024) : null;
+    if (next === value()) return;
+    const current = cap();
+    props.onError("");
+    try {
+      await setCap(
+        current?.app ?? props.app,
+        props.dir === "up" ? next : (current?.up_bytes_per_sec ?? null),
+        props.dir === "down" ? next : (current?.down_bytes_per_sec ?? null),
+      );
+    } catch (error) {
+      props.onError(String(error));
+    }
+  };
+  return (
+    <td class="num inline-cell" onClick={(event) => event.stopPropagation()}>
+      <Show
+        when={edit.editing()}
+        fallback={
+          <button
+            class="inline-btn"
+            classList={{ set: value() !== null }}
+            aria-label={value() === null ? `Limit the ${word()} speed of ${props.name}` : `Change the ${word()} limit for ${props.name}`}
+            onClick={() => edit.setEditing(true)}
+          >
+            {value() === null ? "+" : `${bytes(value()!)}/s`}
+          </button>
+        }
+      >
+        <span class="num-field inline-edit" onFocusOut={edit.leaveOnFocusOut}>
+          <input
+            ref={(el) => {
+              input = el;
+              queueMicrotask(() => {
+                el.focus();
+                el.select();
+              });
+            }}
+            inputmode="decimal"
+            aria-label={`${props.name} ${word()} limit in KB/s, empty to lift`}
+            value={value() === null ? "" : String(Math.round(value()! / 1024))}
+            onKeyDown={edit.keys(() => void save())}
+          />
+          <span class="unit">KB/s</span>
+        </span>
+      </Show>
+    </td>
+  );
+}
+
+const PERIODS: QuotaPeriod[] = ["day", "week", "month"];
+
+function QuotaCell(props: { app: string; name: string; onError: (message: string) => void }) {
+  const edit = useInlineEdit();
+  let input!: HTMLInputElement;
+  const current = () => quota.forApp(props.app);
+  const [period, setPeriod] = createSignal<QuotaPeriod>("day");
+  const used = () => {
+    const q = current();
+    return q ? q.used / q.limit.bytes : 0;
+  };
+  const open = () => {
+    setPeriod(current()?.limit.period ?? "day");
+    edit.setEditing(true);
+  };
+  const save = async () => {
+    const text = input.value.trim();
+    const gb = text === "" ? 0 : Number(text);
+    if (!Number.isFinite(gb) || gb < 0) {
+      props.onError("Enter a quota in GB, or clear the field to remove it.");
+      return;
+    }
+    edit.setEditing(false);
+    const q = current();
+    // monthly app quotas roll over with the data plan
+    const limit =
+      gb > 0 ? { period: period(), bytes: Math.round(gb * GB), reset_day: quota.plan()?.limit.reset_day ?? 1 } : null;
+    if (!limit && !q) return;
+    if (limit && q && limit.bytes === q.limit.bytes && limit.period === q.limit.period) return;
+    props.onError("");
+    try {
+      await setQuota(q?.app ?? props.app, limit);
+    } catch (error) {
+      props.onError(String(error));
+    }
+  };
+  return (
+    <td class="num inline-cell" onClick={(event) => event.stopPropagation()}>
+      <Show
+        when={edit.editing()}
+        fallback={
+          <button
+            class="inline-btn"
+            classList={{ set: !!current(), warn: used() >= 0.8, over: used() >= 1 }}
+            title={current() ? `${formatGb(current()!.used)} used this ${current()!.limit.period}` : undefined}
+            aria-label={current() ? `Change the data quota for ${props.name}` : `Set a data quota for ${props.name}`}
+            onClick={open}
+          >
+            {current() ? `${formatGb(current()!.limit.bytes)}/${current()!.limit.period}` : "+"}
+          </button>
+        }
+      >
+        <span class="num-field inline-edit" onFocusOut={edit.leaveOnFocusOut}>
+          <input
+            ref={(el) => {
+              input = el;
+              queueMicrotask(() => {
+                el.focus();
+                el.select();
+              });
+            }}
+            inputmode="decimal"
+            aria-label={`${props.name} data quota in GB, empty to remove`}
+            value={current() ? String(current()!.limit.bytes / GB) : ""}
+            onKeyDown={edit.keys(() => void save())}
+          />
+          <span class="unit">GB</span>
+          <button
+            class="period-btn"
+            aria-label={`quota period, per ${period()}`}
+            onClick={() => setPeriod(PERIODS[(PERIODS.indexOf(period()) + 1) % PERIODS.length])}
+            onKeyDown={edit.keys(() => void save())}
+          >
+            /{period()}
+          </button>
+        </span>
+      </Show>
+    </td>
   );
 }

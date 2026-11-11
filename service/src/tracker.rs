@@ -143,6 +143,12 @@ impl Tracker {
             .flat_map(|(_, conns)| conns)
             .filter_map(|conn| Some((conn.remote.addr, conn.host.as_deref()?)))
             .collect();
+        // a local port belongs to one socket, so with the remote it names one
+        // connection
+        let conn_rates: HashMap<(std::net::IpAddr, u16), ByteCounts> = remotes
+            .iter()
+            .map(|remote| ((remote.remote, remote.local_port), remote.rate))
+            .collect();
         let mut by_host: HashMap<(String, String), ByteCounts> = HashMap::new();
         for remote in remotes {
             let host = names
@@ -162,10 +168,16 @@ impl Tracker {
         let mut expired: Vec<u32> = Vec::new();
 
         for ps in pid_samples {
-            let conns = conns_by_pid
+            let mut conns = conns_by_pid
                 .get(&ps.pid)
                 .map(|(_, c)| c.clone())
                 .unwrap_or_default();
+            for conn in &mut conns {
+                if let Some(rate) = conn_rates.get(&(conn.remote.addr, conn.local_port)) {
+                    conn.rate_sent = rate.sent;
+                    conn.rate_recv = rate.recv;
+                }
+            }
             let active = !conns.is_empty() || ps.rate_sent > 0 || ps.rate_recv > 0;
 
             if active {

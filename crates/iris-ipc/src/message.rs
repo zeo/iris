@@ -23,7 +23,8 @@ use serde::{Deserialize, Serialize};
 /// v15 always sends rule scopes, lifetimes, and profile modes, which bincode
 /// could not decode while they were skipped when empty, and adds data quotas.
 /// v16 adds download caps.
-pub const PROTOCOL_VERSION: u32 = 16;
+/// v17 adds per-connection rates.
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// conditions that quietly undermine the engine, for the UI to surface
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

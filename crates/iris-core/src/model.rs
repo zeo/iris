@@ -158,6 +158,8 @@ pub struct Conn {
     pub local_port: u16,
     pub direction: Direction,
     pub state: ConnState,
+    pub rate_sent: u64,
+    pub rate_recv: u64,
 }
 
 /// one running process under an app: its own throughput, totals, and connections

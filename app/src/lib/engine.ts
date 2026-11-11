@@ -17,6 +17,8 @@ export interface Conn {
   local_port: number;
   direction: "inbound" | "outbound";
   state: "listen" | "active" | "closing";
+  rate_sent: number;
+  rate_recv: number;
 }
 export interface ProcSample {
   pid: number;

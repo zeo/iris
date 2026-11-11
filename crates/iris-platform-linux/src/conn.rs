@@ -99,6 +99,8 @@ impl ConnCounter {
                 local_port: s.local.1,
                 direction: direction(s.local.1, s.remote.1),
                 state: conn_state(&s),
+                rate_sent: 0,
+                rate_recv: 0,
             });
         }
         out

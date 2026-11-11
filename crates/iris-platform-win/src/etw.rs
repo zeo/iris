@@ -230,11 +230,18 @@ fn on_net_event(
         Dir::Sent => (size as u64, 0),
         Dir::Recv => (0, size as u64),
     };
+    // the kernel stamps ports in network byte order
+    let local_port = parser
+        .try_parse::<u16>(match dir {
+            Dir::Sent => "sport",
+            Dir::Recv => "dport",
+        })
+        .map_or(0, u16::from_be);
 
     if let Ok(mut a) = agg.lock() {
         a.record(pid, &path, None, kind, sent, recv);
         if let Some(remote) = remote.filter(|remote| !remote.is_loopback()) {
-            a.record_remote(&path, remote, sent, recv);
+            a.record_remote(&path, remote, local_port, sent, recv);
         }
     }
 }

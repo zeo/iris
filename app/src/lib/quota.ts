@@ -1,6 +1,7 @@
 import { createEffect, createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { engine } from "./engine";
+import { pathKey } from "./path";
 
 // the engine counts quotas and raises their alerts, so they hold while this
 // webview is closed; this module only mirrors them for the meter and editors
@@ -37,7 +38,7 @@ const plan = () => quotas().find((q) => q.app === null);
 
 export const quota = {
   plan,
-  forApp: (path: string) => quotas().find((q) => q.app === path),
+  forApp: (path: string) => quotas().find((q) => q.app !== null && pathKey(q.app) === pathKey(path)),
   fraction: () => {
     const p = plan();
     return p ? Math.min(p.used / p.limit.bytes, 1) : 0;

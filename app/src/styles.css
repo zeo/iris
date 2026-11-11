@@ -1789,6 +1789,67 @@ html {
   text-decoration-color: rgba(207, 106, 86, 0.6);
 }
 
+/* inline limit and quota cells on activity app rows; unset ones stay hidden
+   until the row is hovered so the live numbers keep the eye */
+.tbl.activity .inline-cell {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.inline-btn {
+  min-width: 28px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--faint);
+  font: inherit;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--t-fast), color var(--t-fast), background var(--t-fast);
+}
+.app-row:hover .inline-btn,
+.inline-btn:focus-visible,
+.inline-btn.set {
+  opacity: 1;
+}
+.inline-btn:hover {
+  color: var(--text);
+  background: var(--surf2);
+}
+.inline-btn.set {
+  color: var(--steel);
+  border-color: var(--line2);
+}
+.inline-btn.warn {
+  color: var(--text);
+  border-color: var(--steel);
+}
+.inline-btn.over {
+  color: var(--err);
+  border-color: var(--danger-line);
+  background: var(--danger-fill);
+}
+.num-field.inline-edit {
+  margin-left: 0;
+  padding: 2px 6px;
+}
+.num-field.inline-edit input {
+  width: 48px;
+}
+.period-btn {
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--steel);
+  font-family: var(--mono);
+  font-size: var(--fz-cap);
+  cursor: pointer;
+}
+.conn-cell .proto,
+.conn-cell .state {
+  flex: none;
+}
+
 /* protect add-rule picker */
 .picker {
   padding: var(--s3);

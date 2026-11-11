@@ -15,12 +15,15 @@ pub struct PidSample {
     pub total: ByteCounts,
 }
 
-/// bytes one app exchanged with one remote address over a sample window
+/// bytes one app exchanged with one remote address through one local port over
+/// a sample window, and the per-second rate they make
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteBytes {
     pub path: String,
     pub remote: IpAddr,
+    pub local_port: u16,
     pub bytes: ByteCounts,
+    pub rate: ByteCounts,
 }
 
 /// everything one flush produces: per-process samples, the per-adapter rollup,
@@ -45,8 +48,9 @@ pub struct Aggregator {
     /// per-adapter-kind rollup across all processes; ordered so every flush
     /// lists kinds stably
     adapters: BTreeMap<AdapterKind, KindAccum>,
-    /// this window's bytes per (app path, remote address); emptied every flush
-    remotes: HashMap<(String, IpAddr), ByteCounts>,
+    /// this window's bytes per (app path, remote address, local port); emptied
+    /// every flush
+    remotes: HashMap<(String, IpAddr, u16), ByteCounts>,
     window_start_ms: u64,
 }
 
@@ -119,13 +123,13 @@ impl Aggregator {
     }
 
     /// attribute bytes already passed to [`Aggregator::record`] to the remote
-    /// address they were exchanged with
-    pub fn record_remote(&mut self, path: &str, remote: IpAddr, sent: u64, recv: u64) {
+    /// address and local port they were exchanged through
+    pub fn record_remote(&mut self, path: &str, remote: IpAddr, local_port: u16, sent: u64, recv: u64) {
         if sent == 0 && recv == 0 {
             return;
         }
         self.remotes
-            .entry((path.to_string(), remote))
+            .entry((path.to_string(), remote, local_port))
             .or_default()
             .add(ByteCounts { sent, recv });
     }
@@ -178,7 +182,13 @@ impl Aggregator {
         let remotes = self
             .remotes
             .drain()
-            .map(|((path, remote), bytes)| RemoteBytes { path, remote, bytes })
+            .map(|((path, remote, local_port), bytes)| RemoteBytes {
+                path,
+                remote,
+                local_port,
+                bytes,
+                rate: ByteCounts { sent: per_sec(bytes.sent), recv: per_sec(bytes.recv) },
+            })
             .collect();
 
         self.window_start_ms = now_ms;
@@ -212,15 +222,18 @@ mod tests {
         let mut agg = Aggregator::new(0);
         let dns: IpAddr = "1.1.1.1".parse().unwrap();
         let cdn: IpAddr = "203.0.113.5".parse().unwrap();
-        agg.record_remote("c:/x.exe", dns, 10, 20);
-        agg.record_remote("c:/x.exe", dns, 5, 0);
-        agg.record_remote("c:/x.exe", cdn, 0, 900);
-        agg.record_remote("c:/y.exe", dns, 0, 0);
-        let mut remotes = agg.flush(1000).remotes;
+        agg.record_remote("c:/x.exe", dns, 5000, 10, 20);
+        agg.record_remote("c:/x.exe", dns, 5000, 5, 0);
+        agg.record_remote("c:/x.exe", dns, 5001, 1, 1);
+        agg.record_remote("c:/x.exe", cdn, 5002, 0, 900);
+        agg.record_remote("c:/y.exe", dns, 5000, 0, 0);
+        let mut remotes = agg.flush(500).remotes;
         remotes.sort_by_key(|r| r.bytes.total());
-        assert_eq!(remotes.len(), 2);
-        assert_eq!((remotes[0].remote, remotes[0].bytes), (dns, ByteCounts { sent: 15, recv: 20 }));
-        assert_eq!(remotes[1].bytes.recv, 900);
+        assert_eq!(remotes.len(), 3);
+        assert_eq!((remotes[1].remote, remotes[1].local_port), (dns, 5000));
+        assert_eq!(remotes[1].bytes, ByteCounts { sent: 15, recv: 20 });
+        assert_eq!(remotes[1].rate, ByteCounts { sent: 30, recv: 40 });
+        assert_eq!(remotes[2].bytes.recv, 900);
         assert!(agg.flush(2000).remotes.is_empty());
     }
 

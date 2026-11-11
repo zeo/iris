@@ -125,6 +125,8 @@ impl ConnCounter {
                     local_port: r.local_port,
                     direction: dir,
                     state: r.state,
+                    rate_sent: 0,
+                    rate_recv: 0,
                 });
             }
         }

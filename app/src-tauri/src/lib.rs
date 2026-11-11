@@ -7,6 +7,7 @@ mod icon;
 mod ipc;
 mod net;
 mod notify;
+mod prefs;
 mod prompt;
 mod report;
 mod rulectl;
@@ -89,6 +90,7 @@ pub fn run() {
         .manage(prompt::PromptState::default())
         .manage(traygraph::TrayGraphState::default())
         .manage(notify::NotifyState::default())
+        .manage(prefs::PrefsState::default())
         .invoke_handler(tauri::generate_handler![
             ipc::engine_status,
             ipc::set_tick_details,
@@ -146,48 +148,29 @@ pub fn run() {
         .setup(move |app| {
             ipc::spawn(app.handle().clone(), cmd_rx);
             build_tray(app.handle())?;
+            let prefs = prefs::load(app.handle());
+            notify::apply_enabled(app.handle(), prefs.notifications);
+            traygraph::apply_enabled(app.handle(), prefs.tray_graph);
             if let Err(error) = startup::repair_launch_at_login() {
                 tracing::warn!("could not refresh launch at login: {error}");
             }
-            // best startup guess before the webview reports its real ratio: the
-            // fractional-scaling env hint if we set one, else the window's own
-            // gtk scale factor. keeps the first paint from flashing under-sized.
-            let initial_scale = {
-                let hint = prompt::webview_scale();
-                if (hint - 1.0).abs() > f64::EPSILON {
-                    hint
-                } else {
-                    app.get_webview_window("main")
-                        .and_then(|w| w.scale_factor().ok())
-                        .filter(|s| s.is_finite() && *s > 0.0)
-                        .unwrap_or(1.0)
-                }
-            };
-            *app.state::<DisplayScale>()
-                .0
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = initial_scale;
-            fit_main_window(app.handle(), initial_scale);
-            // a login launch passes --tray so it comes up quietly in the tray
-            if std::env::args().any(|a| a == "--tray") {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.hide();
-                }
+            // a login launch passes --tray so it comes up quietly in the tray,
+            // with no webview until the window is first opened
+            if !std::env::args().any(|a| a == "--tray") {
+                open_main(app.handle());
             }
+            updater::schedule(app.handle());
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // close to tray: hide the window and keep the app (and its tray
-            // icon and pipe client) alive. real exit is the tray "Quit" item.
-            if window.label() == "main" {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
+        .build(tauri::generate_context!())
+        .expect("error while building Iris")
+        // closing the main window destroys its webview; the tray, the card host
+        // and the pipe client keep running until the tray's "Quit"
+        .run(|_app, event| {
+            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
+                api.prevent_exit();
             }
-        })
-        .run(tauri::generate_context!())
-        .expect("error while running Iris");
+        });
 }
 
 /// the webview reports its real device-pixel-ratio once the page loads; re-fit
@@ -338,7 +321,48 @@ fn reveal(app: &tauri::AppHandle) {
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
+        return;
     }
+    // webview2 creation deadlocks inside the tray and single-instance handlers
+    // that call this, so build from a worker, which routes through the event loop
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Some(win) = open_main(&app) {
+            let _ = win.set_focus();
+        }
+    });
+}
+
+/// build the main window from its config entry and fit it to its monitor
+fn open_main(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    let config = app.config().app.windows.iter().find(|window| window.label == "main")?;
+    let window = match tauri::WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build()) {
+        Ok(window) => window,
+        Err(error) => {
+            tracing::warn!("could not open the main window: {error}");
+            return None;
+        }
+    };
+    // best guess before the webview reports its real ratio: the
+    // fractional-scaling env hint if we set one, else the window's own scale
+    // factor. keeps the first paint from flashing under-sized
+    let hint = prompt::webview_scale();
+    let scale = if (hint - 1.0).abs() > f64::EPSILON {
+        hint
+    } else {
+        window
+            .scale_factor()
+            .ok()
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .unwrap_or(1.0)
+    };
+    *app.state::<DisplayScale>()
+        .0
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = scale;
+    fit_main_window(app, scale);
+    let _ = window.center();
+    Some(window)
 }
 
 #[cfg(test)]

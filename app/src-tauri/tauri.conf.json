@@ -11,6 +11,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Iris",
         "width": 1180,
         "height": 820,

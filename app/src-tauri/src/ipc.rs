@@ -524,6 +524,11 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                 match msg {
                     ServerMessage::Tick(mut tick) => {
                         crate::traygraph::push(app, tick.total_rate_recv, tick.total_rate_sent);
+                        // only the main window draws ticks; skip the json and the
+                        // webview round trip while it is closed
+                        if app.get_webview_window("main").is_none() {
+                            continue;
+                        }
                         let Some(state) = app.try_state::<TickDetailState>() else {
                             continue;
                         };

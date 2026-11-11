@@ -23,6 +23,9 @@ pub struct TrayGraph {
     enabled: bool,
     history: VecDeque<(u64, u64)>,
     showing_graph: bool,
+    /// what the tray last got, so an idle link stops rebuilding the icon
+    shown_tooltip: String,
+    shown_pixels: Vec<u8>,
 }
 
 impl Default for TrayGraph {
@@ -31,6 +34,8 @@ impl Default for TrayGraph {
             enabled: true,
             history: VecDeque::with_capacity(COLUMNS),
             showing_graph: false,
+            shown_tooltip: String::new(),
+            shown_pixels: Vec::new(),
         }
     }
 }
@@ -56,20 +61,29 @@ pub fn push(app: &tauri::AppHandle, down: u64, up: u64) {
     let Some(tray) = app.tray_by_id(crate::TRAY_ID) else {
         return;
     };
-    let _ = tray.set_tooltip(Some(format!(
-        "Iris\n↓ {}/s   ↑ {}/s",
-        human(down),
-        human(up)
-    )));
+    let tooltip = format!("Iris\n↓ {}/s   ↑ {}/s", human(down), human(up));
+    if tooltip != graph.shown_tooltip {
+        let _ = tray.set_tooltip(Some(&tooltip));
+        graph.shown_tooltip = tooltip;
+    }
     if graph.enabled {
         let pixels = render(&graph.history);
-        let _ = tray.set_icon(Some(tauri::image::Image::new_owned(pixels, SIZE as u32, SIZE as u32)));
-        graph.showing_graph = true;
+        if !graph.showing_graph || pixels != graph.shown_pixels {
+            let _ = tray.set_icon(Some(tauri::image::Image::new(&pixels, SIZE as u32, SIZE as u32)));
+            graph.shown_pixels = pixels;
+            graph.showing_graph = true;
+        }
     }
 }
 
 #[tauri::command]
-pub fn set_tray_graph(app: tauri::AppHandle, state: tauri::State<'_, TrayGraphState>, enabled: bool) {
+pub fn set_tray_graph(app: tauri::AppHandle, enabled: bool) {
+    apply_enabled(&app, enabled);
+    crate::prefs::update(&app, |prefs| prefs.tray_graph = enabled);
+}
+
+pub fn apply_enabled(app: &tauri::AppHandle, enabled: bool) {
+    let state = app.state::<TrayGraphState>();
     let mut graph = state.0.lock().unwrap_or_else(|error| error.into_inner());
     graph.enabled = enabled;
     if !enabled && graph.showing_graph {

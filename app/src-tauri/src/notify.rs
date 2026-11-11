@@ -29,8 +29,13 @@ impl Default for NotifyState {
 }
 
 #[tauri::command]
-pub fn set_notifications_enabled(state: tauri::State<'_, NotifyState>, enabled: bool) {
-    state.enabled.store(enabled, Ordering::Release);
+pub fn set_notifications_enabled(app: tauri::AppHandle, enabled: bool) {
+    apply_enabled(&app, enabled);
+    crate::prefs::update(&app, |prefs| prefs.notifications = enabled);
+}
+
+pub fn apply_enabled(app: &tauri::AppHandle, enabled: bool) {
+    app.state::<NotifyState>().enabled.store(enabled, Ordering::Release);
 }
 
 /// whether this alert is handled by the actionable connection-prompt window

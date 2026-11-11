@@ -7,7 +7,6 @@ import { persisted } from "./lib/persist";
 import { engine, initEngine, setTickCadence } from "./lib/engine";
 import { initAlerts, refreshAlerts, unackedCount } from "./lib/alerts";
 import { initQuota } from "./lib/quota";
-import { autoUpdate } from "./lib/updater";
 import { Protect } from "./tabs/Protect";
 import { Activity } from "./tabs/Activity";
 import { Graph } from "./tabs/Graph";
@@ -85,7 +84,6 @@ export function App() {
     initEngine();
     initAlerts();
     initQuota();
-    autoUpdate();
   });
 
   // the tab list depends on the plugin catalog, so load it with the engine

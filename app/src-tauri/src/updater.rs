@@ -61,6 +61,46 @@ fn check_installer_update_blocking() -> Result<Option<Update>, String> {
     Ok(Some(Update { version: release.version }))
 }
 
+/// check the release feed at launch and once a day; a newer signed build is
+/// pulled down and installed, restarting into it, but only while nothing
+/// fullscreen or busy owns the display. every failure here is expected in
+/// normal use (offline, no release yet, a dev build), so none is surfaced
+pub fn schedule(app: &tauri::AppHandle) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+        const RETRY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+        loop {
+            let wait = match check_installer_update().await {
+                Ok(Some(_)) if display_busy() => RETRY,
+                Ok(Some(_)) => {
+                    if let Err(error) = install_installer_update(app.clone()) {
+                        tracing::warn!("could not start the update: {error}");
+                    }
+                    DAY
+                }
+                _ => DAY,
+            };
+            tokio::time::sleep(wait).await;
+        }
+    });
+}
+
+/// a game, a presentation, or focus assist has the display
+#[cfg(windows)]
+fn display_busy() -> bool {
+    use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_ACCEPTS_NOTIFICATIONS};
+    !matches!(unsafe { SHQueryUserNotificationState() }, Ok(state) if state == QUNS_ACCEPTS_NOTIFICATIONS)
+}
+
+#[cfg(not(windows))]
+fn display_busy() -> bool {
+    false
+}
+
 #[tauri::command]
 pub fn install_installer_update(app: tauri::AppHandle) -> Result<(), String> {
     let installer = installer_path().ok_or_else(|| "shared updater is not installed".to_string())?;

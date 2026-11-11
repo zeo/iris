@@ -10,9 +10,9 @@ export type RateUnits = "bytes" | "bits";
 // usually quoted). totals always stay in bytes.
 const [rateUnits, setRateUnits] = persisted<RateUnits>("settings.rateUnits", "bytes");
 
-// whether a first-seen / blocked alert also raises a desktop notification.
-// the toast is raised by the Rust host so it fires even while this webview is
-// hidden in the tray, so the preference is mirrored there on load and on change.
+// whether an alert that needs no answer raises a passing card. the card is
+// raised by the Rust host, which saves the preference so it holds from boot
+// while this webview is closed; it is mirrored there on load and on change.
 const [showNotifications, setShowNotificationsSignal] = persisted<boolean>(
   "settings.notifications",
   true,

@@ -83,6 +83,13 @@ impl CapStore {
     }
 }
 
+/// lift every upload cap iris put in force without touching the saved list,
+/// for uninstall and firewall recovery
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn clear_all() -> anyhow::Result<()> {
+    platform::Backend::default().clear()
+}
+
 /// a stable policy name per app, so re-applying replaces rather than stacks
 fn policy_name(app: &AppId) -> String {
     // fnv-1a: short, stable across runs, and needs no dependency

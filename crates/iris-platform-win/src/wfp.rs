@@ -17,7 +17,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFilterCreateEnumHandle0,
     FwpmFilterDeleteById0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0,
-    FwpmGetAppIdFromFileName0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0,
+    FwpmGetAppIdFromFileName0, FwpmProviderAdd0, FwpmProviderDeleteByKey0, FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0,
     FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_FLAGS, FWPM_CONDITION_IP_PROTOCOL,
     FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_DISPLAY_DATA0,
     FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_ENUM_TEMPLATE0, FWPM_FILTER_FLAG_PERSISTENT,
@@ -169,6 +169,30 @@ impl Wfp {
             let _ = FwpmSubLayerDeleteByKey0(self.engine, &IRIS_SUBLAYER);
             self.ensure_objects()
         }
+    }
+
+    /// take iris out of the filtering engine entirely: every filter, then the
+    /// sublayer and provider. this is the uninstall and recovery path, so an
+    /// engine that crashed in ask mode never leaves a machine-wide deny behind
+    pub fn remove_everything(&mut self) -> EngineResult<()> {
+        const SUBLAYER_NOT_FOUND: u32 = 0x8032_0007;
+        const PROVIDER_NOT_FOUND: u32 = 0x8032_0005;
+        unsafe {
+            self.events = None;
+            self.clear_filters();
+            self.ask_filters.clear();
+            self.lockdown_filters.clear();
+            self.trusted_filters.clear();
+            let rc = FwpmSubLayerDeleteByKey0(self.engine, &IRIS_SUBLAYER);
+            if !ok(rc) && rc != SUBLAYER_NOT_FOUND {
+                return Err(EngineError::Os(format!("could not delete the iris sublayer: {rc:#x}")));
+            }
+            let rc = FwpmProviderDeleteByKey0(self.engine, &IRIS_PROVIDER);
+            if !ok(rc) && rc != PROVIDER_NOT_FOUND {
+                return Err(EngineError::Os(format!("could not delete the iris provider: {rc:#x}")));
+            }
+        }
+        Ok(())
     }
 
     /// enumerate and delete every filter iris owns. we only ever add at the four
@@ -489,7 +513,9 @@ impl Wfp {
         Ok(())
     }
 
-    /// one non-persistent block of all non-loopback traffic at `layer`
+    /// one persistent block of all non-loopback traffic at `layer`. persistent
+    /// like the per-app rules so a reboot keeps failing closed until the engine
+    /// starts, wipes by provider, and re-applies
     unsafe fn add_catch_all(
         &mut self,
         layer: GUID,
@@ -507,6 +533,7 @@ impl Wfp {
         filter.layerKey = layer;
         filter.subLayerKey = IRIS_SUBLAYER;
         filter.weight = weight(filter_weight);
+        filter.flags = FWPM_FILTER_FLAG_PERSISTENT;
         filter.numFilterConditions = conditions.len() as u32;
         filter.filterCondition = conditions.as_mut_ptr();
         filter.action = FWPM_ACTION0 {

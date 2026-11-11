@@ -9,11 +9,11 @@ use windows::core::{BOOL, HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::ERROR_SERVICE_ALREADY_RUNNING;
 use windows::Win32::System::Services::{
     ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, ControlService,
-    CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, StartServiceW, SC_ACTION,
+    CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, QueryServiceStatus, StartServiceW, SC_ACTION,
     SC_ACTION_RESTART, SC_HANDLE, SC_MANAGER_ALL_ACCESS, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
     SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, SERVICE_CONTROL_STOP,
     SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW, SERVICE_FAILURE_ACTIONS_FLAG, SERVICE_STATUS,
-    SERVICE_WIN32_OWN_PROCESS,
+    SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS,
 };
 
 pub const SERVICE_NAME: &str = "IrisEngine";
@@ -142,14 +142,51 @@ pub fn uninstall() -> anyhow::Result<()> {
     unsafe {
         let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)?;
         let svc = OpenServiceW(scm, PCWSTR(wide(SERVICE_NAME).as_ptr()), SERVICE_ALL_ACCESS)?;
-        let mut status = SERVICE_STATUS::default();
-        let _ = ControlService(svc, SERVICE_CONTROL_STOP, &mut status);
+        stop_and_wait(svc);
         DeleteService(svc)?;
         let _ = CloseServiceHandle(svc);
         let _ = CloseServiceHandle(scm);
     }
     tracing::info!("service '{SERVICE_NAME}' removed");
+    // the engine's filters are persistent so a crash fails closed; with the
+    // engine gone for good they would block the machine forever
+    clear_firewall_state()
+}
+
+/// recovery for a machine the firewall has locked out: stop the engine if it is
+/// installed, then remove every iris filter and upload cap. the service stays
+/// registered, so the next start or boot enforces the saved rules again
+pub fn clear_firewall() -> anyhow::Result<()> {
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)?;
+        if let Ok(svc) = OpenServiceW(scm, PCWSTR(wide(SERVICE_NAME).as_ptr()), SERVICE_ALL_ACCESS) {
+            stop_and_wait(svc);
+            let _ = CloseServiceHandle(svc);
+        }
+        let _ = CloseServiceHandle(scm);
+    }
+    clear_firewall_state()
+}
+
+fn clear_firewall_state() -> anyhow::Result<()> {
+    crate::platform::Wfp::open()?.remove_everything()?;
+    crate::caps::clear_all()?;
+    tracing::info!("iris filters and upload caps removed");
     Ok(())
+}
+
+/// ask the engine to stop and give it a bounded time to exit, so its own
+/// shutdown cannot race the cleanup that follows
+unsafe fn stop_and_wait(svc: SC_HANDLE) {
+    let mut status = SERVICE_STATUS::default();
+    let _ = ControlService(svc, SERVICE_CONTROL_STOP, &mut status);
+    for _ in 0..100 {
+        if QueryServiceStatus(svc, &mut status).is_err() || status.dwCurrentState == SERVICE_STOPPED {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    tracing::warn!("service '{SERVICE_NAME}' did not stop within 10s");
 }
 
 #[cfg(test)]

@@ -51,6 +51,9 @@ fn main() -> anyhow::Result<()> {
         if has("--uninstall") {
             return install::uninstall();
         }
+        if has("--clear-firewall") {
+            return install::clear_firewall();
+        }
     }
     #[cfg(target_os = "linux")]
     {

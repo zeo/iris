@@ -156,6 +156,9 @@ impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Store> {
         let conn = Self::open_checked(path)?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
+        // under WAL this stays consistent through a crash or power loss and only
+        // risks the last few commits, while dropping the fsync from every tick
+        conn.pragma_update(None, "synchronous", "NORMAL").ok();
         let store = Store { conn };
         store.migrate()?;
         Ok(store)
@@ -741,6 +744,17 @@ impl Store {
                     params![KEEP_WATCH_ALERTS],
                 );
             }
+            if matches!(kind, AlertKind::NewApp { .. }) {
+                // notify mode never asks for an answer, so unanswered first-seen
+                // alerts pile up for the life of the install without this
+                const KEEP_NEW_APP_ALERTS: i64 = 500;
+                let _ = self.conn.execute(
+                    "DELETE FROM alerts WHERE acknowledged = 0 AND kind LIKE '{\"kind\":\"new_app\",%' \
+                     AND id NOT IN (SELECT id FROM alerts WHERE acknowledged = 0 \
+                      AND kind LIKE '{\"kind\":\"new_app\",%' ORDER BY id DESC LIMIT ?1)",
+                    params![KEEP_NEW_APP_ALERTS],
+                );
+            }
             if matches!(kind, AlertKind::Plugin { .. }) {
                 const KEEP_PLUGIN_ALERTS: i64 = 1000;
                 let _ = self.conn.execute(
@@ -1221,6 +1235,23 @@ mod tests {
         assert_eq!(s.trusted_apps(), vec!["/usr/bin/new-app".to_string()]);
         assert!(s.set_app_decision("/usr/bin/new-app", RuleAction::Block));
         assert!(s.trusted_apps().is_empty());
+    }
+
+    #[test]
+    fn unanswered_first_seen_alerts_keep_only_the_newest() {
+        let s = Store::open_in_memory().unwrap();
+        let first = s.insert_alert(&AlertKind::NewApp { app: AppId::from_path("c:/0.exe"), remote: None, direction: None }, 0);
+        for n in 1..=500 {
+            let app = AppId::from_path(&format!("c:/{n}.exe"));
+            s.insert_alert(&AlertKind::NewApp { app, remote: None, direction: None }, n);
+        }
+        let unanswered: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM alerts WHERE acknowledged = 0", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(unanswered, 500);
+        let oldest_left: i64 = s.conn.query_row("SELECT MIN(id) FROM alerts", [], |r| r.get(0)).unwrap();
+        assert_eq!(oldest_left, first.id + 1);
     }
 
     #[test]

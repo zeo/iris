@@ -3,9 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { pathKey } from "./path";
 
 export interface RuleScope {
-  remote?: { addr: string; prefix: number };
-  ports?: { start: number; end: number };
-  protocol?: "tcp" | "udp";
+  remote?: { addr: string; prefix: number } | null;
+  ports?: { start: number; end: number } | null;
+  protocol?: "tcp" | "udp" | null;
 }
 export type FirewallMode = "ask" | "notify" | "lockdown";
 export type RuleLifetime =
@@ -19,7 +19,7 @@ export interface Rule {
   label: string | null;
   scope?: RuleScope;
   lifetime?: RuleLifetime;
-  profile?: string;
+  profile?: string | null;
 }
 
 /// what the rule editor sends besides app, direction, and action

@@ -127,4 +127,36 @@ mod tests {
         let r: Result<Option<ClientMessage>, _> = read_frame(&mut cur);
         assert!(matches!(r, Err(CodecError::FrameTooLarge(_))));
     }
+
+    #[test]
+    fn scoped_timed_rules_and_profiles_survive_a_binary_frame() {
+        use crate::message::Reply;
+        use iris_core::{FirewallMode, PortRange, Profile, ProfileState, Rule, RuleLifetime, RuleScope};
+        let mut timed = Rule::block_outbound(AppId::from_path("/usr/bin/a"));
+        timed.lifetime = RuleLifetime::Until { at_ms: 5 };
+        timed.scope = RuleScope { ports: Some(PortRange { start: 0, end: 65535 }), ..Default::default() };
+        let plain = Rule::block_outbound(AppId::from_path("/usr/bin/b"));
+        let profile = |mode| Profile { name: "home".into(), networks: Vec::new(), mode };
+        let messages = [
+            ServerMessage::Reply { req: 1, result: Reply::Ok },
+            ServerMessage::Reply {
+                req: 2,
+                result: Reply::Profiles(ProfileState {
+                    profiles: vec![profile(None), profile(Some(FirewallMode::Lockdown))],
+                    ..Default::default()
+                }),
+            },
+        ];
+        for rule in [timed, plain] {
+            let msg = ClientMessage::AddRule { req: 1, rule };
+            let mut buffer = Vec::new();
+            write_frame(&mut buffer, &msg).unwrap();
+            assert_eq!(read_frame::<_, ClientMessage>(&mut Cursor::new(buffer)).unwrap(), Some(msg));
+        }
+        for msg in messages {
+            let mut buffer = Vec::new();
+            write_frame(&mut buffer, &msg).unwrap();
+            assert_eq!(read_frame::<_, ServerMessage>(&mut Cursor::new(buffer)).unwrap(), Some(msg));
+        }
+    }
 }

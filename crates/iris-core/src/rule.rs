@@ -106,11 +106,11 @@ impl PortRange {
 /// the rule covers all of the app's traffic in its direction
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuleScope {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub remote: Option<Cidr>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ports: Option<PortRange>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub protocol: Option<Protocol>,
 }
 
@@ -127,8 +127,7 @@ impl RuleScope {
 }
 
 /// how long a rule stays in force
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RuleLifetime {
     #[default]
     Permanent,
@@ -145,6 +144,54 @@ impl RuleLifetime {
 
     pub fn expired(&self, now_ms: u64) -> bool {
         matches!(self, RuleLifetime::Until { at_ms } if *at_ms <= now_ms)
+    }
+}
+
+// json carries the lifetime tagged by kind for the ui and the rules file; the
+// pipe's bincode cannot read an internally tagged enum, so it gets the plain one
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+enum TaggedLifetime {
+    Permanent,
+    UntilRestart,
+    Until { at_ms: u64 },
+}
+
+#[derive(Serialize, Deserialize)]
+enum PlainLifetime {
+    Permanent,
+    UntilRestart,
+    Until { at_ms: u64 },
+}
+
+impl Serialize for RuleLifetime {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match (*self, serializer.is_human_readable()) {
+            (RuleLifetime::Permanent, true) => TaggedLifetime::Permanent.serialize(serializer),
+            (RuleLifetime::UntilRestart, true) => TaggedLifetime::UntilRestart.serialize(serializer),
+            (RuleLifetime::Until { at_ms }, true) => TaggedLifetime::Until { at_ms }.serialize(serializer),
+            (RuleLifetime::Permanent, false) => PlainLifetime::Permanent.serialize(serializer),
+            (RuleLifetime::UntilRestart, false) => PlainLifetime::UntilRestart.serialize(serializer),
+            (RuleLifetime::Until { at_ms }, false) => PlainLifetime::Until { at_ms }.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RuleLifetime {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(if deserializer.is_human_readable() {
+            match TaggedLifetime::deserialize(deserializer)? {
+                TaggedLifetime::Permanent => RuleLifetime::Permanent,
+                TaggedLifetime::UntilRestart => RuleLifetime::UntilRestart,
+                TaggedLifetime::Until { at_ms } => RuleLifetime::Until { at_ms },
+            }
+        } else {
+            match PlainLifetime::deserialize(deserializer)? {
+                PlainLifetime::Permanent => RuleLifetime::Permanent,
+                PlainLifetime::UntilRestart => RuleLifetime::UntilRestart,
+                PlainLifetime::Until { at_ms } => RuleLifetime::Until { at_ms },
+            }
+        })
     }
 }
 
@@ -167,13 +214,13 @@ pub struct Rule {
     pub action: RuleAction,
     /// friendly label shown in the UI, defaults to the app file name
     pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "RuleScope::is_whole_app")]
+    #[serde(default)]
     pub scope: RuleScope,
-    #[serde(default, skip_serializing_if = "RuleLifetime::is_permanent")]
+    #[serde(default)]
     pub lifetime: RuleLifetime,
     /// the network profile this rule belongs to; enforced only while that
     /// profile is active. none applies everywhere
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub profile: Option<String>,
 }
 
@@ -223,7 +270,7 @@ pub struct NetworkIdentity {
 pub struct Profile {
     pub name: String,
     pub networks: Vec<NetworkIdentity>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub mode: Option<FirewallMode>,
 }
 
@@ -436,7 +483,9 @@ mod tests {
         let rule: Rule = serde_json::from_str(json).expect("legacy rule");
         assert!(rule.scope.is_whole_app());
         assert!(rule.lifetime.is_permanent());
-        assert_eq!(serde_json::to_string(&rule).unwrap(), json);
+        let written = serde_json::to_string(&rule).unwrap();
+        assert!(written.contains(r#""lifetime":{"kind":"permanent"}"#));
+        assert_eq!(serde_json::from_str::<Rule>(&written).unwrap(), rule);
     }
 
     #[test]

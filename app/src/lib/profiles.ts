@@ -9,7 +9,7 @@ export interface NetworkIdentity {
 export interface Profile {
   name: string;
   networks: NetworkIdentity[];
-  mode?: FirewallMode;
+  mode?: FirewallMode | null;
 }
 export interface ProfileState {
   profiles: Profile[];

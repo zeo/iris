@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 /// v12 adds network profiles.
 /// v13 adds per-app upload caps.
 /// v14 adds the engine health query.
-pub const PROTOCOL_VERSION: u32 = 14;
+/// v15 always sends rule scopes, lifetimes, and profile modes, which bincode
+/// could not decode while they were skipped when empty.
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// conditions that quietly undermine the engine, for the UI to surface
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -293,8 +293,8 @@ export function Settings() {
                 <For each={[undefined, ...MODE_OPTS.map((option) => option.id)]}>
                   {(option) => (
                     <button
-                      classList={{ on: profile.mode === option }}
-                      aria-pressed={profile.mode === option}
+                      classList={{ on: (profile.mode ?? undefined) === option }}
+                      aria-pressed={(profile.mode ?? undefined) === option}
                       disabled={busy() === "profiles"}
                       onClick={() => void setProfileMode(profile.name, option)}
                     >

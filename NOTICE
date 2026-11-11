@@ -14,6 +14,20 @@ IP-to-Country data
   Shipped as app/src-tauri/resources/geo/dbip-country.mmdb and credited in the
   application's Settings > About panel.
 
+Third-party software bundled with the Windows build:
+
+WinDivert 2.2.2 (download caps)
+  https://reqrypt.org/windivert.html
+  Source: https://github.com/basil00/WinDivert/releases/tag/v2.2.2
+  Used under the GNU Lesser General Public License version 3, one side of its
+  LGPLv3 / GPLv2 dual license. The full text ships beside the engine as
+  engine/WinDivert-LICENSE.txt and in the source tree as vendor/windivert/LICENSE.
+  WinDivert.dll and the signed WinDivert64.sys driver are redistributed
+  unmodified from WinDivert-2.2.2-A.zip and loaded at run time, so either can be
+  replaced with a compatible build.
+    WinDivert.dll    sha256 c1e060ee19444a259b2162f8af0f3fe8c4428a1c6f694dce20de194ac8d7d9a2
+    WinDivert64.sys  sha256 8da085332782708d8767bcace5327a6ec7283c17cfb85e40b03cd2323a90ddc2
+
 The installer and updater artifacts are signed with minisign. The public key is
 embedded in app/src-tauri/tauri.conf.json for update verification; the private
 signing key is held only in CI secrets and is never distributed.

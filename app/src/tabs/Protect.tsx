@@ -419,7 +419,7 @@ export function Protect() {
               <div class="seg" role="group" aria-label="action">
                 <button classList={{ on: action() === "block" }} aria-pressed={action() === "block"} onClick={() => setAction("block")}>block</button>
                 <button classList={{ on: action() === "allow" }} aria-pressed={action() === "allow"} onClick={() => setAction("allow")}>allow</button>
-                <button classList={{ on: action() === "limit" }} aria-pressed={action() === "limit"} onClick={() => setAction("limit")} title="Cap how fast the app can upload">limit</button>
+                <button classList={{ on: action() === "limit" }} aria-pressed={action() === "limit"} onClick={() => setAction("limit")} title="Cap how fast the app can upload or download">limit</button>
               </div>
               <div class="seg" role="group" aria-label="direction">
                 <button classList={{ on: direction() === "outbound" }} aria-pressed={direction() === "outbound"} onClick={() => setDirection("outbound")}>out</button>
@@ -431,9 +431,9 @@ export function Protect() {
           <Show when={action() === "limit"}>
             <div class="picker-scope">
               <label class="field">
-                <input aria-label="Upload limit in KB/s" inputMode="numeric" value={limitKb()} onInput={(event) => setLimitKb(event.currentTarget.value)} />
+                <input aria-label="Speed limit in KB/s" inputMode="numeric" value={limitKb()} onInput={(event) => setLimitKb(event.currentTarget.value)} />
               </label>
-              <small class="picker-note">KB/s upload. Caps limit what an app sends, not what it downloads, and take hold on its next connection.</small>
+              <small class="picker-note">KB/s. Out limits upload from the app's next connection on. In limits download within a second, and steps aside while a game's anti-cheat runs.</small>
             </div>
           </Show>
           <div class="picker-scope" classList={{ hidden: action() === "limit" }}>
@@ -491,8 +491,14 @@ export function Protect() {
                       const choice = action();
                       if (choice === "limit") {
                         const kb = Number(limitKb());
-                        if (!Number.isFinite(kb) || kb <= 0) throw new Error("Enter an upload limit above 0 KB/s.");
-                        await setCap(sample.app, Math.round(kb * 1024));
+                        if (!Number.isFinite(kb) || kb <= 0) throw new Error("Enter a limit above 0 KB/s.");
+                        const rate = Math.round(kb * 1024);
+                        const existing = caps().find((cap) => pathKey(cap.app) === pathKey(sample.app));
+                        await setCap(
+                          sample.app,
+                          direction() === "outbound" ? rate : (existing?.up_bytes_per_sec ?? null),
+                          direction() === "inbound" ? rate : (existing?.down_bytes_per_sec ?? null),
+                        );
                       } else {
                         await addRule(sample.app, direction(), choice, ruleOptions());
                       }
@@ -505,7 +511,7 @@ export function Protect() {
                   <span class="name">{sample.name ?? fileName(sample.app)}</span>
                   <span class="grow" />
                   <span class={`decision-mark ${action()}`}>
-                    {action() === "limit" ? `${limitKb()} KB/s up` : `${action()} ${direction() === "outbound" ? "out" : "in"}`}
+                    {action() === "limit" ? `${limitKb()} KB/s ${direction() === "outbound" ? "up" : "down"}` : `${action()} ${direction() === "outbound" ? "out" : "in"}`}
                   </span>
                 </button>
               )}
@@ -516,21 +522,22 @@ export function Protect() {
 
       <Show when={caps().length > 0}>
         <div class="panel scoped-rules">
-          <span class="label">upload limits</span>
+          <span class="label">speed limits</span>
           <For each={caps()}>
             {(cap) => (
               <div class="scoped-rule">
                 <AppIcon path={cap.app} />
                 <span><b>{fileName(cap.app)}</b><small>{cap.app}</small></span>
-                <span class="decision-mark limit">{bytes(cap.up_bytes_per_sec)}/s up</span>
+                <Show when={cap.up_bytes_per_sec}>{(rate) => <span class="decision-mark limit">{bytes(rate())}/s up</span>}</Show>
+                <Show when={cap.down_bytes_per_sec}>{(rate) => <span class="decision-mark limit">{bytes(rate())}/s down</span>}</Show>
                 <small class="scoped-life">until lifted</small>
                 <button
                   class="iconbtn"
-                  aria-label="lift upload limit"
+                  aria-label="lift speed limits"
                   onClick={async () => {
                     setToolError("");
                     try {
-                      await setCap(cap.app, null);
+                      await setCap(cap.app, null, null);
                     } catch (error) {
                       setToolError(String(error));
                     }

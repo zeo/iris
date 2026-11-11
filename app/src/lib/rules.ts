@@ -99,7 +99,8 @@ export async function addRule(
 
 export interface RateCap {
   app: string;
-  up_bytes_per_sec: number;
+  up_bytes_per_sec: number | null;
+  down_bytes_per_sec: number | null;
 }
 
 const [caps, setCaps] = createSignal<RateCap[]>([]);
@@ -113,10 +114,10 @@ export async function refreshCaps(): Promise<void> {
   }
 }
 
-/// cap an app's upload in bytes per second, or lift the cap with null
-export async function setCap(path: string, upBytesPerSec: number | null): Promise<void> {
+/// cap an app's upload and download in bytes per second, lifting each with null
+export async function setCap(path: string, upBytesPerSec: number | null, downBytesPerSec: number | null): Promise<void> {
   try {
-    await invoke("set_cap", { path, upBytesPerSec });
+    await invoke("set_cap", { path, upBytesPerSec, downBytesPerSec });
   } finally {
     await refreshCaps();
   }

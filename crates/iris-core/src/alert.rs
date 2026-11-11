@@ -38,6 +38,8 @@ pub enum WatchReason {
     /// an app spent its data quota and is blocked, or the machine-wide one
     /// is running out
     Quota,
+    /// download caps stepped aside while an anti-cheat ran, or came back
+    CapsPaused,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -271,9 +271,14 @@ impl RuleStore {
         self.caps.list()
     }
 
-    pub fn set_cap(&mut self, app: iris_core::AppId, up_bytes_per_sec: Option<u64>) -> anyhow::Result<()> {
+    pub fn set_cap(
+        &mut self,
+        app: iris_core::AppId,
+        up_bytes_per_sec: Option<u64>,
+        down_bytes_per_sec: Option<u64>,
+    ) -> anyhow::Result<()> {
         #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-        let mark = self.caps.set(app.clone(), up_bytes_per_sec)?;
+        let mark = self.caps.set(app.clone(), up_bytes_per_sec, down_bytes_per_sec)?;
         #[cfg(target_os = "linux")]
         if let Some(wfp) = self.wfp.as_ref() {
             wfp.set_cap_mark(app.as_str(), mark);
@@ -335,6 +340,12 @@ impl RuleStore {
     /// keep upload caps on the interface the default route uses
     pub fn follow_route(&mut self) {
         self.caps.follow_route();
+    }
+
+    /// point download caps at the capped apps' live connections, returning an
+    /// alert when they pause for an anti-cheat or resume after it
+    pub fn follow_flows(&mut self, apps: &[iris_core::AppSample]) -> Option<AlertKind> {
+        self.caps.follow_flows(apps)
     }
 
     pub fn profile_state(&self) -> ProfileState {

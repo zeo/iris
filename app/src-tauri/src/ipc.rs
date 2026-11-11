@@ -64,7 +64,7 @@ pub enum EngineCmd {
     ListCaps,
     ListQuotas,
     GetHealth,
-    SetCap(String, Option<u64>),
+    SetCap(String, Option<u64>, Option<u64>),
     SetQuota(Option<String>, Option<iris_core::QuotaLimit>),
     SetProfiles(Vec<iris_core::Profile>, Option<String>),
     SetFirewallMode(iris_core::FirewallMode),
@@ -607,10 +607,11 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                         limit,
                     },
                     EngineCmd::GetHealth => ClientMessage::GetHealth { req },
-                    EngineCmd::SetCap(path, up_bytes_per_sec) => ClientMessage::SetCap {
+                    EngineCmd::SetCap(path, up_bytes_per_sec, down_bytes_per_sec) => ClientMessage::SetCap {
                         req,
                         app: iris_core::AppId::from_path(&path),
                         up_bytes_per_sec,
+                        down_bytes_per_sec,
                     },
                     EngineCmd::SetProfiles(profiles, manual) =>
                         ClientMessage::SetProfiles { req, profiles, manual },

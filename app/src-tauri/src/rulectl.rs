@@ -110,10 +110,15 @@ pub async fn rule_add(
 }
 
 #[tauri::command]
-pub async fn set_cap(app: tauri::AppHandle, path: String, up_bytes_per_sec: Option<u64>) -> Result<(), String> {
-    let rate = up_bytes_per_sec.map_or_else(|| "off".to_string(), |rate| rate.to_string());
-    let args = vec!["--cap".into(), path.clone(), rate];
-    mutate(app, EngineCmd::SetCap(path, up_bytes_per_sec), args).await
+pub async fn set_cap(
+    app: tauri::AppHandle,
+    path: String,
+    up_bytes_per_sec: Option<u64>,
+    down_bytes_per_sec: Option<u64>,
+) -> Result<(), String> {
+    let rate = |rate: Option<u64>| rate.map_or_else(|| "off".to_string(), |rate| rate.to_string());
+    let args = vec!["--cap".into(), path.clone(), rate(up_bytes_per_sec), rate(down_bytes_per_sec)];
+    mutate(app, EngineCmd::SetCap(path, up_bytes_per_sec, down_bytes_per_sec), args).await
 }
 
 #[tauri::command]

@@ -358,9 +358,9 @@ async fn handle(
                             .map_or_else(rules_unavailable, Reply::Caps);
                         reply(&mut send, req, result).await?;
                     }
-                    ClientMessage::SetCap { req, app, up_bytes_per_sec } => {
+                    ClientMessage::SetCap { req, app, up_bytes_per_sec, down_bytes_per_sec } => {
                         let result = if peer.may_manage_rules() {
-                            set_cap(&rules, app, up_bytes_per_sec).await
+                            set_cap(&rules, app, up_bytes_per_sec, down_bytes_per_sec).await
                         } else {
                             Reply::Error(NEEDS_ELEVATION.into())
                         };
@@ -899,8 +899,8 @@ async fn handle_admin(
                 let result = set_mode(&rules, mode).await;
                 reply(&mut send, req, result).await?;
             }
-            ClientMessage::SetCap { req, app, up_bytes_per_sec } => {
-                let result = set_cap(&rules, app, up_bytes_per_sec).await;
+            ClientMessage::SetCap { req, app, up_bytes_per_sec, down_bytes_per_sec } => {
+                let result = set_cap(&rules, app, up_bytes_per_sec, down_bytes_per_sec).await;
                 reply(&mut send, req, result).await?;
             }
             ClientMessage::SetProfiles { req, profiles, manual } => {
@@ -985,16 +985,17 @@ async fn set_cap(
     rules: &Arc<Mutex<RuleStore>>,
     app: iris_core::AppId,
     up_bytes_per_sec: Option<u64>,
+    down_bytes_per_sec: Option<u64>,
 ) -> Reply {
     let rules = rules.clone();
     tokio::task::spawn_blocking(move || {
         match rules
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .set_cap(app, up_bytes_per_sec)
+            .set_cap(app, up_bytes_per_sec, down_bytes_per_sec)
         {
             Ok(()) => Reply::Ok,
-            Err(error) => Reply::Error(format!("could not set the upload cap: {error}")),
+            Err(error) => Reply::Error(format!("could not set the cap: {error}")),
         }
     })
     .await

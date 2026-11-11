@@ -34,7 +34,10 @@ own pending alert through the active desktop session.
   recognized by the gateway's hardware address.
 - **Limits**: per-app upload caps, through QoS policies on Windows and an htb
   class per app on Linux, keyed by a mark the engine puts on each new flow.
-  Only what an app sends is shaped, so there are no download caps.
+  Download caps are Windows only: the engine paces the app's inbound packets
+  through the bundled WinDivert driver, which loads only while a download cap
+  exists and steps aside while a known game anti-cheat (Vanguard, Easy
+  Anti-Cheat, BattlEye, FACEIT) runs.
 - **Activity**: a live table of every app's up and down rate, open connections,
   and the remote endpoints it is talking to. Open a connection for its host name,
   network scope, country, and a one-click kill.

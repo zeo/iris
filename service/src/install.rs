@@ -171,7 +171,8 @@ pub fn clear_firewall() -> anyhow::Result<()> {
 fn clear_firewall_state() -> anyhow::Result<()> {
     crate::platform::Wfp::open()?.remove_everything()?;
     crate::caps::clear_all()?;
-    tracing::info!("iris filters and upload caps removed");
+    crate::platform::divert::stop_driver();
+    tracing::info!("iris filters and caps removed");
     Ok(())
 }
 

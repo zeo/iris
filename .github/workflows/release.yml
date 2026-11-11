@@ -125,6 +125,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "signing failed for iris.exe" }
           Copy-Item target\release\iris.exe $stage\
           Copy-Item target\release\iris-engine.exe "$stage\engine\"
+          Copy-Item vendor\windivert\WinDivert.dll, vendor\windivert\WinDivert64.sys "$stage\engine\"
+          Copy-Item vendor\windivert\LICENSE "$stage\engine\WinDivert-LICENSE.txt"
           Copy-Item app\src-tauri\resources\geo\dbip-country.mmdb "$stage\resources\geo\"
           $pack = '.rot-installer\target\release\rot-pack.exe'
           $installer = '.rot-installer\target\release\rot-installer.exe'

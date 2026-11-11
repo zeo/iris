@@ -17,6 +17,8 @@ mod quota;
 mod rules;
 mod server;
 #[cfg(windows)]
+mod shaper;
+#[cfg(windows)]
 mod svc;
 #[cfg(target_os = "linux")]
 mod systemd;

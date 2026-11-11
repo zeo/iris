@@ -45,12 +45,19 @@ fn build_op(args: &[String]) -> anyhow::Result<Op> {
         }
         Some("--cap") => {
             let path = args.get(1).context("cap: missing app path")?;
-            let up_bytes_per_sec = match args.get(2).map(String::as_str) {
-                Some("off") => None,
-                Some(rate) => Some(rate.parse().context("cap: rate must be bytes per second")?),
-                None => bail!("cap: missing rate"),
+            let rate = |arg: Option<&String>| match arg.map(String::as_str) {
+                Some("off") | None => Ok(None),
+                Some(rate) => rate.parse().map(Some).context("cap: rate must be bytes per second"),
             };
-            Ok(Op::Single(ClientMessage::SetCap { req: 1, app: AppId::from_path(path), up_bytes_per_sec }))
+            if args.get(2).is_none() {
+                bail!("cap: missing rate");
+            }
+            Ok(Op::Single(ClientMessage::SetCap {
+                req: 1,
+                app: AppId::from_path(path),
+                up_bytes_per_sec: rate(args.get(2))?,
+                down_bytes_per_sec: rate(args.get(3))?,
+            }))
         }
         Some("--quota") => {
             let path = args.get(1).context("quota: missing app path")?;

@@ -1,11 +1,12 @@
-//! per-app upload caps. on windows each cap is a policy-based qos throttle in
-//! the active store, which does not survive a reboot, so the json file beside
-//! the rules is the source of truth and the engine re-applies it at start. qos
-//! throttles what a host sends; download caps would need a callout driver. on
-//! linux each cap is an htb class keyed by a flow mark the verdict thread sets,
-//! so the store also hands back the mark each capped app's flows must carry.
+//! per-app throughput caps. on windows an upload cap is a policy-based qos
+//! throttle in the active store, which does not survive a reboot, so the json
+//! file beside the rules is the source of truth and the engine re-applies it at
+//! start. qos only throttles what a host sends, so download caps pace inbound
+//! packets through WinDivert instead (see `shaper`). on linux each upload cap is
+//! an htb class keyed by a flow mark the verdict thread sets, so the store also
+//! hands back the mark each capped app's flows must carry.
 
-use iris_core::{AppId, RateCap};
+use iris_core::{AlertKind, AppId, AppSample, RateCap};
 use std::path::PathBuf;
 
 fn caps_path() -> PathBuf {
@@ -57,21 +58,32 @@ impl CapStore {
         self.caps.clone()
     }
 
-    /// cap an app's upload at `up_bytes_per_sec`, or lift its cap with none.
-    /// returns the mark its flows must now carry, if the platform uses one
-    pub fn set(&mut self, app: AppId, up_bytes_per_sec: Option<u64>) -> anyhow::Result<Option<u32>> {
-        match up_bytes_per_sec {
-            Some(0) => anyhow::bail!("an upload cap must be above zero; block the app instead"),
-            Some(rate) => {
-                let cap = RateCap { app: app.clone(), up_bytes_per_sec: rate };
-                self.backend.apply(&cap)?;
-                self.caps.retain(|existing| existing.app != app);
-                self.caps.push(cap);
-            }
-            None => {
-                self.backend.remove(&app)?;
-                self.caps.retain(|existing| existing.app != app);
-            }
+    /// keep download caps on the capped apps' live connections
+    pub fn follow_flows(&mut self, apps: &[AppSample]) -> Option<AlertKind> {
+        self.backend.follow_flows(apps)
+    }
+
+    /// cap an app's upload and download, lifting each with none. returns the
+    /// mark its flows must now carry, if the platform uses one
+    pub fn set(
+        &mut self,
+        app: AppId,
+        up_bytes_per_sec: Option<u64>,
+        down_bytes_per_sec: Option<u64>,
+    ) -> anyhow::Result<Option<u32>> {
+        if up_bytes_per_sec == Some(0) || down_bytes_per_sec == Some(0) {
+            anyhow::bail!("a cap must be above zero; block the app instead");
+        }
+        let cap = RateCap { app: app.clone(), up_bytes_per_sec, down_bytes_per_sec };
+        let capped = up_bytes_per_sec.is_some() || down_bytes_per_sec.is_some();
+        if capped {
+            self.backend.apply(&cap)?;
+        } else {
+            self.backend.remove(&app)?;
+        }
+        self.caps.retain(|existing| existing.app != app);
+        if capped {
+            self.caps.push(cap);
         }
         let tmp = caps_path().with_extension("json.tmp");
         if let Some(parent) = tmp.parent() {
@@ -83,8 +95,8 @@ impl CapStore {
     }
 }
 
-/// lift every upload cap iris put in force without touching the saved list,
-/// for uninstall and firewall recovery
+/// lift every cap iris put in force without touching the saved list, for
+/// uninstall and firewall recovery
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn clear_all() -> anyhow::Result<()> {
     platform::Backend::default().clear()
@@ -106,13 +118,35 @@ fn policy_name(app: &AppId) -> String {
 #[cfg(windows)]
 mod platform {
     use super::policy_name;
-    use iris_core::{AppId, RateCap};
+    use crate::platform::divert;
+    use crate::shaper::{is_anticheat, Shaper};
+    use iris_core::{AlertKind, AppId, AppSample, RateCap, WatchReason};
+    use std::collections::HashMap;
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     #[derive(Default)]
-    pub struct Backend {}
+    pub struct Backend {
+        downloads: HashMap<AppId, u64>,
+        /// running only while a download cap is in force and no anti-cheat is
+        shaper: Option<Shaper>,
+        /// the anti-cheat image download caps stepped aside for
+        paused_for: Option<String>,
+        checked: Option<Instant>,
+        notice: Option<AlertKind>,
+    }
+
+    /// how often to look for an anti-cheat while download caps are in force
+    const GUARD_EVERY: Duration = Duration::from_secs(5);
+
+    fn running_anticheat() -> Option<String> {
+        divert::running_image_names().into_iter().find(|name| is_anticheat(name))
+    }
+
+    fn caps_notice(message: String) -> AlertKind {
+        AlertKind::Watch { reason: WatchReason::CapsPaused, app: None, message }
+    }
 
     /// a qos cmdlet normally answers in a second or two; past this the wmi
     /// provider is wedged while the caller holds the rule lock waiting on it
@@ -162,27 +196,30 @@ mod platform {
 
     impl Backend {
         pub fn apply(&mut self, cap: &RateCap) -> anyhow::Result<()> {
-            run(
-                "$ErrorActionPreference = 'Stop'; \
-                 Remove-NetQosPolicy -Name $env:IRIS_NAME -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue; \
-                 New-NetQosPolicy -Name $env:IRIS_NAME -AppPathNameMatchCondition $env:IRIS_APP \
-                   -ThrottleRateActionBitsPerSecond ([uint64]$env:IRIS_BITS) -PolicyStore ActiveStore | Out-Null",
-                &[
-                    ("IRIS_NAME", policy_name(&cap.app)),
-                    ("IRIS_APP", cap.app.as_str().to_string()),
-                    ("IRIS_BITS", cap.up_bytes_per_sec.saturating_mul(8).to_string()),
-                ],
-            )
+            let before = self.downloads.clone();
+            let mut downloads = before.clone();
+            match cap.down_bytes_per_sec {
+                Some(rate) => downloads.insert(cap.app.clone(), rate),
+                None => downloads.remove(&cap.app),
+            };
+            self.shape(downloads)?;
+            let upload = apply_upload(cap);
+            if upload.is_err() {
+                // the cap is not saved, so neither half of it may stay in force
+                let _ = self.shape(before);
+            }
+            upload
         }
 
         pub fn remove(&mut self, app: &AppId) -> anyhow::Result<()> {
-            run(
-                "Remove-NetQosPolicy -Name $env:IRIS_NAME -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue",
-                &[("IRIS_NAME", policy_name(app))],
-            )
+            let mut downloads = self.downloads.clone();
+            downloads.remove(app);
+            self.shape(downloads)?;
+            remove_upload(app)
         }
 
         pub fn clear(&mut self) -> anyhow::Result<()> {
+            self.shape(HashMap::new())?;
             run(
                 "Get-NetQosPolicy -PolicyStore ActiveStore -ErrorAction SilentlyContinue | \
                  Where-Object Name -like 'iris-cap-*' | Remove-NetQosPolicy -Confirm:$false",
@@ -199,6 +236,108 @@ mod platform {
         pub fn follow_route(&mut self) -> anyhow::Result<()> {
             Ok(())
         }
+
+        pub fn follow_flows(&mut self, apps: &[AppSample]) -> Option<AlertKind> {
+            if self.downloads.is_empty() {
+                return None;
+            }
+            if self.checked.is_none_or(|at| at.elapsed() >= GUARD_EVERY) {
+                self.guard();
+            }
+            if let Some(shaper) = self.shaper.as_mut() {
+                let owners = apps
+                    .iter()
+                    .filter(|sample| self.downloads.contains_key(&sample.app))
+                    .flat_map(|sample| {
+                        sample
+                            .processes
+                            .iter()
+                            .flat_map(|process| &process.conns)
+                            .map(|conn| ((conn.remote.protocol, conn.local_port), sample.app.clone()))
+                    })
+                    .collect();
+                if let Err(error) = shaper.follow(owners) {
+                    tracing::warn!("could not point download caps at new connections: {error}");
+                }
+            }
+            self.notice.take()
+        }
+
+        /// put these download caps in force, loading the driver for the first
+        /// and unloading it after the last
+        fn shape(&mut self, downloads: HashMap<AppId, u64>) -> anyhow::Result<()> {
+            if downloads.is_empty() {
+                self.stop();
+                self.paused_for = None;
+            } else if let Some(shaper) = self.shaper.as_mut() {
+                shaper.set_rates(&downloads);
+            } else if self.paused_for.is_none() {
+                self.checked = Some(Instant::now());
+                match running_anticheat() {
+                    Some(name) => self.pause(name),
+                    None => self.shaper = Some(Shaper::start(&downloads)?),
+                }
+            }
+            self.downloads = downloads;
+            Ok(())
+        }
+
+        /// step aside while an anti-cheat runs, since it would refuse to start
+        /// or flag the account beside a packet driver, and come back after
+        fn guard(&mut self) {
+            self.checked = Some(Instant::now());
+            match (running_anticheat(), self.paused_for.take()) {
+                (Some(_), Some(name)) => self.paused_for = Some(name),
+                (Some(name), None) => {
+                    self.stop();
+                    self.pause(name);
+                }
+                (None, Some(name)) => match Shaper::start(&self.downloads) {
+                    Ok(shaper) => {
+                        self.shaper = Some(shaper);
+                        self.notice = Some(caps_notice(format!("Download caps are back on now that {name} closed")));
+                    }
+                    Err(error) => tracing::warn!("could not resume download caps: {error}"),
+                },
+                (None, None) => {}
+            }
+        }
+
+        fn pause(&mut self, name: String) {
+            tracing::info!("download caps paused while {name} runs");
+            self.notice = Some(caps_notice(format!("Download caps are paused while {name} runs")));
+            self.paused_for = Some(name);
+        }
+
+        fn stop(&mut self) {
+            if self.shaper.take().is_some() {
+                divert::stop_driver();
+            }
+        }
+    }
+
+    fn apply_upload(cap: &RateCap) -> anyhow::Result<()> {
+        let Some(rate) = cap.up_bytes_per_sec else {
+            return remove_upload(&cap.app);
+        };
+        run(
+            "$ErrorActionPreference = 'Stop'; \
+             Remove-NetQosPolicy -Name $env:IRIS_NAME -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue; \
+             New-NetQosPolicy -Name $env:IRIS_NAME -AppPathNameMatchCondition $env:IRIS_APP \
+               -ThrottleRateActionBitsPerSecond ([uint64]$env:IRIS_BITS) -PolicyStore ActiveStore | Out-Null",
+            &[
+                ("IRIS_NAME", policy_name(&cap.app)),
+                ("IRIS_APP", cap.app.as_str().to_string()),
+                ("IRIS_BITS", rate.saturating_mul(8).to_string()),
+            ],
+        )
+    }
+
+    fn remove_upload(app: &AppId) -> anyhow::Result<()> {
+        run(
+            "Remove-NetQosPolicy -Name $env:IRIS_NAME -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue",
+            &[("IRIS_NAME", policy_name(app))],
+        )
     }
 
     #[cfg(test)]
@@ -213,7 +352,7 @@ mod platform {
 
 #[cfg(target_os = "linux")]
 mod platform {
-    use iris_core::{AppId, RateCap};
+    use iris_core::{AlertKind, AppId, AppSample, RateCap};
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -225,6 +364,10 @@ mod platform {
 
     impl Backend {
         pub fn apply(&mut self, cap: &RateCap) -> anyhow::Result<()> {
+            anyhow::ensure!(cap.down_bytes_per_sec.is_none(), "download caps are only available on Windows");
+            let Some(rate) = cap.up_bytes_per_sec else {
+                return self.remove(&cap.app);
+            };
             self.ensure_device()?;
             let id = match self.ids.get(&cap.app) {
                 Some(id) => *id,
@@ -237,7 +380,7 @@ mod platform {
                     id
                 }
             };
-            if let Err(error) = self.shaper.set(id, cap.up_bytes_per_sec) {
+            if let Err(error) = self.shaper.set(id, rate) {
                 self.ids.remove(&cap.app);
                 return Err(error.into());
             }
@@ -261,6 +404,10 @@ mod platform {
             self.ids.get(app).map(|id| crate::platform::mark_for(*id))
         }
 
+        pub fn follow_flows(&mut self, _apps: &[AppSample]) -> Option<AlertKind> {
+            None
+        }
+
         pub fn follow_route(&mut self) -> anyhow::Result<()> {
             if self.ids.is_empty() {
                 return Ok(());
@@ -282,14 +429,18 @@ mod platform {
 
 #[cfg(not(has_platform))]
 mod platform {
-    use iris_core::{AppId, RateCap};
+    use iris_core::{AlertKind, AppId, AppSample, RateCap};
 
     #[derive(Default)]
     pub struct Backend {}
 
     impl Backend {
         pub fn apply(&mut self, _cap: &RateCap) -> anyhow::Result<()> {
-            anyhow::bail!("upload caps are not available on this platform")
+            anyhow::bail!("caps are not available on this platform")
+        }
+
+        pub fn follow_flows(&mut self, _apps: &[AppSample]) -> Option<AlertKind> {
+            None
         }
 
         pub fn remove(&mut self, _app: &AppId) -> anyhow::Result<()> {

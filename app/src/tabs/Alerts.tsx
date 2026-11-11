@@ -99,6 +99,7 @@ export function Alerts() {
     new_host: "New destination",
     gateway_changed: "Gateway changed",
     quota: "Data quota",
+    caps_paused: "Download caps",
   } as const;
 
   const watchRow = (a: Alert, k: Extract<Alert["kind"], { kind: "watch" }>) => (

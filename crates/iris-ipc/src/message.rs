@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 /// v14 adds the engine health query.
 /// v15 always sends rule scopes, lifetimes, and profile modes, which bincode
 /// could not decode while they were skipped when empty, and adds data quotas.
-pub const PROTOCOL_VERSION: u32 = 15;
+/// v16 adds download caps.
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// conditions that quietly undermine the engine, for the UI to surface
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -108,11 +109,12 @@ pub enum ClientMessage {
     GetHealth {
         req: u64,
     },
-    /// cap an app's upload, or lift the cap with none. privileged
+    /// cap an app's upload and download, lifting each with none. privileged
     SetCap {
         req: u64,
         app: AppId,
         up_bytes_per_sec: Option<u64>,
+        down_bytes_per_sec: Option<u64>,
     },
     ListQuotas {
         req: u64,

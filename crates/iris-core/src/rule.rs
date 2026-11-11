@@ -314,11 +314,13 @@ pub fn effective_mode(global: FirewallMode, profile: Option<&Profile>) -> Firewa
     profile.and_then(|profile| profile.mode).unwrap_or(global)
 }
 
-/// an app's upload ceiling, enforced by the os traffic shaper
+/// an app's throughput ceilings. upload goes through the os traffic shaper;
+/// download through a packet diverter on windows only
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RateCap {
     pub app: AppId,
-    pub up_bytes_per_sec: u64,
+    pub up_bytes_per_sec: Option<u64>,
+    pub down_bytes_per_sec: Option<u64>,
 }
 
 /// how often a data quota starts over, counted in local time. weeks start on

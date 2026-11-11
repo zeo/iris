@@ -3,7 +3,7 @@
 //! decided app replaced on disk, and a gateway answering from a new hardware
 //! address. each one is rate limited, since an alert nobody reads is noise.
 
-use iris_core::{AlertKind, AppId, Granularity, HostUsage, StatsTick, WatchReason};
+use iris_core::{AlertKind, AppId, Granularity, HostUsage, NetworkIdentity, StatsTick, WatchReason};
 use iris_store::Store;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -43,8 +43,25 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    /// look over one tick and its per-host split, before the split is stored
-    pub fn observe(&mut self, tick: &StatsTick, hosts: &[HostUsage], store: &Store) -> Vec<AlertKind> {
+    /// probe the gateway when this tick's observation will check it. the probe
+    /// can wait on an ARP resolve, so it runs before the store lock is taken
+    pub fn probe_network(&self) -> Option<NetworkIdentity> {
+        #[cfg(has_platform)]
+        if self.ticks.is_multiple_of(GATEWAY_EVERY_TICKS) {
+            return crate::platform::current_network();
+        }
+        None
+    }
+
+    /// look over one tick and its per-host split, before the split is stored.
+    /// `network` is what [`Self::probe_network`] returned for this tick
+    pub fn observe(
+        &mut self,
+        tick: &StatsTick,
+        hosts: &[HostUsage],
+        network: Option<NetworkIdentity>,
+        store: &Store,
+    ) -> Vec<AlertKind> {
         let mut alerts = Vec::new();
         if self.ticks.is_multiple_of(DECISIONS_EVERY_TICKS) {
             self.decided = store.trusted_apps().into_iter().collect();
@@ -54,8 +71,8 @@ impl Watcher {
         if self.ticks.is_multiple_of(FINGERPRINT_EVERY_TICKS) {
             self.fingerprints(tick, store, &mut alerts);
         }
-        if self.ticks.is_multiple_of(GATEWAY_EVERY_TICKS) {
-            gateway(store, &mut alerts);
+        if let Some(network) = network {
+            gateway(&network, store, &mut alerts);
         }
         self.ticks = self.ticks.wrapping_add(1);
         alerts
@@ -191,11 +208,7 @@ fn registrable(host: &str) -> Option<String> {
     Some(labels[labels.len().saturating_sub(keep)..].join("."))
 }
 
-#[cfg(has_platform)]
-fn gateway(store: &Store, alerts: &mut Vec<AlertKind>) {
-    let Some(network) = crate::platform::current_network() else {
-        return;
-    };
+fn gateway(network: &NetworkIdentity, store: &Store, alerts: &mut Vec<AlertKind>) {
     let Some(mac) = network.key.strip_prefix("mac:") else {
         return;
     };
@@ -210,9 +223,6 @@ fn gateway(store: &Store, alerts: &mut Vec<AlertKind>) {
         });
     }
 }
-
-#[cfg(not(has_platform))]
-fn gateway(_store: &Store, _alerts: &mut Vec<AlertKind>) {}
 
 #[cfg(test)]
 mod tests {
@@ -246,11 +256,11 @@ mod tests {
         let minute = 60_000;
         let mut raised = Vec::new();
         for n in 1..=12 {
-            raised.extend(watcher.observe(&tick(n * minute, 1024 * 1024), &[], &store));
+            raised.extend(watcher.observe(&tick(n * minute, 1024 * 1024), &[], None, &store));
         }
         assert!(raised.is_empty(), "steady traffic is not a spike");
-        raised.extend(watcher.observe(&tick(13 * minute, 600 * 1024 * 1024), &[], &store));
-        raised.extend(watcher.observe(&tick(14 * minute, 1024 * 1024), &[], &store));
+        raised.extend(watcher.observe(&tick(13 * minute, 600 * 1024 * 1024), &[], None, &store));
+        raised.extend(watcher.observe(&tick(14 * minute, 1024 * 1024), &[], None, &store));
         let spikes: Vec<_> = raised
             .iter()
             .filter(|kind| matches!(kind, AlertKind::Watch { reason: WatchReason::TrafficSpike, .. }))
@@ -266,9 +276,9 @@ mod tests {
         let row = |host: &str| HostUsage { app: app.clone(), host: host.into(), bytes: ByteCounts { sent: 1, recv: 1 } };
         let mut watcher = Watcher::default();
         let later = NEW_HOST_LEARNING_MS + 1;
-        let first = watcher.observe(&tick(later, 0), &[row("api.example.com"), row("203.0.113.9")], &store);
+        let first = watcher.observe(&tick(later, 0), &[row("api.example.com"), row("203.0.113.9")], None, &store);
         assert_eq!(first.len(), 1);
-        let again = watcher.observe(&tick(later + 1000, 0), &[row("cdn.example.com")], &store);
+        let again = watcher.observe(&tick(later + 1000, 0), &[row("cdn.example.com")], None, &store);
         assert!(again.is_empty(), "same registrable domain");
 
         let young = AppId::from_path("c:/apps/new.exe");
@@ -276,6 +286,7 @@ mod tests {
         let quiet = watcher.observe(
             &tick(later + 2000, 0),
             &[HostUsage { app: young, host: "other.example.org".into(), bytes: ByteCounts::default() }],
+            None,
             &store,
         );
         assert!(quiet.is_empty(), "still learning");

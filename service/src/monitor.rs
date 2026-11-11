@@ -555,13 +555,14 @@ fn sample_forever(
         // history and alerting
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
         let any_online = tick.apps.iter().any(|app| app.online);
+        let network = baseline_done.then(|| watcher.probe_network()).flatten();
         {
             let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
             let alerting = baseline_done;
             let fresh_apps = store.record_tick(&tick);
             let host_usage = tracker.take_host_usage();
             if baseline_done {
-                for kind in watcher.observe(&tick, &host_usage, &store) {
+                for kind in watcher.observe(&tick, &host_usage, network, &store) {
                     let alert = store.insert_alert(&kind, tick.at_ms);
                     engine.publish(ServerMessage::Alert(alert));
                 }

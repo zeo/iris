@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+## [0.2.1] - 2026-11-12
+
+### Fixed
+- The Linux online and offline setups and the Linux shared installer package build again. 0.2.0 shipped without them because the packer rejected an ELF installer.
+
 ## [0.2.0] - 2026-11-11
 
 ### Added

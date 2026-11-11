@@ -243,22 +243,28 @@ pub(crate) async fn watch_rules(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<
         let network = tokio::task::spawn_blocking(crate::platform::current_network)
             .await
             .unwrap_or(None);
-        let mut rules = rules.lock().unwrap_or_else(|error| error.into_inner());
-        if let Err(error) = rules.observe_network(network) {
-            tracing::warn!("could not switch network profile: {error}");
-        }
-        rules.follow_route();
-        match rules.expire(now) {
-            Ok(0) => {}
-            Ok(count) => tracing::info!(count, "removed expired firewall rules"),
-            Err(error) => tracing::warn!("could not remove expired firewall rules: {error}"),
-        }
-        #[cfg(windows)]
-        match rules.retry_deferred() {
-            Ok(0) => {}
-            Ok(count) => tracing::info!(count, "restored deferred firewall rules"),
-            Err(error) => tracing::warn!("could not retry deferred firewall rules: {error}"),
-        }
+        // the rule lock can be held across a powershell round-trip by a cap
+        // change, so wait for it on a blocking thread too
+        let rules = rules.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut rules = rules.lock().unwrap_or_else(|error| error.into_inner());
+            if let Err(error) = rules.observe_network(network) {
+                tracing::warn!("could not switch network profile: {error}");
+            }
+            rules.follow_route();
+            match rules.expire(now) {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(count, "removed expired firewall rules"),
+                Err(error) => tracing::warn!("could not remove expired firewall rules: {error}"),
+            }
+            #[cfg(windows)]
+            match rules.retry_deferred() {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(count, "restored deferred firewall rules"),
+                Err(error) => tracing::warn!("could not retry deferred firewall rules: {error}"),
+            }
+        })
+        .await;
     }
 }
 

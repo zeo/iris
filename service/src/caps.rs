@@ -99,23 +99,56 @@ fn policy_name(app: &AppId) -> String {
 mod platform {
     use super::policy_name;
     use iris_core::{AppId, RateCap};
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     #[derive(Default)]
     pub struct Backend {}
+
+    /// a qos cmdlet normally answers in a second or two; past this the wmi
+    /// provider is wedged while the caller holds the rule lock waiting on it
+    const RUN_TIMEOUT: Duration = Duration::from_secs(20);
 
     /// run a powershell snippet whose inputs arrive as environment variables,
     /// so a path never needs quoting into the script text
     fn run(script: &str, env: &[(&str, String)]) -> anyhow::Result<()> {
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         let shell = format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe");
-        let output = std::process::Command::new(shell)
+        let mut child = Command::new(shell)
             .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
             .envs(env.iter().map(|(key, value)| (*key, value.as_str())))
-            .output()?;
-        if output.status.success() {
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        // drain stderr beside the wait so a chatty failure cannot fill the pipe
+        // and stall the child
+        let mut stderr = child.stderr.take();
+        let errors = std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(stderr) = stderr.as_mut() {
+                let _ = stderr.read_to_string(&mut text);
+            }
+            text
+        });
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if started.elapsed() > RUN_TIMEOUT {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("powershell did not finish within {}s", RUN_TIMEOUT.as_secs());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let errors = errors.join().unwrap_or_default();
+        if status.success() {
             Ok(())
         } else {
-            anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim())
+            anyhow::bail!("{}", errors.trim())
         }
     }
 
@@ -158,6 +191,15 @@ mod platform {
         pub fn follow_route(&mut self) -> anyhow::Result<()> {
             Ok(())
         }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn run_reports_success_and_the_failure_text() {
+        run("exit 0", &[]).unwrap();
+        let error = run("[Console]::Error.Write($env:IRIS_MSG); exit 3", &[("IRIS_MSG", "qos said no".into())])
+            .unwrap_err();
+        assert_eq!(error.to_string(), "qos said no");
     }
 }
 

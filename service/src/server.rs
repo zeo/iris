@@ -230,12 +230,7 @@ async fn handle(
                         reply(&mut send, req, Reply::Pong).await?;
                     }
                     ClientMessage::ListRules { req } => {
-                        let rules = rules.clone();
-                        let list = tokio::task::spawn_blocking(move || {
-                            rules.lock().unwrap_or_else(|e| e.into_inner()).list()
-                        })
-                        .await
-                        .unwrap_or_default();
+                        let list = read_rules(&rules, RuleStore::list).await.unwrap_or_default();
                         reply(&mut send, req, Reply::Rules(list)).await?;
                     }
                     ClientMessage::ListApps { req } => {
@@ -344,8 +339,10 @@ async fn handle(
                         reply(&mut send, req, Reply::RuleGrant(peer.may_manage_rules())).await?;
                     }
                     ClientMessage::GetFirewallMode { req } => {
-                        let mode = rules.lock().unwrap_or_else(|error| error.into_inner()).mode();
-                        reply(&mut send, req, Reply::FirewallMode(mode)).await?;
+                        let result = read_rules(&rules, RuleStore::mode)
+                            .await
+                            .map_or_else(rules_unavailable, Reply::FirewallMode);
+                        reply(&mut send, req, result).await?;
                     }
                     ClientMessage::SetFirewallMode { req, mode } => {
                         let result = if peer.may_manage_rules() {
@@ -356,8 +353,10 @@ async fn handle(
                         reply(&mut send, req, result).await?;
                     }
                     ClientMessage::ListCaps { req } => {
-                        let caps = rules.lock().unwrap_or_else(|error| error.into_inner()).caps();
-                        reply(&mut send, req, Reply::Caps(caps)).await?;
+                        let result = read_rules(&rules, RuleStore::caps)
+                            .await
+                            .map_or_else(rules_unavailable, Reply::Caps);
+                        reply(&mut send, req, result).await?;
                     }
                     ClientMessage::SetCap { req, app, up_bytes_per_sec } => {
                         let result = if peer.may_manage_rules() {
@@ -368,11 +367,10 @@ async fn handle(
                         reply(&mut send, req, result).await?;
                     }
                     ClientMessage::GetProfiles { req } => {
-                        let state = rules
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .profile_state();
-                        reply(&mut send, req, Reply::Profiles(state)).await?;
+                        let result = read_rules(&rules, RuleStore::profile_state)
+                            .await
+                            .map_or_else(rules_unavailable, Reply::Profiles);
+                        reply(&mut send, req, result).await?;
                     }
                     ClientMessage::SetProfiles { req, profiles, manual } => {
                         let result = if peer.may_manage_rules() {
@@ -976,6 +974,19 @@ async fn set_profiles(
     })
     .await
     .unwrap_or_else(|_| Reply::Error("the profile change failed".into()))
+}
+
+/// read the rule store off the reactor: a cap or mode change can hold its
+/// lock for a powershell round-trip, which must not stall an async worker
+async fn read_rules<T: Send + 'static>(rules: &Arc<Mutex<RuleStore>>, read: fn(&RuleStore) -> T) -> Option<T> {
+    let rules = rules.clone();
+    tokio::task::spawn_blocking(move || read(&rules.lock().unwrap_or_else(|error| error.into_inner())))
+        .await
+        .ok()
+}
+
+fn rules_unavailable() -> Reply {
+    Reply::Error("rule store unavailable".into())
 }
 
 async fn reply(send: &mut transport::SendHalf, req: u64, result: Reply) -> io::Result<()> {

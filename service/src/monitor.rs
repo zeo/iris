@@ -14,6 +14,7 @@ use iris_store::Store;
 use std::collections::HashSet;
 use std::io;
 use std::net::IpAddr;
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -401,6 +402,14 @@ pub fn spawn(
         }
     }
 
+    let enrich = match start_enrich_worker(enrich, store.clone(), engine.clone()) {
+        Ok(queue) => queue,
+        Err(error) => {
+            tracing::error!("cannot start the enrich worker: {error}");
+            std::sync::mpsc::sync_channel(0).0
+        }
+    };
+
     // the sample loop runs on a dedicated thread, not the async reactor: every
     // tick takes the store lock for its SQLite write, so a stalled reactor or
     // one slow write must never delay samples for every connected UI. the
@@ -428,6 +437,66 @@ pub fn spawn(
     }
 }
 
+/// resolve and push enrichment off the tick path so a slow enricher never
+/// delays the next sample. this is a plain thread, not an async worker: a
+/// built-in enricher may touch disk (the watchlist file) and an out-of-process
+/// plugin proxy blocks on a pipe round-trip. one long-lived worker drains a
+/// bounded queue, so a stalled plugin backs the queue up instead of piling up
+/// a thread per tick
+fn start_enrich_worker(
+    enrich: Arc<EnrichmentRegistry>,
+    store: Arc<Mutex<Store>>,
+    engine: Engine,
+) -> io::Result<SyncSender<Vec<EnrichTarget>>> {
+    let (queue, targets) = std::sync::mpsc::sync_channel(64);
+    let targets: Arc<Mutex<Receiver<Vec<EnrichTarget>>>> = Arc::new(Mutex::new(targets));
+    respawn("iris-enrich", move || {
+        let targets = targets.clone();
+        let enrich = enrich.clone();
+        let store = store.clone();
+        let engine = engine.clone();
+        move || {
+            let targets = targets.lock().unwrap_or_else(|error| error.into_inner());
+            for target in targets.iter().flatten() {
+                enrich_one(&enrich, &store, &engine, target);
+            }
+        }
+    })?;
+    Ok(queue)
+}
+
+fn enrich_one(
+    enrich: &EnrichmentRegistry,
+    store: &Mutex<Store>,
+    engine: &Engine,
+    target: EnrichTarget,
+) {
+    let annotations = enrich.resolve(&target);
+    if annotations.is_empty() {
+        return;
+    }
+    // a danger-severity annotation is alert-worthy: the first sighting persists
+    // and toasts, not just a drawer badge
+    for a in annotations
+        .iter()
+        .filter(|a| a.severity == Severity::Danger)
+    {
+        let kind = AlertKind::Plugin {
+            source: a.label.clone(),
+            message: format!("{} flagged {}", a.label, target_name(&target)),
+        };
+        let alert = store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert_alert(&kind, now_ms());
+        engine.publish(ServerMessage::Alert(alert));
+    }
+    engine.publish(ServerMessage::Enrichment {
+        target,
+        annotations,
+    });
+}
+
 /// run the per-second sampler until it unwinds. [`respawn`] restarts this
 /// whole function after a panic so one bad tick never ends
 /// monitoring.
@@ -436,7 +505,7 @@ fn sample_forever(
     engine: Engine,
     _rules: Arc<Mutex<RuleStore>>,
     store: Arc<Mutex<Store>>,
-    enrich: Arc<EnrichmentRegistry>,
+    enrich: SyncSender<Vec<EnrichTarget>>,
     #[cfg(has_platform)] agg: Arc<Mutex<Aggregator>>,
     #[cfg(has_platform)] dns: crate::platform::DnsMap,
 
@@ -559,46 +628,16 @@ fn sample_forever(
 
         engine.publish(ServerMessage::Tick(tick));
 
-        // resolve and push enrichment off the tick path so a slow enricher
-        // never delays the next sample. this runs on a blocking thread: a
-        // built-in enricher may touch disk (the watchlist file) and an
-        // out-of-process plugin proxy blocks on a pipe round-trip, neither of
-        // which may run on an async worker.
+        // a full queue means the enrichers are behind; forget these so a
+        // later tick offers them again instead of losing them for the session
         if !new_targets.is_empty() {
-            let engine = engine.clone();
-            let enrich = enrich.clone();
-            let store = store.clone();
-            std::thread::Builder::new()
-                .name("iris-enrich".to_string())
-                .spawn(move || {
-                    for target in new_targets {
-                        let annotations = enrich.resolve(&target);
-                        if annotations.is_empty() {
-                            continue;
-                        }
-                        // a danger-severity annotation is alert-worthy: the first
-                        // sighting persists and toasts, not just a drawer badge
-                        for a in annotations
-                            .iter()
-                            .filter(|a| a.severity == Severity::Danger)
-                        {
-                            let kind = AlertKind::Plugin {
-                                source: a.label.clone(),
-                                message: format!("{} flagged {}", a.label, target_name(&target)),
-                            };
-                            let alert = store
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert_alert(&kind, now_ms());
-                            engine.publish(ServerMessage::Alert(alert));
-                        }
-                        engine.publish(ServerMessage::Enrichment {
-                            target,
-                            annotations,
-                        });
+            if let Err(TrySendError::Full(skipped)) = enrich.try_send(new_targets) {
+                for target in skipped {
+                    if let EnrichTarget::Endpoint(ip) = target {
+                        enriched_seen.remove(&ip);
                     }
-                })
-                .ok();
+                }
+            }
         }
 
         ticks += 1;

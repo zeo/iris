@@ -22,7 +22,7 @@ export default defineConfig({
   },
   build: {
     target: "esnext",
-    minify: "esbuild",
+    minify: "oxc",
     sourcemap: false,
     outDir: "dist",
   },

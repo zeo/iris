@@ -20,6 +20,8 @@ const SPIKE_COOLDOWN_MS: u64 = 3_600_000;
 /// that it is still showing what it normally talks to
 const NEW_HOST_LEARNING_MS: u64 = 7 * 86_400_000;
 const NEW_HOST_PER_APP_PER_DAY: u32 = 3;
+/// known domains held in memory across all apps before the cache is dropped
+const KNOWN_DOMAINS_CAP: usize = 20_000;
 
 const FINGERPRINT_EVERY_TICKS: u64 = 60;
 const DECISIONS_EVERY_TICKS: u64 = 300;
@@ -65,6 +67,7 @@ impl Watcher {
         let mut alerts = Vec::new();
         if self.ticks.is_multiple_of(DECISIONS_EVERY_TICKS) {
             self.decided = store.trusted_apps().into_iter().collect();
+            self.trim(tick.at_ms);
         }
         self.spikes(tick, &mut alerts);
         self.new_hosts(tick.at_ms, hosts, store, &mut alerts);
@@ -76,6 +79,16 @@ impl Watcher {
         }
         self.ticks = self.ticks.wrapping_add(1);
         alerts
+    }
+
+    /// keep a months-long session flat: the domain sets are a cache of the
+    /// store and reload per app on demand, and past days' budgets are spent
+    fn trim(&mut self, now: u64) {
+        if self.domains.values().map(HashSet::len).sum::<usize>() > KNOWN_DOMAINS_CAP {
+            self.domains.clear();
+        }
+        let today = now / 86_400_000;
+        self.new_host_budget.retain(|_, (day, _)| *day == today);
     }
 
     fn spikes(&mut self, tick: &StatsTick, alerts: &mut Vec<AlertKind>) {
@@ -290,6 +303,18 @@ mod tests {
             &store,
         );
         assert!(quiet.is_empty(), "still learning");
+    }
+
+    #[test]
+    fn trim_drops_an_oversized_domain_cache_and_past_budgets() {
+        let mut watcher = Watcher::default();
+        let today = 20 * 86_400_000;
+        watcher.domains.insert("a".into(), (0..KNOWN_DOMAINS_CAP + 1).map(|n| format!("d{n}.com")).collect());
+        watcher.new_host_budget.insert("old".into(), (19, 3));
+        watcher.new_host_budget.insert("now".into(), (20, 1));
+        watcher.trim(today);
+        assert!(watcher.domains.is_empty());
+        assert_eq!(watcher.new_host_budget.keys().collect::<Vec<_>>(), ["now"]);
     }
 
     #[test]

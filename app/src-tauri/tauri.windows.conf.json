@@ -11,7 +11,10 @@
       }
     },
     "resources": {
-      "../../target/release/iris-engine.exe": "engine/iris-engine.exe"
+      "../../target/release/iris-engine.exe": "engine/iris-engine.exe",
+      "../../vendor/windivert/WinDivert.dll": "engine/WinDivert.dll",
+      "../../vendor/windivert/WinDivert64.sys": "engine/WinDivert64.sys",
+      "../../vendor/windivert/LICENSE": "engine/WinDivert-LICENSE.txt"
     }
   }
 }

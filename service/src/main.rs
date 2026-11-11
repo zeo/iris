@@ -92,20 +92,45 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// share one append handle across the subscriber's writer calls
-struct LogFile(std::sync::Arc<std::fs::File>);
+/// how large the engine log may grow before it rolls to engine.log.1
+const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 
-impl std::io::Write for LogFile {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        std::io::Write::write(&mut &*self.0, buf)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        std::io::Write::flush(&mut &*self.0)
+/// an append-only log that rolls to `.1` once it passes the size limit, so a
+/// service running for weeks never eats the disk
+struct RollingLog {
+    path: std::path::PathBuf,
+    file: std::fs::File,
+    len: u64,
+}
+
+impl RollingLog {
+    fn open(path: std::path::PathBuf) -> std::io::Result<RollingLog> {
+        // a locked .1 only means this file keeps growing until the next roll
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_ROTATE_BYTES) {
+            let _ = std::fs::rename(&path, path.with_extension("log.1"));
+        }
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let len = file.metadata()?.len();
+        Ok(RollingLog { path, file, len })
     }
 }
 
-/// how large the engine log may grow before it rolls to engine.log.1
-const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+impl std::io::Write for RollingLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.len > LOG_ROTATE_BYTES {
+            // keep writing to the old file if the roll fails rather than lose lines
+            if let Ok(rolled) = RollingLog::open(self.path.clone()) {
+                *self = rolled;
+            }
+        }
+        let written = self.file.write(buf)?;
+        self.len += written as u64;
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
 
 fn init_logging(to_file: bool) {
     let filter =
@@ -113,24 +138,11 @@ fn init_logging(to_file: bool) {
     if to_file {
         let dir = paths::log_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("engine.log");
-        // roll a grown log at startup so it never eats the disk
-        if std::fs::metadata(&path)
-            .map(|m| m.len() > LOG_ROTATE_BYTES)
-            .unwrap_or(false)
-        {
-            let _ = std::fs::rename(&path, dir.join("engine.log.1"));
-        }
-        if let Ok(file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let file = std::sync::Arc::new(file);
+        if let Ok(log) = RollingLog::open(dir.join("engine.log")) {
             tracing_subscriber::fmt()
                 .with_env_filter(filter())
                 .with_ansi(false)
-                .with_writer(move || LogFile(file.clone()))
+                .with_writer(std::sync::Mutex::new(log))
                 .init();
             return;
         }
@@ -274,4 +286,27 @@ pub(crate) async fn watch_rules(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<
 #[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) async fn watch_rules(_rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<()> {
     std::future::pending().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RollingLog, LOG_ROTATE_BYTES};
+    use std::io::Write;
+
+    #[test]
+    fn the_log_rolls_once_it_passes_the_limit() {
+        let dir = std::env::temp_dir().join(format!("iris-log-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("engine.log");
+        let mut log = RollingLog::open(path.clone()).unwrap();
+        let chunk = vec![b'x'; 1024 * 1024];
+        while log.len <= LOG_ROTATE_BYTES {
+            log.write_all(&chunk).unwrap();
+        }
+        log.write_all(b"after the roll\n").unwrap();
+        assert!(std::fs::metadata(path.with_extension("log.1")).unwrap().len() > LOG_ROTATE_BYTES);
+        assert_eq!(std::fs::read(&path).unwrap(), b"after the roll\n");
+        drop(log);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

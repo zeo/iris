@@ -120,7 +120,7 @@ Requires a recent Rust toolchain, Node, and pnpm.
 cd app
 pnpm install
 pnpm tauri dev      # run the UI against a dev build
-pnpm tauri build    # produce an installer
+pnpm tauri build    # release build; on Linux also .deb, .rpm, and AppImage
 ```
 
 ## Contributing

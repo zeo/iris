@@ -25,7 +25,7 @@ tooling); see the Tauri prerequisites for your distribution.
 cd app
 pnpm install
 pnpm tauri dev      # run the UI against a dev build
-pnpm tauri build    # produce an installer
+pnpm tauri build    # release build; on Linux also .deb, .rpm, and AppImage
 ```
 
 ## Checks to run before a PR

@@ -1,9 +1,9 @@
 name: release
 
-# build and attach the installers when a version tag is pushed. Windows gets
-# nsis setup.exe and wix MSI; Linux gets .deb, .rpm, and AppImage. both jobs target the same tag,
-# so tauri-action creates the release once and the second job attaches to it.
-# the jobs run in order so their updater metadata is merged without a race.
+# build and attach the installers when a version tag is pushed. both platforms
+# ship a shared installer package with online and offline setups; Linux also
+# gets .deb, .rpm, and AppImage. the Windows job creates the release and the
+# Linux job runs after it so it can extend that job's installer.json
 on:
   push:
     tags: ['v*']
@@ -52,52 +52,16 @@ jobs:
       - name: install frontend deps
         working-directory: app
         run: pnpm install --frozen-lockfile
-      - name: build bridge installer
+      - name: build shared installer tools
         shell: powershell
         env:
           TERMIE_INSTALLER_PUBLIC_KEY: ${{ vars.TERMIE_INSTALLER_PUBLIC_KEY }}
-          CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CERTIFICATE_THUMBPRINT }}
-          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
-          WINDOWS_PFX: ${{ secrets.WINDOWS_PFX }}
-          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
         run: |
-          # hosted runners have no machine certificate; import ours before signing
-          $pfx = Join-Path $env:RUNNER_TEMP 'iris-signing.pfx'
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_PFX))
-          Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My `
-            -Password (ConvertTo-SecureString $env:WINDOWS_PFX_PASSWORD -AsPlainText -Force) | Out-Null
-          Remove-Item $pfx
           cargo build --release --locked --manifest-path .rot-installer\Cargo.toml --bin rot-installer --bin rot-pack
           if ($LASTEXITCODE -ne 0) { throw "shared installer build failed" }
-          New-Item -ItemType Directory -Force bridge | Out-Null
-          $installer = 'bridge\rot-installer.exe'
-          Copy-Item '.rot-installer\target\release\rot-installer.exe' $installer
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $signtool) { throw "signtool is unavailable" }
-          if ([string]::IsNullOrWhiteSpace($env:CERTIFICATE_THUMBPRINT)) { throw "certificate thumbprint is unavailable" }
-          $timestamp = if ($env:TIMESTAMP_URL) { $env:TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
-          & $signtool.FullName sign /sha1 $env:CERTIFICATE_THUMBPRINT /fd sha256 /tr $timestamp /td sha256 $installer
-          if ($LASTEXITCODE -ne 0) { throw "installer signing failed" }
-          cargo build --release --locked -p iris-service
-          if ($LASTEXITCODE -ne 0) { throw "engine build failed" }
-          & $signtool.FullName sign /sha1 $env:CERTIFICATE_THUMBPRINT /fd sha256 /tr $timestamp /td sha256 target\release\iris-engine.exe
-          if ($LASTEXITCODE -ne 0) { throw "engine signing failed" }
-      - name: build and release
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: app
-          tagName: ${{ github.ref_name }}
-          releaseName: 'iris ${{ github.ref_name }}'
-          releaseDraft: false
-          prerelease: false
-          uploadUpdaterJson: true
-          updaterJsonPreferNsis: true
-          args: --config src-tauri/tauri.bridge.conf.json
+      - name: build app and engine
+        working-directory: app
+        run: pnpm exec tauri build --no-bundle --ci
 
       - name: pack shared installer release
         shell: powershell
@@ -120,9 +84,13 @@ jobs:
           New-Item -ItemType Directory -Force "$stage\engine","$stage\resources\geo" | Out-Null
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
             Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool is unavailable" }
+          if ([string]::IsNullOrWhiteSpace($env:CERTIFICATE_THUMBPRINT)) { throw "certificate thumbprint is unavailable" }
           $timestamp = if ($env:TIMESTAMP_URL) { $env:TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
-          & $signtool.FullName sign /sha1 $env:CERTIFICATE_THUMBPRINT /fd sha256 /tr $timestamp /td sha256 target\release\iris.exe
-          if ($LASTEXITCODE -ne 0) { throw "signing failed for iris.exe" }
+          foreach ($file in @('target\release\iris.exe', 'target\release\iris-engine.exe')) {
+            & $signtool.FullName sign /sha1 $env:CERTIFICATE_THUMBPRINT /fd sha256 /tr $timestamp /td sha256 $file
+            if ($LASTEXITCODE -ne 0) { throw "signing failed for $file" }
+          }
           Copy-Item target\release\iris.exe $stage\
           Copy-Item target\release\iris-engine.exe "$stage\engine\"
           Copy-Item vendor\windivert\WinDivert.dll, vendor\windivert\WinDivert64.sys "$stage\engine\"
@@ -156,6 +124,7 @@ jobs:
 
       - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
+          name: iris ${{ github.ref_name }}
           files: |
             dist/iris-*.rpack
             dist/iris-*.rpack.minisig
@@ -205,15 +174,13 @@ jobs:
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: app
           tagName: ${{ github.ref_name }}
           releaseName: 'iris ${{ github.ref_name }}'
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: true
+          uploadUpdaterJson: false
 
       - name: build shared installer tools
         env:

@@ -103,6 +103,15 @@ const [enrichment, setEnrichment] = createSignal<Map<string, Annotation[]>>(new 
 // history are incomplete until the engine recovers the capture session
 const [captureDegraded, setCaptureDegraded] = createSignal(false);
 
+export type Health = { history_in_memory: boolean; outbound_blocked: string[] };
+const [health, setHealth] = createSignal<Health | null>(null);
+
+function refreshHealth() {
+  invoke<Health>("engine_health")
+    .then(setHealth)
+    .catch(() => setHealth(null));
+}
+
 let started = false;
 let tickCadenceMs = 1000;
 let lastVisibleTick = 0;
@@ -131,7 +140,9 @@ export function initEngine() {
   listen<Status>("engine-status", (e) => {
     setOnline(e.payload.online);
     setVersion(e.payload.version);
+    if (e.payload.online) refreshHealth();
     if (!e.payload.online) {
+      setHealth(null);
       setTick(null);
       setRing([]);
       setCaptureDegraded(false);
@@ -171,6 +182,7 @@ export function initEngine() {
     .then((s) => {
       setOnline(s.online);
       setVersion(s.version);
+      if (s.online) refreshHealth();
     })
     .catch(() => {});
 }
@@ -192,6 +204,7 @@ export const engine = {
   ring,
   enrichment,
   captureDegraded,
+  health,
   annotationsFor: (ip: string): Annotation[] => enrichment().get(ip) ?? [],
   down: () => tick()?.total_rate_recv ?? 0,
   up: () => tick()?.total_rate_sent ?? 0,

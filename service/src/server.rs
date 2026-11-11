@@ -3,7 +3,7 @@ use crate::plugins::registry::EnrichmentRegistry;
 use crate::plugins::PanelHub;
 use crate::rules::RuleStore;
 use iris_core::{AlertKind, Direction, Rule, RuleAction};
-use iris_ipc::message::{ClientMessage, Reply, ServerMessage, PROTOCOL_VERSION};
+use iris_ipc::message::{ClientMessage, Health, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
 use iris_store::Store;
 use std::io;
@@ -447,6 +447,19 @@ async fn handle(
                         .await
                         .unwrap_or_default();
                         reply(&mut send, req, Reply::Alerts(list)).await?;
+                    }
+                    ClientMessage::GetHealth { req } => {
+                        let store = store.clone();
+                        let health = tokio::task::spawn_blocking(move || Health {
+                            history_in_memory: store.lock().unwrap_or_else(|e| e.into_inner()).in_memory(),
+                            #[cfg(windows)]
+                            outbound_blocked: crate::platform::outbound_blocked_profiles(),
+                            #[cfg(not(windows))]
+                            outbound_blocked: Vec::new(),
+                        })
+                        .await
+                        .unwrap_or_default();
+                        reply(&mut send, req, Reply::Health(health)).await?;
                     }
                     ClientMessage::ListPromptAlerts { req } => {
                         let store = store.clone();
@@ -1017,6 +1030,7 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::GetFirewallMode { req }
         | ClientMessage::GetProfiles { req }
         | ClientMessage::ListCaps { req }
+        | ClientMessage::GetHealth { req }
         | ClientMessage::SetCap { req, .. }
         | ClientMessage::SetProfiles { req, .. }
         | ClientMessage::SetFirewallMode { req, .. }

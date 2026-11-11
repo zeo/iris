@@ -164,6 +164,11 @@ impl Store {
         Ok(store)
     }
 
+    /// true when history lives only in memory and goes with the process
+    pub fn in_memory(&self) -> bool {
+        self.conn.path().is_none_or(str::is_empty)
+    }
+
     pub fn open_in_memory() -> rusqlite::Result<Store> {
         let store = Store {
             conn: Connection::open_in_memory()?,
@@ -1110,6 +1115,17 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_store_knows_whether_it_lives_on_disk() {
+        assert!(Store::open_in_memory().unwrap().in_memory());
+        let dir = std::env::temp_dir().join(format!("iris-store-disk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("iris.db")).unwrap();
+        assert!(!store.in_memory());
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn watch_memory_reports_only_real_changes() {
         let store = super::Store::open_in_memory().expect("store");

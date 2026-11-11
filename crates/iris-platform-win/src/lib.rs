@@ -25,6 +25,8 @@ mod spawn;
 mod svc;
 #[cfg(windows)]
 mod wfp;
+#[cfg(windows)]
+mod winfw;
 
 #[cfg(windows)]
 pub use adapters::AdapterMap;
@@ -46,3 +48,5 @@ pub use spawn::{random_token, spawn_restricted, RestrictedChild};
 pub use svc::ServiceMap;
 #[cfg(windows)]
 pub use wfp::Wfp;
+#[cfg(windows)]
+pub use winfw::outbound_blocked_profiles;

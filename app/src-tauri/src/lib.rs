@@ -106,6 +106,7 @@ pub fn run() {
             ipc::get_host_usage,
             ipc::get_profiles,
             ipc::list_caps,
+            ipc::engine_health,
             rulectl::set_cap,
             rulectl::set_profiles,
             traygraph::set_tray_graph,

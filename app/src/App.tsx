@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Titlebar } from "./components/Titlebar";
 import { Icon } from "./components/Icon";
 import { createTheme } from "./lib/theme";
+import { persisted } from "./lib/persist";
 import { engine, initEngine, setTickCadence } from "./lib/engine";
 import { initAlerts, refreshAlerts, unackedCount } from "./lib/alerts";
 import { initQuota } from "./lib/quota";
@@ -109,6 +110,25 @@ export function App() {
     const t = setTimeout(() => setOfferInstall(true), delay);
     onCleanup(() => clearTimeout(t));
   });
+  // a dismissed notice stays hidden until what it reports changes
+  const [dismissedNotice, setDismissedNotice] = persisted<string | null>("iris.healthNotice", null);
+  const healthNotice = () => {
+    const health = engine.health();
+    if (!health) return null;
+    const notices: string[] = [];
+    if (health.history_in_memory) {
+      notices.push(
+        "The history database could not open, so usage and alerts recorded now are lost when the engine restarts. The engine log has the cause.",
+      );
+    }
+    if (health.outbound_blocked.length > 0) {
+      notices.push(
+        `Windows Firewall blocks outbound connections by default on the ${health.outbound_blocked.join(", ")} ${health.outbound_blocked.length > 1 ? "profiles" : "profile"}, which overrides apps Iris allows. To hand outbound control to Iris, run Set-NetFirewallProfile -All -DefaultOutboundAction Allow in an elevated PowerShell.`,
+      );
+    }
+    const notice = notices.join(" ");
+    return notice && notice !== dismissedNotice() ? notice : null;
+  };
   const installService = async () => {
     setInstalling(true);
     setInstallError(undefined);
@@ -180,6 +200,19 @@ export function App() {
             current.
           </span>
         </div>
+      </Show>
+
+      <Show when={engine.online() && !engine.captureDegraded() && !offerInstall() && healthNotice()}>
+        {(notice) => (
+          <div class="install-banner degraded" role="status">
+            <Icon name="shield" />
+            <span>{notice()}</span>
+            <span class="grow" />
+            <button class="btn" onClick={() => setDismissedNotice(notice())}>
+              Dismiss
+            </button>
+          </div>
+        )}
       </Show>
 
       <main class="content">

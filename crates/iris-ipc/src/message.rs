@@ -19,7 +19,18 @@ use serde::{Deserialize, Serialize};
 /// v11 adds per-host usage history.
 /// v12 adds network profiles.
 /// v13 adds per-app upload caps.
-pub const PROTOCOL_VERSION: u32 = 13;
+/// v14 adds the engine health query.
+pub const PROTOCOL_VERSION: u32 = 14;
+
+/// conditions that quietly undermine the engine, for the UI to surface
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Health {
+    /// the history database could not open, so nothing recorded survives a restart
+    pub history_in_memory: bool,
+    /// windows firewall profiles that block outbound by default, which
+    /// overrides iris's allows
+    pub outbound_blocked: Vec<String>,
+}
 
 /// what the UI shows for one installed plugin: its declared identity and
 /// capabilities, plus whether the user has consented and enabled it
@@ -90,6 +101,9 @@ pub enum ClientMessage {
         req: u64,
     },
     ListCaps {
+        req: u64,
+    },
+    GetHealth {
         req: u64,
     },
     /// cap an app's upload, or lift the cap with none. privileged
@@ -269,6 +283,7 @@ pub enum Reply {
     FirewallMode(FirewallMode),
     Profiles(ProfileState),
     Caps(Vec<RateCap>),
+    Health(Health),
     /// per-host totals, biggest first
     HostUsage(Vec<HostUsage>),
 }

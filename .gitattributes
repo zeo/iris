@@ -3,3 +3,5 @@
 *.ico binary
 *.woff binary
 *.woff2 binary
+*.dll binary
+*.sys binary

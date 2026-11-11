@@ -8,6 +8,8 @@ mod adapters;
 #[cfg(windows)]
 mod conn;
 #[cfg(windows)]
+pub mod divert;
+#[cfg(windows)]
 mod dns;
 #[cfg(windows)]
 mod egress;

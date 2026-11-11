@@ -106,9 +106,40 @@ fn publish_pending(
     }
 
     for alert in to_publish {
-        tracing::info!(alert_id = alert.id, "published pending connection alert");
+        tracing::debug!(alert_id = alert.id, "published pending connection alert");
         engine.publish(ServerMessage::Alert(alert));
     }
+}
+
+/// run the thread `make` builds under `name`, building and starting a fresh one
+/// a second after each panic, until a run returns normally. the supervisor has
+/// its own thread so the caller never waits on the work
+fn respawn<M, F>(name: &str, mut make: M) -> io::Result<()>
+where
+    M: FnMut() -> F + Send + 'static,
+    F: FnOnce() + Send + 'static,
+{
+    let name = name.to_string();
+    std::thread::Builder::new()
+        .name(format!("{name}-supervisor"))
+        .spawn(move || loop {
+            let outcome = std::thread::Builder::new()
+                .name(name.clone())
+                .spawn(make())
+                .and_then(|handle| {
+                    handle
+                        .join()
+                        .map_err(|_| io::Error::other("thread panicked"))
+                });
+            match outcome {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::error!("{name} ended ({error}); restarting in 1s");
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        })
+        .map(drop)
 }
 
 #[cfg(has_platform)]
@@ -116,17 +147,22 @@ fn start_pending_publisher(
     pending: std::sync::mpsc::Receiver<crate::platform::PendingConnection>,
     store: Arc<Mutex<Store>>,
     engine: Engine,
-) {
-    std::thread::Builder::new()
-        .name("iris-pending-publisher".to_string())
-        .spawn(move || {
+) -> io::Result<()> {
+    // shared so a respawned publisher keeps draining the same channel
+    let pending = Arc::new(Mutex::new(pending));
+    respawn("iris-pending-publisher", move || {
+        let pending = pending.clone();
+        let store = store.clone();
+        let engine = engine.clone();
+        move || {
+            let pending = pending.lock().unwrap_or_else(|error| error.into_inner());
             let mut last_notified = HashMap::new();
-            for connection in pending {
-                tracing::info!(app = connection.app.as_str(), "received pending connection");
+            for connection in pending.iter() {
+                tracing::debug!(app = connection.app.as_str(), "received pending connection");
                 publish_pending(vec![connection], &store, &engine, &mut last_notified);
             }
-        })
-        .unwrap_or_else(|error| panic!("cannot start pending publisher: {error}"));
+        }
+    })
 }
 
 #[cfg(all(test, has_platform))]
@@ -177,7 +213,7 @@ mod tests {
         let mut events = engine.subscribe();
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let (send, pending) = std::sync::mpsc::channel();
-        start_pending_publisher(pending, store, engine);
+        start_pending_publisher(pending, store, engine).unwrap();
         send.send(crate::platform::PendingConnection {
             app: AppId::from_path("/usr/bin/receiver-example"),
             remote: Endpoint {
@@ -278,9 +314,30 @@ mod tests {
         assert_eq!(alert1.id, alert2.id);
         assert_eq!(store.lock().unwrap().list_prompt_alerts().len(), 1);
     }
+    #[test]
+    fn respawn_returns_at_once_and_restarts_after_a_panic() {
+        let (runs, ran) = std::sync::mpsc::channel();
+        let mut attempt = 0;
+        let started = std::time::Instant::now();
+        respawn("iris-respawn-test", move || {
+            attempt += 1;
+            let runs = runs.clone();
+            let this = attempt;
+            move || {
+                runs.send(this).unwrap();
+                assert!(this > 1, "first run panics");
+            }
+        })
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let wait = Duration::from_secs(5);
+        assert_eq!(ran.recv_timeout(wait).unwrap(), 1);
+        assert_eq!(ran.recv_timeout(wait).unwrap(), 2);
+        assert!(ran.recv_timeout(Duration::from_millis(1500)).is_err());
+    }
 }
 
-/// start monitoring and the flush loop.
+/// start monitoring and the flush loop on their own threads and return.
 pub fn spawn(
     engine: Engine,
     rules: Arc<Mutex<RuleStore>>,
@@ -314,7 +371,9 @@ pub fn spawn(
         .unwrap_or_else(|error| error.into_inner())
         .take_pending_receiver()
     {
-        start_pending_publisher(pending, store.clone(), engine.clone());
+        if let Err(error) = start_pending_publisher(pending, store.clone(), engine.clone()) {
+            tracing::error!("cannot start the pending publisher: {error}");
+        }
     }
 
     // the sample loop runs on a dedicated thread, not the async reactor: every
@@ -323,43 +382,29 @@ pub fn spawn(
     // loop's only engine work is a broadcast send that never blocks.
     // a panic inside a tick must not end monitoring for the life of the process,
     // and the SCM only restarts the engine when the service reports failure, so
-    // the sampling thread is respawned here instead of dying with the panic
-    loop {
-        let spawned = {
-            let engine = engine.clone();
-            let rules = rules.clone();
-            let store = store.clone();
-            let enrich = enrich.clone();
-            let agg = agg.clone();
-            #[cfg(has_platform)]
-            let dns = dns.clone();
-            #[cfg(has_platform)]
-            let byte_monitor = first_monitor.take().unwrap_or_else(|| {
-                tracing::warn!("respawned sample loop will retry byte capture");
-                None
-            });
-            std::thread::Builder::new()
-                .name("iris-sample-loop".to_string())
-                .spawn(move || sample_forever(engine, rules, store, enrich, agg, dns, byte_monitor))
-                .map_err(io::Error::other)
-        };
-        let outcome = spawned.and_then(|handle| {
-            handle
-                .join()
-                .map_err(|_| std::io::Error::other("sample thread panicked"))
+    // the sampling thread is respawned instead of dying with the panic
+    let started = respawn("iris-sample-loop", move || {
+        let engine = engine.clone();
+        let rules = rules.clone();
+        let store = store.clone();
+        let enrich = enrich.clone();
+        let agg = agg.clone();
+        #[cfg(has_platform)]
+        let dns = dns.clone();
+        #[cfg(has_platform)]
+        let byte_monitor = first_monitor.take().unwrap_or_else(|| {
+            tracing::warn!("respawned sample loop will retry byte capture");
+            None
         });
-        match outcome {
-            Ok(()) => break,
-            Err(error) => {
-                tracing::error!("sample thread ended ({error}); restarting in 1s");
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        }
+        move || sample_forever(engine, rules, store, enrich, agg, dns, byte_monitor)
+    });
+    if let Err(error) = started {
+        tracing::error!("cannot start the sample loop: {error}");
     }
 }
 
-/// run the per-second sampler until it unwinds. the spawner in [`spawn`]
-/// restarts this whole function after a panic so one bad tick never ends
+/// run the per-second sampler until it unwinds. [`respawn`] restarts this
+/// whole function after a panic so one bad tick never ends
 /// monitoring.
 #[cfg_attr(not(has_platform), allow(unused_variables))]
 fn sample_forever(

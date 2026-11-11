@@ -24,6 +24,7 @@
     "process:default",
     "process:allow-restart",
     "allow-engine-status",
+    "allow-engine-health",
     "allow-set-tick-details",
     "allow-list-rules",
     "allow-list-apps",

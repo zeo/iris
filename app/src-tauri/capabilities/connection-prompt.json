@@ -6,7 +6,9 @@
   "permissions": [
     "core:default",
     "core:window:allow-close",
-    "allow-list-prompt-alerts",
+    "allow-prompt-cards",
+    "allow-set-prompt-aside",
+    "allow-dismiss-info-card",
     "allow-resize-connection-prompts",
     "allow-set-prompt-hit-region",
     "allow-report-display-scale",

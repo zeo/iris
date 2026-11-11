@@ -6,6 +6,42 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+## [0.2.0] - 2026-11-11
+
+### Added
+- Download speed limits per app on Windows, enforced through the bundled WinDivert 2.2.2 driver. The driver loads only while at least one download limit exists and unloads with the last one.
+- Download limits pause while Easy Anti-Cheat, BattlEye, FACEIT, or Vanguard is running, and a card says so; they come back when the game exits. Upload limits stay on.
+- Upload speed limits per app: Windows QoS policies on Windows, flow marks and an htb class on Linux.
+- Data quotas per app, per day, week, or month. An app that spends its quota is blocked until the period resets, with a card. The monthly data plan alert moved into the engine, so it fires with the main window closed.
+- Rules scoped to a remote host, port, or network, and rules that expire after a set time.
+- A firewall mode switch (Ask, Notify, Lockdown) in Settings and the tray, and per-network-profile rules and modes.
+- Traffic recorded per remote host, and a live throughput graph in the tray icon.
+- Watcher alerts for a changed app binary, a traffic spike, a first-seen domain, and a changed gateway.
+- Activity shows each connection's own download and upload rate, and edits an app's download limit, upload limit, and data quota in place.
+- A warning when history is kept in memory only, and when Windows Firewall blocks outbound connections by default on any profile, which would override iris's allows.
+- `iris-engine --clear-firewall` removes every iris filter and speed limit while keeping saved rules.
+
+### Changed
+- Connection cards live in a window that exists only while a card is showing, at the bottom-right of the primary monitor. With no card up, nothing of iris sits over the desktop or a game.
+- Decision cards stay until answered. Info alerts show as cards in the same stack instead of Windows notifications.
+- The main window is built when opened from the tray and destroyed on close, so an idle tray costs one webview less.
+- Ask and Lockdown denials survive reboots and engine crashes; uninstall removes every iris filter, QoS policy, and the WinDivert driver.
+- The engine log rolls over at 10 MB while the service runs.
+- The wire protocol is now version 17. The setup updates the app and engine together.
+
+### Fixed
+- The Windows service answers the UI again: the sample loop supervisor no longer blocks startup.
+- Firewall rules stay in force after an ungraceful engine exit, and failed filter deletes are reported instead of hanging the admin channel.
+- Rule scopes, lifetimes, and profile modes are sent in a shape the engine can decode.
+- A client that falls behind the alert stream gets the pending decisions resent.
+- Ask-mode denials queue with a bound and publish in batches; enrichment runs on one worker with a bounded queue; the watcher's domain cache is bounded.
+- QoS PowerShell calls time out, and rule-lock waits no longer stall request handling.
+- The gateway probe runs before the store lock is taken.
+- Store writes fsync less under WAL, and unanswered first-seen alerts are capped at the newest 500.
+
+### Security
+- Rust dependencies updated, including rusqlite 0.41 for the bundled SQLite WAL fix; frontend moved to Vite 8 and Vitest 5; CI actions pinned to current commits and built on Node 22.
+
 ## [0.1.14] - 2026-08-23
 
 ### Fixed

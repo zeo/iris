@@ -6,28 +6,43 @@ import {
   type AlertKind,
   decisionAlreadySettled,
   fileName,
-  needsDecision,
   visibleDecisionPrompts,
 } from "../lib/alerts";
 import { AppIcon } from "./AppIcon";
 import { Icon } from "./Icon";
 
-const MAX_VISIBLE = 2;
-// an unanswered card steps aside into Alerts so it never parks over another app
-const PROMPT_TIMEOUT_MS = 30_000;
+// keep in sync with MAX_CARDS in prompt.rs
+const MAX_CARDS = 3;
+const INFO_TIMEOUT_MS = 8_000;
+
+type InfoCard = { id: number; title: string; body: string };
+type PromptCards = { decisions: Alert[]; info: InfoCard[]; error: string | null };
 
 function destination(remote: Extract<AlertKind, { kind: "new_app" }>["remote"]): string {
   return remote ? `${remote.addr}:${remote.port}` : "Network access";
 }
 
 export function ConnectionPrompt() {
-  const [alerts, setAlerts] = createSignal<Alert[]>([]);
-  const [dismissed, setDismissed] = createSignal<Set<number>>(new Set());
+  const [decisions, setDecisions] = createSignal<Alert[]>([]);
+  const [info, setInfo] = createSignal<InfoCard[]>([]);
+  const [loadError, setLoadError] = createSignal<string>();
+  // the host closes when the count reaches zero, so stay quiet until the
+  // first read lands
+  const [loaded, setLoaded] = createSignal(false);
+  // decisions answered or set aside here, hidden until the host's own list
+  // catches up
+  const [hidden, setHidden] = createSignal<Set<number>>(new Set());
   const [busy, setBusy] = createSignal<Set<number>>(new Set());
   const [error, setError] = createSignal<{ id: number; message: string }>();
   let refreshSequence = 0;
   let resizeQueue = Promise.resolve();
-  const visible = () => visibleDecisionPrompts(alerts(), dismissed(), MAX_VISIBLE);
+
+  const visibleDecisions = () =>
+    visibleDecisionPrompts(decisions(), hidden(), MAX_CARDS - (loadError() ? 1 : 0));
+  const visibleInfo = () => {
+    const room = MAX_CARDS - visibleDecisions().length - (loadError() ? 1 : 0);
+    return room > 0 ? info().slice(-room) : [];
+  };
   // each stacked prompt decides independently, so track in-flight ids as a set
   // rather than a single value that would freeze the whole stack
   const isBusy = (id: number) => busy().has(id);
@@ -35,27 +50,28 @@ export function ConnectionPrompt() {
   const refresh = async () => {
     const sequence = ++refreshSequence;
     try {
-      const next = await invoke<Alert[]>("list_prompt_alerts");
-      // the engine's pending list is authoritative: a card decided in the main
-      // window or acknowledged elsewhere has to leave this stack too
-      if (sequence === refreshSequence) setAlerts(next.filter(needsDecision));
+      const next = await invoke<PromptCards>("prompt_cards");
+      if (sequence !== refreshSequence) return;
+      setDecisions(next.decisions);
+      setHidden((current) => new Set(next.decisions.filter((alert) => current.has(alert.id)).map((alert) => alert.id)));
+      setInfo(next.info);
+      setLoadError(next.error ?? undefined);
     } catch (reason) {
-      if (sequence === refreshSequence) setError({ id: 0, message: String(reason) });
+      if (sequence === refreshSequence) setLoadError(String(reason));
     }
-    reportHitRegion();
+    setLoaded(true);
   };
 
   let stack: HTMLElement | undefined;
   // offset geometry forces layout and ignores the rise animation's transform,
-  // so the clip matches where each card settles, even while the host is hidden
+  // so the clip matches where each card settles, even before the host shows
   const reportHitRegion = () => {
-    const rects = Array.from(stack?.querySelectorAll<HTMLElement>(".connection-prompt, .prompt-error") ?? [])
-      .map((element) => ({
-        x: element.offsetLeft,
-        y: element.offsetTop,
-        width: element.offsetWidth,
-        height: element.offsetHeight,
-      }));
+    const rects = Array.from(stack?.querySelectorAll<HTMLElement>(".connection-prompt") ?? []).map((element) => ({
+      x: element.offsetLeft,
+      y: element.offsetTop,
+      width: element.offsetWidth,
+      height: element.offsetHeight,
+    }));
     void invoke("set_prompt_hit_region", { rects }).catch(() => undefined);
   };
 
@@ -66,7 +82,27 @@ export function ConnectionPrompt() {
   };
   const armTimeout = (id: number) => {
     holdTimeout(id);
-    timers.set(id, window.setTimeout(() => dismiss(id), PROMPT_TIMEOUT_MS));
+    timers.set(id, window.setTimeout(() => dismissInfo(id), INFO_TIMEOUT_MS));
+  };
+
+  const hide = (id: number) => setHidden((current) => new Set(current).add(id));
+  const unhide = (id: number) =>
+    setHidden((current) => {
+      if (!current.has(id)) return current;
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+
+  const setDecisionAside = (id: number) => {
+    hide(id);
+    void invoke("set_prompt_aside", { id }).catch(() => undefined);
+  };
+
+  const dismissInfo = (id: number) => {
+    holdTimeout(id);
+    setInfo((current) => current.filter((card) => card.id !== id));
+    void invoke("dismiss_info_card", { id }).catch(() => undefined);
   };
 
   onMount(() => {
@@ -77,29 +113,21 @@ export function ConnectionPrompt() {
     const track = (pending: Promise<() => void>) => {
       void pending.then((unlisten) => (disposed ? unlisten() : unlisteners.push(unlisten)));
     };
+    track(listen("connection-prompts-refresh", refresh));
+    // the app asking again brings a set-aside card back; a decision settled
+    // elsewhere arrives acknowledged and leaves
     track(
       listen<Alert>("engine-alert", ({ payload }) => {
-        if (needsDecision(payload)) {
-          refreshSequence += 1;
-          setDismissed((current) => {
-            if (current.has(payload.id)) {
-              const next = new Set(current);
-              next.delete(payload.id);
-              return next;
-            }
-            return current;
-          });
-          setAlerts((current) => [payload, ...current.filter((alert) => alert.id !== payload.id)]);
-        }
+        if (!payload.acknowledged) unhide(payload.id);
+        void refresh();
       }),
     );
-    track(listen("connection-prompts-refresh", refresh));
-    // Escape defers the front card (same as its dismiss X); it never decides,
+    // Escape sets the front decision aside (same as its X); it never decides,
     // so a stray key can't allow or block a connection
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      const stack = visible();
-      if (stack.length) dismiss(stack[stack.length - 1].id);
+      const shown = visibleDecisions();
+      if (shown.length) setDecisionAside(shown[shown.length - 1].id);
     };
     window.addEventListener("keydown", onKey);
     onCleanup(() => {
@@ -112,26 +140,22 @@ export function ConnectionPrompt() {
   });
 
   createEffect(() => {
-    const shown = visible();
-    const count = shown.length;
+    const shownInfo = visibleInfo();
     for (const id of timers.keys()) {
-      if (!shown.some((alert) => alert.id === id)) holdTimeout(id);
+      if (!shownInfo.some((card) => card.id === id)) holdTimeout(id);
     }
-    for (const alert of shown) if (!timers.has(alert.id)) armTimeout(alert.id);
+    for (const card of shownInfo) if (!timers.has(card.id)) armTimeout(card.id);
+  });
+
+  createEffect(() => {
+    if (!loaded()) return;
+    const count = visibleDecisions().length + visibleInfo().length + (loadError() ? 1 : 0);
+    error();
     resizeQueue = resizeQueue
       .then(() => invoke<void>("resize_connection_prompts", { count }))
       .then(reportHitRegion)
       .catch(() => undefined);
   });
-
-  createEffect(() => {
-    error();
-    reportHitRegion();
-  });
-
-  const dismiss = (id: number) => {
-    setDismissed((current) => new Set(current).add(id));
-  };
 
   const decide = async (alert: Alert, action: "allow" | "block") => {
     if (isBusy(alert.id)) return;
@@ -139,12 +163,10 @@ export function ConnectionPrompt() {
     setError(undefined);
     try {
       await invoke("decide_alert", { id: alert.id, action });
-      refreshSequence += 1;
-      setAlerts((current) => current.filter((candidate) => candidate.id !== alert.id));
+      hide(alert.id);
     } catch (reason) {
       if (decisionAlreadySettled(reason)) {
-        refreshSequence += 1;
-        setAlerts((current) => current.filter((candidate) => candidate.id !== alert.id));
+        hide(alert.id);
         void refresh();
       } else {
         setError({ id: alert.id, message: String(reason) });
@@ -160,10 +182,40 @@ export function ConnectionPrompt() {
 
   return (
     <main class="connection-prompt-stack" ref={stack}>
-      <Show when={error()?.id === 0}>
-        <div class="prompt-error">{error()?.message}</div>
+      <For each={visibleInfo()}>
+        {(card) => (
+          <section
+            class="connection-prompt info"
+            role="status"
+            onPointerEnter={() => holdTimeout(card.id)}
+            onPointerLeave={() => armTimeout(card.id)}
+          >
+            <header>
+              <span class="prompt-mark"><Icon name="shield" /></span>
+              <span><b>{card.title}</b></span>
+              <button class="iconbtn" aria-label="dismiss" onClick={() => dismissInfo(card.id)}>
+                <Icon name="x" />
+              </button>
+            </header>
+            <p class="prompt-body">{card.body}</p>
+          </section>
+        )}
+      </For>
+      <Show when={loadError()}>
+        {(message) => (
+          <section class="connection-prompt info" role="alert">
+            <header>
+              <span class="prompt-mark"><Icon name="shield" /></span>
+              <span><b>Could not load pending connections</b></span>
+              <button class="iconbtn" aria-label="dismiss" onClick={() => setLoadError(undefined)}>
+                <Icon name="x" />
+              </button>
+            </header>
+            <p class="prompt-body prompt-error">{message()}</p>
+          </section>
+        )}
       </Show>
-      <For each={visible()}>
+      <For each={visibleDecisions()}>
         {(alert) => {
           const application = alert.kind as Extract<AlertKind, { kind: "new_app" }>;
           return (
@@ -172,13 +224,11 @@ export function ConnectionPrompt() {
               role="alertdialog"
               aria-modal="true"
               aria-label={`New network connection from ${fileName(application.app)}`}
-              onPointerEnter={() => holdTimeout(alert.id)}
-              onPointerLeave={() => armTimeout(alert.id)}
             >
               <header data-tauri-drag-region>
                 <span class="prompt-mark"><Icon name="shield" /></span>
                 <span><b>New network connection</b><small>Choose how Iris should handle this application</small></span>
-                <button class="iconbtn" aria-label="dismiss" onClick={() => dismiss(alert.id)}>
+                <button class="iconbtn" aria-label="dismiss" onClick={() => setDecisionAside(alert.id)}>
                   <Icon name="x" />
                 </button>
               </header>

@@ -1,17 +1,13 @@
-//! native desktop toasts, raised from the host process. alerts used to be
-//! toasted by the main window's webview, which meant no notification when the
-//! window sat hidden in the tray (a hidden webview can be throttled or
-//! suspended) and none at all while the UI process was closed. the host is
-//! always alive as long as Iris runs, so it toasts the moment an alert arrives
+//! alerts surfaced from the host process as iris cards. the host is always
+//! alive as long as Iris runs, so it raises a card the moment an alert arrives
 //! over the pipe, and announces the backlog that accumulated while it was not
-//! running.
+//! running. decisions get their own cards from the prompt module.
 
 use iris_core::{Alert, AlertKind};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::Manager;
-use tauri_plugin_notification::NotificationExt;
 
 /// host-side notification preferences and per-session dedupe
 pub struct NotifyState {
@@ -115,7 +111,7 @@ pub fn alert_toast(app: &tauri::AppHandle, alert: &Alert) {
             format!("Blocked {}", app.file_name()),
         ),
     };
-    show(app, &title, &body);
+    crate::prompt::push_info(app, title, body);
 }
 
 /// summarize unacknowledged alerts missed during startup or an
@@ -133,7 +129,7 @@ pub fn announce_backlog(app: &tauri::AppHandle, alerts: &[Alert]) {
         .unwrap_or_else(|error| error.into_inner());
     let count = alerts
         .iter()
-        .filter(|alert| !alert.acknowledged)
+        .filter(|alert| !alert.acknowledged && !needs_decision(alert))
         .filter(|alert| toasted.insert(alert.id))
         .count();
     drop(toasted);
@@ -145,11 +141,5 @@ pub fn announce_backlog(app: &tauri::AppHandle, alerts: &[Alert]) {
     } else {
         format!("{count} network alerts need attention")
     };
-    show(app, "Iris", &body);
-}
-
-fn show(app: &tauri::AppHandle, title: &str, body: &str) {
-    if let Err(error) = app.notification().builder().title(title).body(body).show() {
-        tracing::warn!("could not raise notification: {error}");
-    }
+    crate::prompt::push_info(app, "Iris".into(), body);
 }

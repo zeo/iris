@@ -634,6 +634,17 @@ html {
   background: var(--plate);
   animation: rise var(--t-slow) var(--spring-soft);
 }
+.connection-prompt.info {
+  height: auto;
+  flex: 0 0 auto;
+  grid-template-rows: 48px auto;
+}
+.prompt-body {
+  margin: 0;
+  padding: var(--s3) var(--s4);
+  font-size: var(--fz-ui);
+  overflow-wrap: anywhere;
+}
 .connection-prompt > header {
   display: grid;
   grid-template-columns: 30px 1fr 24px;

@@ -37,8 +37,8 @@ export const needsDecision = (alert: Alert): boolean =>
   alert.kind.remote !== null &&
   alert.kind.direction !== null;
 
-// which alerts get a generic desktop toast rather than the actionable prompt.
-// the toast itself is raised by the Rust host (notify.rs), which stays alive
+// which alerts get a passing info card rather than the actionable prompt.
+// the card itself is raised by the Rust host (notify.rs), which stays alive
 // even when this webview is hidden, throttled, or suspended in the tray; this
 // predicate is kept here as the single documented mirror of that logic.
 export const needsNativeNotification = (alert: Alert): boolean => !needsDecision(alert);

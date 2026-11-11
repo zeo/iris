@@ -102,6 +102,9 @@ pub fn run() {
             ipc::list_prompt_alerts,
             prompt::resize_connection_prompts,
             prompt::set_prompt_hit_region,
+            prompt::prompt_cards,
+            prompt::set_prompt_aside,
+            prompt::dismiss_info_card,
             rulectl::firewall_mode,
             ipc::get_host_usage,
             ipc::get_profiles,
@@ -143,7 +146,6 @@ pub fn run() {
         .setup(move |app| {
             ipc::spawn(app.handle().clone(), cmd_rx);
             build_tray(app.handle())?;
-            prompt::prewarm(app.handle());
             if let Err(error) = startup::repair_launch_at_login() {
                 tracing::warn!("could not refresh launch at login: {error}");
             }

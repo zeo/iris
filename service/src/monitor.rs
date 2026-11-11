@@ -157,9 +157,12 @@ fn start_pending_publisher(
         move || {
             let pending = pending.lock().unwrap_or_else(|error| error.into_inner());
             let mut last_notified = HashMap::new();
-            for connection in pending.iter() {
-                tracing::debug!(app = connection.app.as_str(), "received pending connection");
-                publish_pending(vec![connection], &store, &engine, &mut last_notified);
+            // drain whatever queued behind the first so a retry storm costs one
+            // store lock per batch, not one per denied packet
+            while let Ok(first) = pending.recv() {
+                let batch: Vec<_> = std::iter::once(first).chain(pending.try_iter()).collect();
+                tracing::debug!(count = batch.len(), "received pending connections");
+                publish_pending(batch, &store, &engine, &mut last_notified);
             }
         }
     })
@@ -314,6 +317,28 @@ mod tests {
         assert_eq!(alert1.id, alert2.id);
         assert_eq!(store.lock().unwrap().list_prompt_alerts().len(), 1);
     }
+    #[test]
+    fn a_retry_burst_in_one_batch_raises_one_alert() {
+        let engine = Engine::new();
+        let mut events = engine.subscribe();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let denied = |port| crate::platform::PendingConnection {
+            app: AppId::from_path("/usr/bin/retrying-app"),
+            remote: Endpoint {
+                addr: "203.0.113.9".parse::<IpAddr>().unwrap(),
+                port,
+                protocol: Protocol::Tcp,
+            },
+            direction: Direction::Outbound,
+        };
+        let burst = (0..50).map(|n| denied(443 + n)).collect();
+        publish_pending(burst, &store, &engine, &mut HashMap::new());
+
+        assert!(matches!(events.try_recv(), Ok(ServerMessage::Alert(_))));
+        assert!(events.try_recv().is_err());
+        assert_eq!(store.lock().unwrap().list_prompt_alerts().len(), 1);
+    }
+
     #[test]
     fn respawn_returns_at_once_and_restarts_after_a_panic() {
         let (runs, ran) = std::sync::mpsc::channel();

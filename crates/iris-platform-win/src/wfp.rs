@@ -79,7 +79,7 @@ pub struct Wfp {
     denied: Option<std::sync::mpsc::Receiver<crate::netevent::DeniedConnection>>,
     /// the sending end, kept for the engine's life so ask mode switched off and
     /// back on feeds the receiver the service already holds
-    denied_tx: std::sync::mpsc::Sender<crate::netevent::DeniedConnection>,
+    denied_tx: std::sync::mpsc::SyncSender<crate::netevent::DeniedConnection>,
     /// permits seeded for apps accepted before ask mode existed, so turning it
     /// on does not retroactively cut off the whole machine
     trusted_filters: Vec<u64>,
@@ -90,6 +90,9 @@ pub struct Wfp {
 // a WFP engine handle is safe to use from any thread; the rule store guards all
 // access behind a mutex, so a single Send assertion is enough
 unsafe impl Send for Wfp {}
+
+/// ask-mode denials buffered for the prompt publisher before new ones drop
+const DENIED_QUEUE: usize = 1024;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -103,7 +106,7 @@ impl Wfp {
     /// open the engine and ensure iris's provider + sublayer exist
     pub fn open() -> EngineResult<Wfp> {
         unsafe {
-            let (denied_tx, denied) = std::sync::mpsc::channel();
+            let (denied_tx, denied) = std::sync::mpsc::sync_channel(DENIED_QUEUE);
             let mut engine = HANDLE::default();
             let rc = FwpmEngineOpen0(None, RPC_C_AUTHN_WINNT, None, None, &mut engine);
             if !ok(rc) {

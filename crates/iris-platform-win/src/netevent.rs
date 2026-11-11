@@ -12,7 +12,8 @@
 use iris_core::{AppId, Direction, Endpoint, Protocol};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
@@ -38,7 +39,7 @@ pub struct DeniedConnection {
 /// with a lifetime BFE respects, so the sink and the set of ask-mode filter ids
 /// live in process-wide state that outlives any single subscription
 struct Sink {
-    tx: Sender<DeniedConnection>,
+    tx: SyncSender<DeniedConnection>,
     /// which of iris's own ask-mode filters dropped it, and the direction that
     /// filter's layer represents. taking the direction from our own bookkeeping
     /// avoids depending on the undocumented numeric values of msFwpDirection.
@@ -74,7 +75,7 @@ impl NetEvents {
     pub fn subscribe(
         engine: HANDLE,
         ask_filters: &[(u64, Direction)],
-        tx: Sender<DeniedConnection>,
+        tx: SyncSender<DeniedConnection>,
     ) -> Result<NetEvents, String> {
         if let Ok(mut guard) = sink().lock() {
             *guard = Some(Sink {
@@ -183,7 +184,7 @@ unsafe extern "system" fn on_net_event(
     } else {
         0
     };
-    let _ = sink.tx.send(DeniedConnection {
+    let denied = DeniedConnection {
         app: AppId::from_path(&path),
         remote: Endpoint {
             addr,
@@ -191,7 +192,16 @@ unsafe extern "system" fn on_net_event(
             protocol,
         },
         direction,
-    });
+    };
+    // never block BFE's callback thread on a stalled consumer: a full queue
+    // means a retry storm the consumer already has prompts for
+    if let Err(TrySendError::Full(_)) = sink.tx.try_send(denied) {
+        static DROPPED: AtomicU64 = AtomicU64::new(0);
+        let dropped = DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
+        if dropped.is_power_of_two() {
+            tracing::warn!(dropped, "ask-mode denial queue full, dropping events");
+        }
+    }
 }
 
 /// a WFP app id is the image path as a NT device path in UTF-16, terminated.

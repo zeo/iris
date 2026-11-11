@@ -366,6 +366,20 @@ async fn handle(
                         };
                         reply(&mut send, req, result).await?;
                     }
+                    ClientMessage::ListQuotas { req } => {
+                        let result = read_rules(&rules, |rules| rules.quotas(now_ms()))
+                            .await
+                            .map_or_else(rules_unavailable, Reply::Quotas);
+                        reply(&mut send, req, result).await?;
+                    }
+                    ClientMessage::SetQuota { req, app, limit } => {
+                        let result = if app.is_none() || peer.may_manage_rules() {
+                            set_quota(&rules, app, limit).await
+                        } else {
+                            Reply::Error(NEEDS_ELEVATION.into())
+                        };
+                        reply(&mut send, req, result).await?;
+                    }
                     ClientMessage::GetProfiles { req } => {
                         let result = read_rules(&rules, RuleStore::profile_state)
                             .await
@@ -893,6 +907,10 @@ async fn handle_admin(
                 let result = set_profiles(&rules, profiles, manual).await;
                 reply(&mut send, req, result).await?;
             }
+            ClientMessage::SetQuota { req, app, limit } => {
+                let result = set_quota(&rules, app, limit).await;
+                reply(&mut send, req, result).await?;
+            }
             ClientMessage::Ping { req } => reply(&mut send, req, Reply::Pong).await?,
             other => {
                 if let Some(req) = req_of(&other) {
@@ -983,6 +1001,22 @@ async fn set_cap(
     .unwrap_or_else(|_| Reply::Error("the cap change failed".into()))
 }
 
+async fn set_quota(
+    rules: &Arc<Mutex<RuleStore>>,
+    app: Option<iris_core::AppId>,
+    limit: Option<iris_core::QuotaLimit>,
+) -> Reply {
+    let rules = rules.clone();
+    tokio::task::spawn_blocking(move || {
+        match rules.lock().unwrap_or_else(|error| error.into_inner()).set_quota(app, limit) {
+            Ok(()) => Reply::Ok,
+            Err(error) => Reply::Error(format!("could not set the quota: {error}")),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Reply::Error("the quota change failed".into()))
+}
+
 async fn set_profiles(
     rules: &Arc<Mutex<RuleStore>>,
     profiles: Vec<iris_core::Profile>,
@@ -1032,6 +1066,8 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::ListCaps { req }
         | ClientMessage::GetHealth { req }
         | ClientMessage::SetCap { req, .. }
+        | ClientMessage::ListQuotas { req }
+        | ClientMessage::SetQuota { req, .. }
         | ClientMessage::SetProfiles { req, .. }
         | ClientMessage::SetFirewallMode { req, .. }
         | ClientMessage::RemoveRule { req, .. }

@@ -91,6 +91,7 @@ pub fn clear_all() -> anyhow::Result<()> {
 }
 
 /// a stable policy name per app, so re-applying replaces rather than stacks
+#[cfg(any(windows, test))]
 fn policy_name(app: &AppId) -> String {
     // fnv-1a: short, stable across runs, and needs no dependency
     let hash = app

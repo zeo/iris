@@ -321,6 +321,39 @@ pub struct RateCap {
     pub up_bytes_per_sec: u64,
 }
 
+/// how often a data quota starts over, counted in local time. weeks start on
+/// monday, months on the quota's reset day
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuotaPeriod {
+    Day,
+    Week,
+    Month,
+}
+
+/// how much data a quota allows per period
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaLimit {
+    pub period: QuotaPeriod,
+    /// sent and received together
+    pub bytes: u64,
+    /// the day of the month a monthly period starts over, 1 to 28
+    pub reset_day: u8,
+}
+
+/// a data quota and where it stands. an app's quota blocks the app once it is
+/// spent, until the period starts over; the machine-wide one (no app) warns at
+/// 80% and 100% and never blocks
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Quota {
+    pub app: Option<AppId>,
+    pub limit: QuotaLimit,
+    /// bytes counted so far this period
+    pub used: u64,
+    pub period_start_ms: u64,
+    pub period_end_ms: u64,
+}
+
 /// how a plugin-proposed rule was disposed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

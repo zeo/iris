@@ -1,6 +1,6 @@
 use iris_core::{
     AdapterKind, Alert, Annotation, AppId, ByteCounts, EnrichTarget, FirewallMode, HostUsage, KnownApp, Profile, ProfileState, RateCap,
-    LiveConnection, Panel, Rule, RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket,
+    LiveConnection, Panel, Quota, QuotaLimit, Rule, RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket,
     UsageQuery,
 };
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// v13 adds per-app upload caps.
 /// v14 adds the engine health query.
 /// v15 always sends rule scopes, lifetimes, and profile modes, which bincode
-/// could not decode while they were skipped when empty.
+/// could not decode while they were skipped when empty, and adds data quotas.
 pub const PROTOCOL_VERSION: u32 = 15;
 
 /// conditions that quietly undermine the engine, for the UI to surface
@@ -113,6 +113,17 @@ pub enum ClientMessage {
         req: u64,
         app: AppId,
         up_bytes_per_sec: Option<u64>,
+    },
+    ListQuotas {
+        req: u64,
+    },
+    /// set or clear an app's data quota, which blocks the app once spent, so
+    /// it is privileged. with no app it sets the machine-wide data plan, which
+    /// only warns
+    SetQuota {
+        req: u64,
+        app: Option<AppId>,
+        limit: Option<QuotaLimit>,
     },
     /// replace the network profiles and the manual choice. privileged, since
     /// switching profile changes which rules are enforced
@@ -285,6 +296,7 @@ pub enum Reply {
     FirewallMode(FirewallMode),
     Profiles(ProfileState),
     Caps(Vec<RateCap>),
+    Quotas(Vec<Quota>),
     Health(Health),
     /// per-host totals, biggest first
     HostUsage(Vec<HostUsage>),

@@ -98,6 +98,7 @@ export function Alerts() {
     traffic_spike: "Traffic spike",
     new_host: "New destination",
     gateway_changed: "Gateway changed",
+    quota: "Data quota",
   } as const;
 
   const watchRow = (a: Alert, k: Extract<Alert["kind"], { kind: "watch" }>) => (

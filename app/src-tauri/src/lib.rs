@@ -81,7 +81,6 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .manage(ipc::StatusState::default())
         .manage(ipc::TickDetailState::default())
@@ -111,8 +110,10 @@ pub fn run() {
             ipc::get_host_usage,
             ipc::get_profiles,
             ipc::list_caps,
+            ipc::list_quotas,
             ipc::engine_health,
             rulectl::set_cap,
+            rulectl::set_quota,
             rulectl::set_profiles,
             traygraph::set_tray_graph,
             rulectl::set_firewall_mode,

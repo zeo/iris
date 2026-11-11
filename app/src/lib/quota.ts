@@ -1,116 +1,96 @@
 import { createEffect, createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
 import { engine } from "./engine";
-import { billingResetDay, dataCapGb, showNotifications } from "./settings";
 
-interface UsageBucket {
-  app: string;
-  bucket_start_ms: number;
-  bytes: { sent: number; recv: number };
+// the engine counts quotas and raises their alerts, so they hold while this
+// webview is closed; this module only mirrors them for the meter and editors
+
+export type QuotaPeriod = "day" | "week" | "month";
+
+export interface QuotaLimit {
+  period: QuotaPeriod;
+  bytes: number;
+  reset_day: number;
 }
 
-// data plans are quoted decimally, so the quota is entirely decimal GB and keeps
-// its own formatting rather than the binary byte formatter used elsewhere
-const GB = 1_000_000_000;
-const POLL_MS = 5 * 60 * 1000;
-
-const [periodBytes, setPeriodBytes] = createSignal(0);
-
-/// ms timestamp of the most recent billing reset at or before `now`
-export function periodStart(resetDay: number, now: number): number {
-  const d = new Date(now);
-  const day = Math.min(Math.max(Math.round(resetDay), 1), 28);
-  let start = new Date(d.getFullYear(), d.getMonth(), day, 0, 0, 0, 0);
-  if (start.getTime() > now) {
-    start = new Date(d.getFullYear(), d.getMonth() - 1, day, 0, 0, 0, 0);
-  }
-  return start.getTime();
+export interface Quota {
+  /** null for the machine-wide data plan */
+  app: string | null;
+  limit: QuotaLimit;
+  used: number;
+  period_start_ms: number;
+  period_end_ms: number;
 }
+
+// data plans are quoted decimally, so quotas keep their own formatting rather
+// than the binary byte formatter used elsewhere
+export const GB = 1_000_000_000;
+const POLL_MS = 60 * 1000;
+
+const [quotas, setQuotas] = createSignal<Quota[]>([]);
 
 export function formatGb(bytesValue: number): string {
   return `${(bytesValue / GB).toFixed(1)} GB`;
 }
 
+const plan = () => quotas().find((q) => q.app === null);
+
 export const quota = {
-  used: periodBytes,
-  capBytes: () => dataCapGb() * GB,
+  plan,
+  forApp: (path: string) => quotas().find((q) => q.app === path),
   fraction: () => {
-    const cap = dataCapGb() * GB;
-    return cap > 0 ? Math.min(periodBytes() / cap, 1) : 0;
+    const p = plan();
+    return p ? Math.min(p.used / p.limit.bytes, 1) : 0;
   },
-  remaining: () => Math.max(0, dataCapGb() * GB - periodBytes()),
+  remaining: () => {
+    const p = plan();
+    return p ? Math.max(0, p.limit.bytes - p.used) : 0;
+  },
 };
+
+/** whether the engine answered */
+export async function refreshQuotas(): Promise<boolean> {
+  if (!engine.online()) return false;
+  try {
+    setQuotas(await invoke<Quota[]>("list_quotas"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** set or clear one quota; a null path is the machine-wide data plan */
+export async function setQuota(path: string | null, limit: QuotaLimit | null) {
+  await invoke("set_quota", { path, limit });
+  await refreshQuotas();
+}
+
+// the data plan used to live in this webview's storage; hand it to the engine
+// once, the first time the engine answers without one
+const LEGACY_CAP = "settings.dataCapGb";
+const LEGACY_DAY = "settings.billingResetDay";
+async function migrateLegacyPlan() {
+  const capGb = Number(localStorage.getItem(LEGACY_CAP) ?? 0);
+  if (!(capGb > 0) || plan()) {
+    localStorage.removeItem(LEGACY_CAP);
+    localStorage.removeItem(LEGACY_DAY);
+    return;
+  }
+  const day = Math.min(28, Math.max(1, Math.round(Number(localStorage.getItem(LEGACY_DAY) ?? 1) || 1)));
+  await setQuota(null, { period: "month", bytes: Math.round(capGb * GB), reset_day: day });
+  localStorage.removeItem(LEGACY_CAP);
+  localStorage.removeItem(LEGACY_DAY);
+}
 
 let started = false;
 export function initQuota() {
   if (started) return;
   started = true;
-  // refresh the moment the engine comes online or the cap changes, not only on
-  // the slow poll, so the meter is never stale for minutes after enabling a cap
   createEffect(() => {
-    if (engine.online() && dataCapGb() > 0) void refresh();
-  });
-  setInterval(() => void refresh(), POLL_MS);
-}
-
-async function refresh() {
-  if (dataCapGb() <= 0 || !engine.online()) return;
-  const now = Date.now();
-  const from = periodStart(billingResetDay(), now);
-  let buckets: UsageBucket[] = [];
-  try {
-    buckets = await invoke<UsageBucket[]>("get_usage", {
-      fromMs: from,
-      toMs: now,
-      granularity: "day",
+    if (!engine.online()) return;
+    void refreshQuotas().then(async (answered) => {
+      if (answered) await migrateLegacyPlan().catch(() => {});
     });
-  } catch {
-    return;
-  }
-  const total = buckets.reduce((n, b) => n + b.bytes.sent + b.bytes.recv, 0);
-  setPeriodBytes(total);
-  maybeNotify(from, total);
-}
-
-// notify once per threshold per billing period, tracked in localStorage
-function maybeNotify(periodFrom: number, total: number) {
-  if (!showNotifications()) return;
-  const cap = dataCapGb() * GB;
-  if (cap <= 0) return;
-  const fraction = total / cap;
-  const key = `quota.notified.${periodFrom}`;
-  let done: number[] = [];
-  try {
-    done = JSON.parse(localStorage.getItem(key) ?? "[]");
-  } catch {
-    done = [];
-  }
-  for (const threshold of [80, 100]) {
-    if (fraction * 100 >= threshold && !done.includes(threshold)) {
-      done.push(threshold);
-      void notify(threshold, total, cap);
-    }
-  }
-  try {
-    localStorage.setItem(key, JSON.stringify(done));
-  } catch {
-    /* ignore */
-  }
-}
-
-async function notify(pct: number, total: number, cap: number) {
-  const title = pct >= 100 ? "Data plan used up" : `Data plan ${pct}% used`;
-  const body = `${formatGb(total)} of ${formatGb(cap)} this period`;
-  try {
-    let granted = await isPermissionGranted();
-    if (!granted) granted = (await requestPermission()) === "granted";
-    if (granted) sendNotification({ title, body });
-  } catch {
-    /* notifications unavailable */
-  }
+  });
+  setInterval(() => void refreshQuotas(), POLL_MS);
 }

@@ -5,12 +5,9 @@ import { engine } from "../lib/engine";
 import { checkNow } from "../lib/updater";
 import { profileState, refreshProfiles, saveProfiles, withNetwork, type Profile } from "../lib/profiles";
 import type { FirewallMode } from "../lib/rules";
+import { GB, quota, setQuota } from "../lib/quota";
 import {
-  billingResetDay,
-  dataCapGb,
   rateUnits,
-  setBillingResetDay,
-  setDataCapGb,
   setRateUnits,
   setShowNotifications,
   showNotifications,
@@ -38,6 +35,18 @@ const UNIT_OPTS: { id: RateUnits; label: string }[] = [
 
 export function Settings() {
   const [atLogin, setAtLogin] = createSignal(false);
+  const [planErr, setPlanErr] = createSignal("");
+  const planResetDay = () => quota.plan()?.limit.reset_day ?? 1;
+  const savePlan = async (capGb: number, resetDay: number) => {
+    const reset_day = Math.min(28, Math.max(1, Math.round(resetDay)));
+    const limit = capGb > 0 ? { period: "month" as const, bytes: Math.round(capGb * GB), reset_day } : null;
+    try {
+      await setQuota(null, limit);
+      setPlanErr("");
+    } catch (error) {
+      setPlanErr(String(error));
+    }
+  };
   const [busy, setBusy] = createSignal("");
   const [update, setUpdate] = createSignal("");
   const [svcMsg, setSvcMsg] = createSignal("");
@@ -366,6 +375,9 @@ export function Settings() {
 
       <div class="set-group">
         <div class="set-section">Data plan</div>
+        <Show when={planErr()}>
+          <div class="tool-err">{planErr()}</div>
+        </Show>
         <div class="set-row">
           <div class="set-meta">
             <span class="set-name">Monthly cap</span>
@@ -377,8 +389,8 @@ export function Settings() {
               min="0"
               step="1"
               aria-label="Monthly data cap in gigabytes"
-              value={dataCapGb()}
-              onInput={(e) => setDataCapGb(Math.max(0, Number(e.currentTarget.value) || 0))}
+              value={(quota.plan()?.limit.bytes ?? 0) / GB}
+              onChange={(e) => savePlan(Number(e.currentTarget.value) || 0, planResetDay())}
             />
             <span class="unit">GB</span>
           </label>
@@ -395,10 +407,9 @@ export function Settings() {
               max="28"
               step="1"
               aria-label="Billing reset day"
-              value={billingResetDay()}
-              onInput={(e) =>
-                setBillingResetDay(Math.min(28, Math.max(1, Math.round(Number(e.currentTarget.value) || 1))))
-              }
+              value={planResetDay()}
+              disabled={!quota.plan()}
+              onChange={(e) => savePlan((quota.plan()?.limit.bytes ?? 0) / GB, Number(e.currentTarget.value) || 1)}
             />
           </label>
         </div>

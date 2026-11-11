@@ -117,6 +117,24 @@ pub async fn set_cap(app: tauri::AppHandle, path: String, up_bytes_per_sec: Opti
 }
 
 #[tauri::command]
+pub async fn set_quota(
+    app: tauri::AppHandle,
+    path: Option<String>,
+    limit: Option<iris_core::QuotaLimit>,
+) -> Result<(), String> {
+    let cmd = EngineCmd::SetQuota(path.clone(), limit);
+    // the machine-wide quota only warns, so the engine takes it without elevation
+    let Some(path) = path else {
+        return try_unelevated(&app, cmd).await.map(drop);
+    };
+    let limit = match limit {
+        Some(limit) => serde_json::to_string(&limit).map_err(|error| error.to_string())?,
+        None => "off".into(),
+    };
+    mutate(app, cmd, vec!["--quota".into(), path, limit]).await
+}
+
+#[tauri::command]
 pub async fn set_profiles(
     app: tauri::AppHandle,
     profiles: Vec<iris_core::Profile>,

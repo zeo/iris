@@ -14,7 +14,7 @@ export type AlertKind =
   | { kind: "plugin"; source: string; message: string }
   | {
       kind: "watch";
-      reason: "binary_changed" | "traffic_spike" | "new_host" | "gateway_changed";
+      reason: "binary_changed" | "traffic_spike" | "new_host" | "gateway_changed" | "quota";
       app: string | null;
       message: string;
     };

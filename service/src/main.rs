@@ -13,6 +13,7 @@ mod paths;
 #[cfg(has_platform)]
 mod platform;
 mod plugins;
+mod quota;
 mod rules;
 mod server;
 #[cfg(windows)]

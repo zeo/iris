@@ -685,6 +685,24 @@ impl Store {
         out
     }
 
+    /// bytes sent and received over a window by one app, or by every app
+    pub fn usage_bytes(&self, app: Option<&AppId>, from_ms: u64, to_ms: u64) -> u64 {
+        let (from, to) = (from_ms.min(i64::MAX as u64) as i64, to_ms.min(i64::MAX as u64) as i64);
+        let total = match app {
+            Some(app) => self.conn.query_row(
+                "SELECT COALESCE(SUM(sent + recv), 0) FROM usage WHERE path = ?1 AND bucket >= ?2 AND bucket < ?3",
+                params![app.as_str(), from, to],
+                |row| row.get::<_, i64>(0),
+            ),
+            None => self.conn.query_row(
+                "SELECT COALESCE(SUM(sent + recv), 0) FROM usage WHERE bucket >= ?1 AND bucket < ?2",
+                params![from, to],
+                |row| row.get::<_, i64>(0),
+            ),
+        };
+        total.map_or(0, |total| total.max(0) as u64)
+    }
+
     /// total bytes per app over a window, biggest first (for the Usage table)
     pub fn usage_totals(&self, from_ms: u64, to_ms: u64) -> Vec<(AppId, iris_core::ByteCounts)> {
         let mut stmt = match self.conn.prepare(
@@ -1268,6 +1286,17 @@ mod tests {
         assert_eq!(unanswered, 500);
         let oldest_left: i64 = s.conn.query_row("SELECT MIN(id) FROM alerts", [], |r| r.get(0)).unwrap();
         assert_eq!(oldest_left, first.id + 1);
+    }
+
+    #[test]
+    fn usage_bytes_sums_one_app_or_all_within_the_window() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_usage("c:/x.exe", 1_000, 100, 200);
+        s.add_usage("c:/y.exe", 61_000, 5, 5);
+        s.add_usage("c:/x.exe", 121_000, 1, 1);
+        assert_eq!(s.usage_bytes(Some(&AppId::from_path("c:/x.exe")), 0, 120_000), 300);
+        assert_eq!(s.usage_bytes(None, 0, 120_000), 310);
+        assert_eq!(s.usage_bytes(None, 60_000, u64::MAX), 12);
     }
 
     #[test]

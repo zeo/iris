@@ -8,7 +8,6 @@ import { persisted } from "../lib/persist";
 import { bytes } from "../lib/format";
 import { fileName } from "../lib/path";
 import { formatGb, quota } from "../lib/quota";
-import { dataCapGb } from "../lib/settings";
 
 // quote a CSV field when it holds a comma, quote, or newline
 function csvCell(v: string | number): string {
@@ -171,11 +170,12 @@ export function Usage() {
         <div class="tool-err">{exportErr()}</div>
       </Show>
 
-      <Show when={dataCapGb() > 0}>
+      <Show when={quota.plan()}>
+        {(plan) => (
         <div class="quota" classList={{ warn: quota.fraction() >= 0.8, over: quota.fraction() >= 1 }}>
           <div class="quota-head">
             <span class="label">data plan this period</span>
-            <span class="quota-nums">{formatGb(quota.used())} <span class="of">of</span> {formatGb(quota.capBytes())}</span>
+            <span class="quota-nums">{formatGb(plan().used)} <span class="of">of</span> {formatGb(plan().limit.bytes)}</span>
           </div>
           <div class="meter quota-bar">
             <span style={{ width: `${quota.fraction() * 100}%` }} />
@@ -184,6 +184,7 @@ export function Usage() {
             {Math.round(quota.fraction() * 100)}% used, {formatGb(quota.remaining())} left
           </div>
         </div>
+        )}
       </Show>
 
       <div class="tiles">

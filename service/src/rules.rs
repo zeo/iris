@@ -4,8 +4,9 @@
 //! rules, so the JSON file is the single source of truth.
 
 use iris_core::{
-    active_profile, effective_mode, EngineError, FirewallMode, NetworkIdentity, Profile,
-    ProfileState, Rule, RuleLifetime, StoredRule,
+    active_profile, effective_mode, AlertKind, AppId, Direction, EngineError, FirewallMode,
+    NetworkIdentity, PortRange, Profile, ProfileState, Quota, QuotaLimit, Rule, RuleAction,
+    RuleLifetime, RuleScope, StoredRule, WatchReason,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -68,6 +69,7 @@ pub struct RuleStore {
     /// the profile in force, which decides which profile-tagged rules apply
     active: Option<String>,
     caps: crate::caps::CapStore,
+    quotas: crate::quota::QuotaBook,
 }
 
 fn mode_path() -> PathBuf {
@@ -95,7 +97,7 @@ fn load_profiles() -> SavedProfiles {
 
 /// write json beside the rules file through a temp file, so a crash mid-write
 /// never leaves a truncated one behind
-fn write_atomic(path: &Path, json: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_atomic(path: &Path, json: &[u8]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -224,6 +226,7 @@ impl RuleStore {
             network,
             active,
             caps: crate::caps::CapStore::open(),
+            quotas: crate::quota::QuotaBook::open(),
         };
         #[cfg(target_os = "linux")]
         if let Some(wfp) = store.wfp.as_ref() {
@@ -276,6 +279,57 @@ impl RuleStore {
             wfp.set_cap_mark(app.as_str(), mark);
         }
         Ok(())
+    }
+
+    pub fn quotas(&self, now_ms: u64) -> Vec<Quota> {
+        self.quotas.list(now_ms)
+    }
+
+    /// set or clear an app's quota, or the machine's with no app, lifting any
+    /// block the old quota put in force
+    pub fn set_quota(&mut self, app: Option<AppId>, limit: Option<QuotaLimit>) -> anyhow::Result<()> {
+        for id in self.quotas.set(app, limit)? {
+            self.remove(id)?;
+        }
+        Ok(())
+    }
+
+    /// count quota use, block the apps that spent theirs, and return the
+    /// alerts to raise. `usage` sums bytes over `[from, to)`
+    pub fn check_quotas(&mut self, now_ms: u64, usage: impl Fn(Option<&AppId>, u64, u64) -> u64) -> Vec<AlertKind> {
+        let reached = self.quotas.check(now_ms, crate::quota::utc_offset_ms, usage);
+        reached
+            .into_iter()
+            .map(|reached| {
+                if let Some(app) = reached.app.as_ref().filter(|_| reached.percent >= 100) {
+                    self.block_for_quota(app, reached.until_ms);
+                }
+                AlertKind::Watch { reason: WatchReason::Quota, app: reached.app.clone(), message: reached.message() }
+            })
+            .collect()
+    }
+
+    /// block an app both ways until its quota period ends. the full port range
+    /// gives the block its own slot, so it neither replaces the user's own rule
+    /// for the app nor loses to it
+    fn block_for_quota(&mut self, app: &AppId, until_ms: u64) {
+        let mut ids = Vec::new();
+        for direction in [Direction::Outbound, Direction::Inbound] {
+            let rule = Rule {
+                app: app.clone(),
+                direction,
+                action: RuleAction::Block,
+                label: Some("Data quota".into()),
+                scope: RuleScope { ports: Some(PortRange { start: 0, end: u16::MAX }), ..RuleScope::default() },
+                lifetime: RuleLifetime::Until { at_ms: until_ms },
+                profile: None,
+            };
+            match self.add(rule) {
+                Ok(stored) => ids.push(stored.id),
+                Err(error) => tracing::warn!(app = %app.0, "could not block an app over its quota: {error}"),
+            }
+        }
+        self.quotas.record_blocks(app, ids);
     }
 
     /// keep upload caps on the interface the default route uses

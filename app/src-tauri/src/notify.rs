@@ -85,6 +85,7 @@ pub fn alert_toast(app: &tauri::AppHandle, alert: &Alert) {
                 iris_core::WatchReason::TrafficSpike => "Traffic spike",
                 iris_core::WatchReason::NewHost => "New destination",
                 iris_core::WatchReason::GatewayChanged => "Gateway changed",
+                iris_core::WatchReason::Quota => "Data quota",
             }
             .to_string(),
             message.clone(),

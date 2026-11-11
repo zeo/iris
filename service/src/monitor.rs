@@ -503,7 +503,7 @@ fn enrich_one(
 #[cfg_attr(not(has_platform), allow(unused_variables))]
 fn sample_forever(
     engine: Engine,
-    _rules: Arc<Mutex<RuleStore>>,
+    rules: Arc<Mutex<RuleStore>>,
     store: Arc<Mutex<Store>>,
     enrich: SyncSender<Vec<EnrichTarget>>,
     #[cfg(has_platform)] agg: Arc<Mutex<Aggregator>>,
@@ -689,10 +689,34 @@ fn sample_forever(
                 }
             }
         }
+        if ticks.is_multiple_of(10) {
+            check_quotas(&engine, &rules, &store, now);
+        }
         // prune usage older than 45 days, hourly
         if ticks.is_multiple_of(3600) {
             let store = store.lock().unwrap_or_else(|e| e.into_inner());
             store.prune_usage(now.saturating_sub(45 * 86_400_000));
         }
+    }
+}
+
+fn check_quotas(engine: &Engine, rules: &Mutex<RuleStore>, store: &Mutex<Store>, now: u64) {
+    // a held rule store means a change is under way; the next check catches up
+    let mut rules = match rules.try_lock() {
+        Ok(rules) => rules,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    let reached = rules.check_quotas(now, |app, from, to| {
+        store.lock().unwrap_or_else(|e| e.into_inner()).usage_bytes(app, from, to)
+    });
+    drop(rules);
+    if reached.is_empty() {
+        return;
+    }
+    let store = store.lock().unwrap_or_else(|e| e.into_inner());
+    for kind in reached {
+        let alert = store.insert_alert(&kind, now);
+        engine.publish(ServerMessage::Alert(alert));
     }
 }

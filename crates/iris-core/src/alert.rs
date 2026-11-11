@@ -35,6 +35,9 @@ pub enum WatchReason {
     NewHost,
     /// the gateway answered from a different hardware address than before
     GatewayChanged,
+    /// an app spent its data quota and is blocked, or the machine-wide one
+    /// is running out
+    Quota,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -52,6 +52,15 @@ fn build_op(args: &[String]) -> anyhow::Result<Op> {
             };
             Ok(Op::Single(ClientMessage::SetCap { req: 1, app: AppId::from_path(path), up_bytes_per_sec }))
         }
+        Some("--quota") => {
+            let path = args.get(1).context("quota: missing app path")?;
+            let limit = match args.get(2).map(String::as_str) {
+                Some("off") => None,
+                Some(json) => Some(serde_json::from_str(json).context("quota: not a quota limit")?),
+                None => bail!("quota: missing limit"),
+            };
+            Ok(Op::Single(ClientMessage::SetQuota { req: 1, app: Some(AppId::from_path(path)), limit }))
+        }
         Some("--profiles-json") => {
             #[derive(serde::Deserialize)]
             struct Profiles {

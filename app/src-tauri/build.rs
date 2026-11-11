@@ -18,6 +18,8 @@ fn main() {
         "get_profiles",
         "list_caps",
         "set_cap",
+        "list_quotas",
+        "set_quota",
         "set_profiles",
         "set_tray_graph",
         "forget_apps",

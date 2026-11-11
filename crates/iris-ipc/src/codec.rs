@@ -159,4 +159,20 @@ mod tests {
             assert_eq!(read_frame::<_, ServerMessage>(&mut Cursor::new(buffer)).unwrap(), Some(msg));
         }
     }
+
+    #[test]
+    fn quotas_survive_a_binary_frame() {
+        use crate::message::Reply;
+        use iris_core::{Quota, QuotaLimit, QuotaPeriod};
+        let limit = QuotaLimit { period: QuotaPeriod::Month, bytes: 5_000_000_000, reset_day: 3 };
+        let set = ClientMessage::SetQuota { req: 1, app: Some(AppId::from_path("/usr/bin/a")), limit: Some(limit) };
+        let mut buffer = Vec::new();
+        write_frame(&mut buffer, &set).unwrap();
+        assert_eq!(read_frame::<_, ClientMessage>(&mut Cursor::new(buffer)).unwrap(), Some(set));
+        let quota = Quota { app: None, limit, used: 7, period_start_ms: 1, period_end_ms: 2 };
+        let listed = ServerMessage::Reply { req: 2, result: Reply::Quotas(vec![quota]) };
+        let mut buffer = Vec::new();
+        write_frame(&mut buffer, &listed).unwrap();
+        assert_eq!(read_frame::<_, ServerMessage>(&mut Cursor::new(buffer)).unwrap(), Some(listed));
+    }
 }

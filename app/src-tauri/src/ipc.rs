@@ -753,12 +753,7 @@ async fn reconcile_alerts(
 
 fn finish_alert_reconcile(app: &AppHandle, backlog: &[Alert], prompts: &[Alert]) {
     crate::notify::announce_backlog(app, backlog);
-    for alert in prompts
-        .iter()
-        .filter(|alert| crate::notify::needs_decision(alert))
-    {
-        crate::prompt::show(app, alert);
-    }
+    crate::prompt::restore(app, prompts);
 }
 
 fn set_status(app: &AppHandle, online: bool, version: Option<String>) {

@@ -121,6 +121,22 @@ pub fn show(app: &tauri::AppHandle, alert: &Alert) {
     request_host(app);
 }
 
+/// pending decisions came back with a reconnect; cards the user set aside
+/// stay aside until the app asks again
+pub fn restore(app: &tauri::AppHandle, prompts: &[Alert]) {
+    let state = app.state::<PromptState>();
+    let set_aside = state.set_aside.lock().unwrap_or_else(|error| error.into_inner());
+    let waiting = any_waiting(prompts.to_vec(), &set_aside);
+    drop(set_aside);
+    if waiting {
+        request_host(app);
+    }
+}
+
+fn any_waiting(prompts: Vec<Alert>, set_aside: &HashSet<i64>) -> bool {
+    newest_per_app(prompts).iter().any(|alert| !set_aside.contains(&alert.id))
+}
+
 /// queue a short-lived card that needs no answer
 pub fn push_info(app: &tauri::AppHandle, title: String, body: String) {
     let state = app.state::<PromptState>();
@@ -701,8 +717,9 @@ fn anchor_wayland(window: &tauri::WebviewWindow) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_size, newest_per_app, physical_rects, stack_height, trailing_edge, HitRect};
+    use super::{any_waiting, host_size, newest_per_app, physical_rects, stack_height, trailing_edge, HitRect};
     use iris_core::{Alert, AlertKind, AppId, Direction, Endpoint, Protocol};
+    use std::collections::HashSet;
 
     fn prompt(id: i64, app: &str, direction: Direction) -> Alert {
         Alert {
@@ -727,6 +744,20 @@ mod tests {
         ];
         let ids: Vec<i64> = newest_per_app(alerts).iter().map(|alert| alert.id).collect();
         assert_eq!(ids, vec![4, 3, 2]);
+    }
+
+    #[test]
+    fn a_reconnect_leaves_set_aside_cards_aside() {
+        let prompts = vec![
+            prompt(1, "chat.exe", Direction::Outbound),
+            prompt(3, "chat.exe", Direction::Outbound),
+            prompt(2, "game.exe", Direction::Outbound),
+        ];
+        let everything: HashSet<i64> = [3, 2].into_iter().collect();
+        assert!(!any_waiting(prompts.clone(), &everything));
+        let one: HashSet<i64> = [3].into_iter().collect();
+        assert!(any_waiting(prompts.clone(), &one));
+        assert!(!any_waiting(Vec::new(), &HashSet::new()));
     }
 
     #[test]

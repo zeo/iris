@@ -58,20 +58,21 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm build
+          pnpm test
       - name: build engine (release, for the app resource)
-        run: cargo build --release -p iris-service
+        run: cargo build --release --locked -p iris-service
       - name: verify packaged desktop
         run: |
-          cargo build --release -p iris-app
+          cargo build --release --locked -p iris-app
           $binary = [IO.File]::ReadAllBytes("target/release/iris.exe")
           $text = [Text.Encoding]::ASCII.GetString($binary)
           if ($text.Contains("http://localhost:1423")) {
             throw "release desktop still points at the development server"
           }
       - name: test
-        run: cargo test
+        run: cargo test --locked
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   # the same gate for Linux: this is where the platform-linux backend (sock_diag,
   # nftables, NFQUEUE, the sandboxed spawn) is actually compiled and linted, since
@@ -109,19 +110,20 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm build
+          pnpm test
       - name: build engine (release, for the app resource)
-        run: cargo build --release -p iris-service
+        run: cargo build --release --locked -p iris-service
       - name: verify packaged desktop
         run: |
-          cargo build --release -p iris-app
+          cargo build --release --locked -p iris-app
           if LC_ALL=C grep -aFq 'http://localhost:1423' target/release/iris; then
             echo 'release desktop still points at the development server' >&2
             exit 1
           fi
       - name: test
-        run: cargo test
+        run: cargo test --locked
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   # security advisory scan of the dependency tree (RUSTSEC database); the
   # weekly schedule catches advisories published after the last push

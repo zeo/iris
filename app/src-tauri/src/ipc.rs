@@ -394,20 +394,14 @@ pub async fn grant_plugin(
     caps: Vec<String>,
     egress: Vec<String>,
 ) -> Result<(), String> {
-    match dispatch(&app, EngineCmd::GrantPlugin(id, caps, egress)).await? {
-        Reply::Ok => Ok(()),
-        Reply::Error(e) => Err(e),
-        _ => Err("unexpected reply".into()),
-    }
+    let args = vec!["--plugin-grant".into(), id.clone(), caps.join(","), egress.join(",")];
+    crate::rulectl::mutate(app, EngineCmd::GrantPlugin(id, caps, egress), args).await
 }
 
 #[tauri::command]
 pub async fn set_plugin_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(), String> {
-    match dispatch(&app, EngineCmd::SetPluginEnabled(id, enabled)).await? {
-        Reply::Ok => Ok(()),
-        Reply::Error(e) => Err(e),
-        _ => Err("unexpected reply".into()),
-    }
+    let args = vec!["--plugin-enable".into(), id.clone(), enabled.to_string()];
+    crate::rulectl::mutate(app, EngineCmd::SetPluginEnabled(id, enabled), args).await
 }
 
 #[tauri::command]

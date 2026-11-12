@@ -614,33 +614,44 @@ async fn handle(
                         .unwrap_or_default();
                         reply(&mut send, req, Reply::Plugins(list)).await?;
                     }
+                    // a plugin runs as a child of the engine with its own egress, so
+                    // consenting to one or switching it on needs the same authority as
+                    // AddRule. switching one off only takes power away, so any client may
                     ClientMessage::GrantPlugin { req, id, caps, egress } => {
-                        let store = store.clone();
-                        let ok = tokio::task::spawn_blocking(move || {
-                            crate::plugins::supervisor::grant(&store, &id, &caps, &egress, now_ms())
-                        })
-                        .await
-                        .unwrap_or(false);
-                        let result = if ok {
-                            Reply::Ok
+                        if !peer.may_manage_rules() {
+                            reply(&mut send, req, Reply::Error(NEEDS_ELEVATION.into())).await?;
                         } else {
-                            Reply::Error("no such plugin installed".into())
-                        };
-                        reply(&mut send, req, result).await?;
+                            let store = store.clone();
+                            let ok = tokio::task::spawn_blocking(move || {
+                                crate::plugins::supervisor::grant(&store, &id, &caps, &egress, now_ms())
+                            })
+                            .await
+                            .unwrap_or(false);
+                            let result = if ok {
+                                Reply::Ok
+                            } else {
+                                Reply::Error("no such plugin installed".into())
+                            };
+                            reply(&mut send, req, result).await?;
+                        }
                     }
                     ClientMessage::SetPluginEnabled { req, id, enabled } => {
-                        let store = store.clone();
-                        let ok = tokio::task::spawn_blocking(move || {
-                            crate::plugins::supervisor::set_enabled(&store, &id, enabled)
-                        })
-                        .await
-                        .unwrap_or(false);
-                        let result = if ok {
-                            Reply::Ok
+                        if enabled && !peer.may_manage_rules() {
+                            reply(&mut send, req, Reply::Error(NEEDS_ELEVATION.into())).await?;
                         } else {
-                            Reply::Error("plugin has no consent grant yet".into())
-                        };
-                        reply(&mut send, req, result).await?;
+                            let store = store.clone();
+                            let ok = tokio::task::spawn_blocking(move || {
+                                crate::plugins::supervisor::set_enabled(&store, &id, enabled)
+                            })
+                            .await
+                            .unwrap_or(false);
+                            let result = if ok {
+                                Reply::Ok
+                            } else {
+                                Reply::Error("plugin has no consent grant yet".into())
+                            };
+                            reply(&mut send, req, result).await?;
+                        }
                     }
                     ClientMessage::GetPluginPanel { req, id } => {
                         // a plugin round-trip; keep it off the reactor
@@ -917,6 +928,31 @@ async fn handle_admin(
             }
             ClientMessage::SetQuota { req, app, limit } => {
                 let result = set_quota(&rules, app, limit).await;
+                reply(&mut send, req, result).await?;
+            }
+            ClientMessage::GrantPlugin { req, id, caps, egress } => {
+                let store = store.clone();
+                let ok = tokio::task::spawn_blocking(move || {
+                    crate::plugins::supervisor::grant(&store, &id, &caps, &egress, now_ms())
+                })
+                .await
+                .unwrap_or(false);
+                let result =
+                    if ok { Reply::Ok } else { Reply::Error("no such plugin installed".into()) };
+                reply(&mut send, req, result).await?;
+            }
+            ClientMessage::SetPluginEnabled { req, id, enabled } => {
+                let store = store.clone();
+                let ok = tokio::task::spawn_blocking(move || {
+                    crate::plugins::supervisor::set_enabled(&store, &id, enabled)
+                })
+                .await
+                .unwrap_or(false);
+                let result = if ok {
+                    Reply::Ok
+                } else {
+                    Reply::Error("plugin has no consent grant yet".into())
+                };
                 reply(&mut send, req, result).await?;
             }
             ClientMessage::Ping { req } => reply(&mut send, req, Reply::Pong).await?,

@@ -14,7 +14,7 @@ use iris_core::{AppId, Cidr, Direction, FirewallMode, PortRange, Protocol, Rule,
 
 /// run `cmd` over the telemetry channel, falling back to one elevated run of
 /// the engine with `args` if the grant is not in force
-async fn mutate(
+pub(crate) async fn mutate(
     app: tauri::AppHandle,
     cmd: EngineCmd,
     args: Vec<String>,

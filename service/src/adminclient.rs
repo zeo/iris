@@ -35,6 +35,8 @@ pub const FLAGS: &[&str] = &[
     "--rule-import",
     "--grant-rules",
     "--proposal-accept",
+    "--plugin-grant",
+    "--plugin-enable",
 ];
 
 fn build_op(args: &[String]) -> anyhow::Result<Op> {
@@ -131,6 +133,26 @@ fn build_op(args: &[String]) -> anyhow::Result<Op> {
                 id,
                 accept: true,
             }))
+        }
+        // consent for an installed plugin; caps and egress are comma lists, and
+        // the engine clamps both to what the manifest declares
+        Some("--plugin-grant") => {
+            let id = args.get(1).context("plugin-grant: missing plugin id")?;
+            let list = |arg: Option<&String>| -> Vec<String> {
+                arg.map(|raw| raw.split(',').filter(|s| !s.is_empty()).map(String::from).collect())
+                    .unwrap_or_default()
+            };
+            Ok(Op::Single(ClientMessage::GrantPlugin {
+                req: 1,
+                id: id.clone(),
+                caps: list(args.get(2)),
+                egress: list(args.get(3)),
+            }))
+        }
+        Some("--plugin-enable") => {
+            let id = args.get(1).context("plugin-enable: missing plugin id")?;
+            let enabled = matches!(args.get(2).map(String::as_str), Some("true") | Some("1"));
+            Ok(Op::Single(ClientMessage::SetPluginEnabled { req: 1, id: id.clone(), enabled }))
         }
         _ => bail!("unknown rule command"),
     }
@@ -275,5 +297,24 @@ mod tests {
         let args = ["--quota", "C:\\a b\\app.exe", r#"{"period":"day","bytes":1,"reset_day":1}"#]
             .map(String::from);
         assert!(build_op(&args).is_ok());
+    }
+
+    #[test]
+    fn a_plugin_grant_splits_its_lists() {
+        let args = ["--plugin-grant", "geo", "enrich:endpoint,ui:panel", ""].map(String::from);
+        match build_op(&args) {
+            Ok(super::Op::Single(iris_ipc::message::ClientMessage::GrantPlugin { id, caps, egress, .. })) => {
+                assert_eq!(id, "geo");
+                assert_eq!(caps, ["enrich:endpoint", "ui:panel"]);
+                assert!(egress.is_empty());
+            }
+            _ => panic!("expected a plugin grant"),
+        }
+    }
+
+    #[test]
+    fn a_plugin_flag_needs_an_id() {
+        assert!(build_op(&["--plugin-grant".to_string()]).is_err());
+        assert!(build_op(&["--plugin-enable".to_string()]).is_err());
     }
 }

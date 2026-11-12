@@ -228,17 +228,23 @@ fn app_id_path(
 /// same executable would be two different apps.
 use std::sync::Arc;
 
+/// the drive-letter form of an NT device path, using the longest device
+/// prefix that ends at a path separator
+fn map_device_path(path: &str, map: &[(String, String)]) -> Option<String> {
+    map.iter()
+        .filter(|(device, _)| {
+            path.get(..device.len()).is_some_and(|head| head.eq_ignore_ascii_case(device))
+                && path.as_bytes().get(device.len()) == Some(&b'\\')
+        })
+        .max_by_key(|(device, _)| device.len())
+        .map(|(device, letter)| format!("{letter}{}", &path[device.len()..]))
+}
+
 fn to_drive_path(path: &str) -> String {
     if !path.starts_with("\\device\\") && !path.starts_with("\\Device\\") {
         return path.to_string();
     }
-    let map = cached_device_map();
-    for (device, letter) in map.iter() {
-        if path.len() > device.len() && path[..device.len()].eq_ignore_ascii_case(device) {
-            return format!("{letter}{}", &path[device.len()..]);
-        }
-    }
-    path.to_string()
+    map_device_path(path, &cached_device_map()).unwrap_or_else(|| path.to_string())
 }
 
 type DeviceMapCache = (Option<std::time::Instant>, Arc<Vec<(String, String)>>);
@@ -287,7 +293,7 @@ fn device_map() -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::to_drive_path;
+    use super::{map_device_path, to_drive_path};
 
     #[test]
     fn leaves_a_drive_letter_path_alone() {
@@ -301,5 +307,52 @@ mod tests {
     fn leaves_an_unmapped_device_path_intact_rather_than_mangling_it() {
         let path = "\\device\\nothingmapped\\app.exe";
         assert_eq!(to_drive_path(path), path);
+    }
+
+    fn volumes() -> Vec<(String, String)> {
+        vec![
+            ("\\Device\\HarddiskVolume1".to_string(), "c:".to_string()),
+            ("\\Device\\HarddiskVolume10".to_string(), "d:".to_string()),
+        ]
+    }
+
+    #[test]
+    fn device_volume_one_does_not_capture_volume_ten() {
+        assert_eq!(
+            map_device_path("\\device\\harddiskvolume10\\games\\x.exe", &volumes()).as_deref(),
+            Some("d:\\games\\x.exe")
+        );
+    }
+
+    #[test]
+    fn device_prefix_matches_case_insensitively() {
+        assert_eq!(
+            map_device_path("\\DEVICE\\HARDDISKVOLUME1\\Tools\\X.EXE", &volumes()).as_deref(),
+            Some("c:\\Tools\\X.EXE")
+        );
+    }
+
+    #[test]
+    fn device_path_with_a_multibyte_char_at_the_cut_does_not_panic() {
+        let path = "\\device\\harddiskvolume\u{e9}\\x.exe";
+        assert!(!path.is_char_boundary("\\Device\\HarddiskVolume1".len()));
+        assert_eq!(map_device_path(path, &volumes()), None);
+    }
+
+    #[test]
+    fn device_name_alone_is_not_a_path() {
+        assert_eq!(map_device_path("\\device\\harddiskvolume1", &volumes()), None);
+    }
+
+    #[test]
+    fn device_longest_prefix_wins() {
+        let map = vec![
+            ("\\Device\\Mup".to_string(), "x:".to_string()),
+            ("\\Device\\Mup\\server\\share".to_string(), "z:".to_string()),
+        ];
+        assert_eq!(
+            map_device_path("\\device\\mup\\server\\share\\app.exe", &map).as_deref(),
+            Some("z:\\app.exe")
+        );
     }
 }

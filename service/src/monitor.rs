@@ -693,10 +693,31 @@ fn sample_forever(
         if ticks.is_multiple_of(10) {
             check_quotas(&engine, &rules, &store, now);
         }
+        if ticks == 1 || ticks.is_multiple_of(3600) {
+            settle_stale_prompts(&store.lock().unwrap_or_else(|e| e.into_inner()), now);
+        }
         // prune usage older than 45 days, hourly
         if ticks.is_multiple_of(3600) {
             let store = store.lock().unwrap_or_else(|e| e.into_inner());
             store.prune_usage(now.saturating_sub(45 * 86_400_000));
+        }
+    }
+}
+
+/// an app file that no longer exists, as after an update that moved it
+pub(crate) fn app_is_gone(path: &str) -> bool {
+    let path = std::path::Path::new(path);
+    path.is_absolute() && !path.exists()
+}
+
+/// settle pending prompts nobody can act on: the app is gone, or the prompt is
+/// over a day old. an app still being denied raises a fresh one on its next try
+fn settle_stale_prompts(store: &Store, now: u64) {
+    for alert in store.list_prompt_alerts() {
+        if let AlertKind::NewApp { app, .. } = &alert.kind {
+            if now.saturating_sub(alert.at_ms) > 86_400_000 || app_is_gone(app.as_str()) {
+                store.ack_alert(alert.id);
+            }
         }
     }
 }

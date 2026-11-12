@@ -308,9 +308,9 @@ pub async fn prompt_cards(app: tauri::AppHandle) -> PromptCards {
     };
     let state = app.state::<PromptState>();
     let set_aside = state.set_aside.lock().unwrap_or_else(|error| error.into_inner());
-    let decisions = decisions
+    let decisions = newest_per_app(decisions)
         .into_iter()
-        .filter(|alert| crate::notify::needs_decision(alert) && !set_aside.contains(&alert.id))
+        .filter(|alert| !set_aside.contains(&alert.id))
         .collect();
     drop(set_aside);
     let info = state
@@ -325,6 +325,19 @@ pub async fn prompt_cards(app: tauri::AppHandle) -> PromptCards {
         info,
         error,
     }
+}
+
+/// one card per app and direction, the newest: answering it decides every
+/// connection that app is waiting on, so older cards would only repeat it
+fn newest_per_app(mut alerts: Vec<Alert>) -> Vec<Alert> {
+    alerts.retain(crate::notify::needs_decision);
+    alerts.sort_by_key(|alert| std::cmp::Reverse(alert.id));
+    let mut seen = HashSet::new();
+    alerts.retain(|alert| match &alert.kind {
+        iris_core::AlertKind::NewApp { app, direction, .. } => seen.insert((app.clone(), *direction)),
+        _ => true,
+    });
+    alerts
 }
 
 /// X or Escape on a decision card leaves it to the Alerts view
@@ -688,7 +701,33 @@ fn anchor_wayland(window: &tauri::WebviewWindow) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_size, physical_rects, stack_height, trailing_edge, HitRect};
+    use super::{host_size, newest_per_app, physical_rects, stack_height, trailing_edge, HitRect};
+    use iris_core::{Alert, AlertKind, AppId, Direction, Endpoint, Protocol};
+
+    fn prompt(id: i64, app: &str, direction: Direction) -> Alert {
+        Alert {
+            id,
+            at_ms: 0,
+            kind: AlertKind::NewApp {
+                app: AppId(app.into()),
+                remote: Some(Endpoint { addr: "104.18.37.228".parse().unwrap(), port: 443, protocol: Protocol::Tcp }),
+                direction: Some(direction),
+            },
+            acknowledged: false,
+        }
+    }
+
+    #[test]
+    fn keeps_one_card_per_app_and_direction() {
+        let alerts = vec![
+            prompt(1, "chat.exe", Direction::Outbound),
+            prompt(3, "chat.exe", Direction::Outbound),
+            prompt(2, "game.exe", Direction::Outbound),
+            prompt(4, "chat.exe", Direction::Inbound),
+        ];
+        let ids: Vec<i64> = newest_per_app(alerts).iter().map(|alert| alert.id).collect();
+        assert_eq!(ids, vec![4, 3, 2]);
+    }
 
     #[test]
     fn hit_region_covers_only_cards_in_physical_pixels() {

@@ -510,13 +510,12 @@ async fn handle(
                         let store = store.clone();
                         let rules = rules.clone();
                         let result = tokio::task::spawn_blocking(move || {
-                            let alert = store
+                            let pending = store
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
-                                .list_alerts(true)
-                                .into_iter()
-                                .find(|alert| alert.id == id);
-                            match alert.map(|alert| alert.kind) {
+                                .list_alerts(true);
+                            let alert = pending.iter().find(|alert| alert.id == id);
+                            match alert.map(|alert| alert.kind.clone()) {
                                 Some(AlertKind::NewApp { app, direction, .. }) => {
                                     let path = app.0.clone();
                                     // this command is bounded to one pending alert and
@@ -540,8 +539,10 @@ async fn handle(
                                             false
                                         }
                                     };
-                                    let needs_rule =
-                                        asking || matches!(action, RuleAction::Block);
+                                    // an app gone since it asked has nothing left to
+                                    // allow or block; answering just settles the prompt
+                                    let needs_rule = !crate::monitor::app_is_gone(&path)
+                                        && (asking || matches!(action, RuleAction::Block));
                                     let applied = if needs_rule {
                                         let rule = Rule::new(
                                             app,
@@ -561,7 +562,14 @@ async fn handle(
                                             let store =
                                                 store.lock().unwrap_or_else(|e| e.into_inner());
                                             store.set_app_decision(&path, action);
-                                            store.ack_alert(id);
+                                            // the decision covers the whole app, so its
+                                            // other pending prompts are answered with it
+                                            for sibling in pending.iter().filter(|alert| {
+                                                matches!(&alert.kind, AlertKind::NewApp { app: other, direction: d, .. }
+                                                    if other.0 == path && *d == direction)
+                                            }) {
+                                                store.ack_alert(sibling.id);
+                                            }
                                             Reply::Ok
                                         }
                                         Err(error) => Reply::Error(format!(

@@ -17,6 +17,13 @@ pub async fn install_service(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// hand outbound decisions back to iris on the windows firewall profiles that
+/// block by default and are not held by group policy
+#[tauri::command]
+pub async fn reset_outbound(app: tauri::AppHandle) -> Result<(), String> {
+    crate::elevate::run_engine(app, vec!["--reset-outbound".into()]).await
+}
+
 #[tauri::command]
 pub async fn uninstall_service(app: tauri::AppHandle) -> Result<(), String> {
     crate::elevate::run_engine(app, vec!["--uninstall".into()]).await

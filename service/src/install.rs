@@ -176,6 +176,40 @@ fn clear_firewall_state() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// set windows firewall's default outbound action back to allow on each
+/// profile that blocks, so iris's rules decide outbound traffic. a block that
+/// group policy sets would come back at the next policy refresh, so it is
+/// left alone and reported
+pub fn reset_outbound() -> anyhow::Result<()> {
+    let (local, policy) = outbound_targets(&crate::platform::outbound_blocks());
+    if !local.is_empty() {
+        crate::caps::powershell(
+            "$ErrorActionPreference = 'Stop'; \
+             Set-NetFirewallProfile -Name ($env:IRIS_PROFILES -split ',') -DefaultOutboundAction Allow -PolicyStore PersistentStore",
+            &[("IRIS_PROFILES", local.join(","))],
+        )?;
+        tracing::info!("windows firewall now allows outbound by default on {}", local.join(", "));
+    }
+    anyhow::ensure!(
+        policy.is_empty(),
+        "group policy blocks outbound connections on the {} profile, so only whoever manages that policy can change it",
+        policy.join(" and ")
+    );
+    Ok(())
+}
+
+/// the profiles a local change can lift, by their powershell names, and the
+/// ones group policy holds
+fn outbound_targets(blocks: &[crate::platform::OutboundBlock]) -> (Vec<&'static str>, Vec<&'static str>) {
+    let (policy, local): (Vec<_>, Vec<_>) = blocks.iter().partition(|block| block.by_policy);
+    let name = |block: &crate::platform::OutboundBlock| match block.profile {
+        "domain" => "Domain",
+        "private" => "Private",
+        _ => "Public",
+    };
+    (local.into_iter().map(name).collect(), policy.into_iter().map(|block| block.profile).collect())
+}
+
 /// ask the engine to stop and give it a bounded time to exit, so its own
 /// shutdown cannot race the cleanup that follows
 unsafe fn stop_and_wait(svc: SC_HANDLE) {
@@ -199,5 +233,17 @@ mod tests {
         let dependencies = wide("BFE\0");
         assert_eq!(&dependencies[..3], &[b'B' as u16, b'F' as u16, b'E' as u16]);
         assert_eq!(&dependencies[3..], &[0, 0]);
+    }
+
+    #[test]
+    fn only_profiles_without_a_policy_block_are_reset() {
+        use crate::platform::OutboundBlock;
+        let blocks = [
+            OutboundBlock { profile: "domain", by_policy: true },
+            OutboundBlock { profile: "private", by_policy: false },
+            OutboundBlock { profile: "public", by_policy: false },
+        ];
+        assert_eq!(outbound_targets(&blocks), (vec!["Private", "Public"], vec!["domain"]));
+        assert_eq!(outbound_targets(&[]), (vec![], vec![]));
     }
 }

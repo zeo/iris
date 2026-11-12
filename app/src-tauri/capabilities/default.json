@@ -62,6 +62,7 @@
     "allow-reverse-dns",
     "allow-install-service",
     "allow-uninstall-service",
+    "allow-reset-outbound",
     "allow-rule-add",
     "allow-rule-remove",
     "allow-rule-set-enabled",

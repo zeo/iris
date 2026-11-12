@@ -487,12 +487,20 @@ async fn handle(
                     }
                     ClientMessage::GetHealth { req } => {
                         let store = store.clone();
-                        let health = tokio::task::spawn_blocking(move || Health {
-                            history_in_memory: store.lock().unwrap_or_else(|e| e.into_inner()).in_memory(),
+                        let health = tokio::task::spawn_blocking(move || {
+                            #[cfg_attr(not(windows), allow(unused_mut))]
+                            let mut health = Health {
+                                history_in_memory: store.lock().unwrap_or_else(|e| e.into_inner()).in_memory(),
+                                ..Health::default()
+                            };
                             #[cfg(windows)]
-                            outbound_blocked: crate::platform::outbound_blocked_profiles(),
-                            #[cfg(not(windows))]
-                            outbound_blocked: Vec::new(),
+                            for block in crate::platform::outbound_blocks() {
+                                if block.by_policy {
+                                    health.outbound_policy.push(block.profile.to_string());
+                                }
+                                health.outbound_blocked.push(block.profile.to_string());
+                            }
+                            health
                         })
                         .await
                         .unwrap_or_default();

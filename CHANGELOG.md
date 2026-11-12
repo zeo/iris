@@ -13,6 +13,7 @@ All notable changes to this project are documented here. The format follows
 ### Added
 - On Windows the Alerts blocks filter lists connections Iris stopped, from block rules, lockdown, and ask mode, with the remote address, how many tries, and when it last happened. Repeated tries fold into one row; rows older than 30 days or past the newest 5000 are dropped.
 - An app's data quota can slow the app instead of blocking it: once the quota is spent, upload and download are held to a set KB/s (or the app's own lower limit) until the period resets, then its own limits come back. Linux slows only uploads, and the download half pauses for an anti-cheat like any download limit.
+- The Windows Firewall outbound warning has a Let Iris decide button that sets the default outbound action back to Allow on the blocking profiles, after one elevation prompt. A profile that group policy blocks is named instead, since a local change would not hold.
 
 ### Changed
 - The wire protocol is now version 18. The setup updates the app and engine together.

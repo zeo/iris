@@ -136,6 +136,7 @@ pub fn run() {
             net::reverse_dns,
             svcctl::install_service,
             svcctl::uninstall_service,
+            svcctl::reset_outbound,
             rulectl::rule_add,
             rulectl::rule_remove,
             rulectl::rule_set_enabled,

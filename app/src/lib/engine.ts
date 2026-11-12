@@ -109,7 +109,7 @@ const [enrichment, setEnrichment] = createSignal<Map<string, Annotation[]>>(new 
 // history are incomplete until the engine recovers the capture session
 const [captureDegraded, setCaptureDegraded] = createSignal(false);
 
-export type Health = { history_in_memory: boolean; outbound_blocked: string[] };
+export type Health = { history_in_memory: boolean; outbound_blocked: string[]; outbound_policy: string[] };
 const [health, setHealth] = createSignal<Health | null>(null);
 
 function refreshHealth() {
@@ -232,6 +232,7 @@ export const engine = {
   enrichment,
   captureDegraded,
   health,
+  refreshHealth,
   annotationsFor: (ip: string): Annotation[] => enrichment().get(ip) ?? [],
   down: () => tick()?.total_rate_recv ?? 0,
   up: () => tick()?.total_rate_sent ?? 0,

@@ -51,4 +51,4 @@ pub use svc::ServiceMap;
 #[cfg(windows)]
 pub use wfp::Wfp;
 #[cfg(windows)]
-pub use winfw::outbound_blocked_profiles;
+pub use winfw::{outbound_blocks, OutboundBlock};

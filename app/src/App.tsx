@@ -120,12 +120,36 @@ export function App() {
       );
     }
     if (health.outbound_blocked.length > 0) {
+      const profiles = (names: string[]) => `${names.join(", ")} ${names.length > 1 ? "profiles" : "profile"}`;
       notices.push(
-        `Windows Firewall blocks outbound connections by default on the ${health.outbound_blocked.join(", ")} ${health.outbound_blocked.length > 1 ? "profiles" : "profile"}, which overrides apps Iris allows. To hand outbound control to Iris, run Set-NetFirewallProfile -All -DefaultOutboundAction Allow in an elevated PowerShell.`,
+        `Windows Firewall blocks outbound connections by default on the ${profiles(health.outbound_blocked)}, which overrides apps Iris allows.`,
       );
+      if (health.outbound_policy.length > 0) {
+        notices.push(
+          `Group policy sets that on the ${profiles(health.outbound_policy)}, so only whoever manages the policy can change it.`,
+        );
+      }
     }
     const notice = notices.join(" ");
     return notice && notice !== dismissedNotice() ? notice : null;
+  };
+  // profiles a local change can hand back to iris; policy ones would revert
+  const resettable = () => {
+    const health = engine.health();
+    return health ? health.outbound_blocked.filter((name) => !health.outbound_policy.includes(name)) : [];
+  };
+  const [resetting, setResetting] = createSignal(false);
+  const [resetError, setResetError] = createSignal<string>();
+  const resetOutbound = async () => {
+    setResetting(true);
+    setResetError(undefined);
+    try {
+      await invoke("reset_outbound");
+      engine.refreshHealth();
+    } catch (error) {
+      setResetError(`Could not change Windows Firewall: ${String(error)}`);
+    }
+    setResetting(false);
   };
   const installService = async () => {
     setInstalling(true);
@@ -201,8 +225,13 @@ export function App() {
         {(notice) => (
           <div class="install-banner degraded" role="status">
             <Icon name="shield" />
-            <span>{notice()}</span>
+            <span>{resetError() ?? notice()}</span>
             <span class="grow" />
+            <Show when={resettable().length > 0}>
+              <button class="btn" onClick={resetOutbound} disabled={resetting()}>
+                Let Iris decide
+              </button>
+            </Show>
             <button class="btn" onClick={() => setDismissedNotice(notice())}>
               Dismiss
             </button>

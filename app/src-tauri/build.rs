@@ -46,6 +46,7 @@ fn main() {
         "reverse_dns",
         "install_service",
         "uninstall_service",
+        "reset_outbound",
         "rule_add",
         "rule_remove",
         "rule_set_enabled",

@@ -28,8 +28,9 @@ use std::net::IpAddr;
 /// v18 carries the firewall mode in every tick, adds a totals-only tick
 /// subscription, removes the unused connection list and prompt suppression
 /// messages, lets a prompt answer carry a host scope and a lifetime, adds
-/// the addresses a host name resolved to, adds the blocked-connection log, and
-/// lets an app's data quota slow it instead of blocking it.
+/// the addresses a host name resolved to, adds the blocked-connection log,
+/// lets an app's data quota slow it instead of blocking it, and reports which
+/// outbound-blocking firewall profiles group policy sets.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 /// conditions that quietly undermine the engine, for the UI to surface
@@ -40,6 +41,9 @@ pub struct Health {
     /// windows firewall profiles that block outbound by default, which
     /// overrides iris's allows
     pub outbound_blocked: Vec<String>,
+    /// the ones among them where group policy sets the block, which iris
+    /// cannot lift
+    pub outbound_policy: Vec<String>,
 }
 
 /// what the UI shows for one installed plugin: its declared identity and

@@ -12,6 +12,9 @@ use iris_core::{AlertKind, AppId, AppSample, RateCap};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+#[cfg(windows)]
+pub(crate) use platform::run as powershell;
+
 fn caps_path() -> PathBuf {
     crate::paths::rules_file().with_file_name("caps.json")
 }
@@ -209,7 +212,7 @@ mod platform {
 
     /// run a powershell snippet whose inputs arrive as environment variables,
     /// so a path never needs quoting into the script text
-    fn run(script: &str, env: &[(&str, String)]) -> anyhow::Result<()> {
+    pub(crate) fn run(script: &str, env: &[(&str, String)]) -> anyhow::Result<()> {
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         let shell = format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe");
         let mut child = Command::new(shell)

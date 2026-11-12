@@ -57,6 +57,9 @@ fn main() -> anyhow::Result<()> {
         if has("--clear-firewall") {
             return install::clear_firewall();
         }
+        if has("--reset-outbound") {
+            return install::reset_outbound();
+        }
     }
     #[cfg(target_os = "linux")]
     {

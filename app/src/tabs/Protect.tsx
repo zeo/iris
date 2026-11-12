@@ -18,6 +18,7 @@ import {
   coversWholeApp,
   describeLifetime,
   describeScope,
+  downloadLimitsSupported,
   isPermanent,
   refreshRules,
   removeRule,
@@ -418,11 +419,11 @@ export function Protect() {
               <div class="seg" role="group" aria-label="action">
                 <button classList={{ on: action() === "block" }} aria-pressed={action() === "block"} onClick={() => setAction("block")}>block</button>
                 <button classList={{ on: action() === "allow" }} aria-pressed={action() === "allow"} onClick={() => setAction("allow")}>allow</button>
-                <button classList={{ on: action() === "limit" }} aria-pressed={action() === "limit"} onClick={() => setAction("limit")} title="Cap how fast the app can upload or download">limit</button>
+                <button classList={{ on: action() === "limit" }} aria-pressed={action() === "limit"} onClick={() => { setAction("limit"); if (!downloadLimitsSupported) setDirection("outbound"); }} title="Cap how fast the app can upload or download">limit</button>
               </div>
               <div class="seg" role="group" aria-label="direction">
                 <button classList={{ on: direction() === "outbound" }} aria-pressed={direction() === "outbound"} onClick={() => setDirection("outbound")}>out</button>
-                <button classList={{ on: direction() === "inbound" }} aria-pressed={direction() === "inbound"} onClick={() => setDirection("inbound")}>in</button>
+                <button classList={{ on: direction() === "inbound" }} aria-pressed={direction() === "inbound"} disabled={action() === "limit" && !downloadLimitsSupported} onClick={() => setDirection("inbound")}>in</button>
               </div>
             </div>
             <button class="iconbtn" onClick={() => setAdding(false)} aria-label="close"><Icon name="x" /></button>
@@ -432,7 +433,12 @@ export function Protect() {
               <label class="field">
                 <input aria-label="Speed limit in KB/s" inputMode="numeric" value={limitKb()} onInput={(event) => setLimitKb(event.currentTarget.value)} />
               </label>
-              <small class="picker-note">KB/s. Out limits upload from the app's next connection on. In limits download within a second, and steps aside while a game's anti-cheat runs.</small>
+              <small class="picker-note">
+                KB/s. Out limits upload from the app's next connection on.
+                {downloadLimitsSupported
+                  ? " In limits download within a second, and steps aside while a game's anti-cheat runs."
+                  : " Download limits are only available on Windows."}
+              </small>
             </div>
           </Show>
           <div class="picker-scope" classList={{ hidden: action() === "limit" }}>

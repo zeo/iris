@@ -114,6 +114,9 @@ export async function refreshCaps(): Promise<void> {
   }
 }
 
+/// the engine paces downloads only through the Windows driver; the UI and engine share a machine
+export const downloadLimitsSupported = navigator.userAgent.includes("Windows");
+
 /// cap an app's upload and download in bytes per second, lifting each with null
 export async function setCap(path: string, upBytesPerSec: number | null, downBytesPerSec: number | null): Promise<void> {
   try {

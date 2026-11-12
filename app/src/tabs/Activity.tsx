@@ -4,7 +4,7 @@ import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import { ConnDetails } from "../components/ConnDetails";
 import { engine, type AppSample, type Conn } from "../lib/engine";
-import { blockApp, caps, isBlocked, setCap, unblockApp } from "../lib/rules";
+import { blockApp, caps, downloadLimitsSupported, isBlocked, setCap, unblockApp } from "../lib/rules";
 import { formatGb, GB, quota, setQuota, type QuotaPeriod } from "../lib/quota";
 import { persisted } from "../lib/persist";
 import { bytes, rate } from "../lib/format";
@@ -300,6 +300,9 @@ function useInlineEdit() {
 }
 
 function LimitCell(props: { app: string; name: string; dir: "down" | "up"; onError: (message: string) => void }) {
+  if (props.dir === "down" && !downloadLimitsSupported) {
+    return <td class="num" title="Download limits are only available on Windows">n/a</td>;
+  }
   const edit = useInlineEdit();
   let input!: HTMLInputElement;
   const cap = () => caps().find((c) => pathKey(c.app) === pathKey(props.app));

@@ -121,12 +121,17 @@ impl Wfp {
                 trusted_filters: Vec::new(),
                 lockdown_filters: Vec::new(),
             };
-            wfp.ensure_objects()?;
+            // uninstall and --clear-firewall open the engine only to remove our
+            // objects, so a failed add must not stop them; reset reports it at startup
+            if let Err(error) = wfp.ensure_objects() {
+                tracing::warn!("{error}");
+            }
             Ok(wfp)
         }
     }
 
     unsafe fn ensure_objects(&mut self) -> EngineResult<()> {
+        const ALREADY_EXISTS: u32 = 0x8032_0009;
         let mut name = wide("Iris");
         let mut provider: FWPM_PROVIDER0 = std::mem::zeroed();
         provider.providerKey = IRIS_PROVIDER;
@@ -134,9 +139,12 @@ impl Wfp {
             name: PWSTR(name.as_mut_ptr()),
             description: PWSTR(name.as_mut_ptr()),
         };
-        // FWPM_E_ALREADY_EXISTS is fine on a warm start
+        // FWP_E_ALREADY_EXISTS is fine on a warm start
         provider.flags = FWPM_PROVIDER_FLAG_PERSISTENT;
-        let _ = FwpmProviderAdd0(self.engine, &provider, None);
+        let rc = FwpmProviderAdd0(self.engine, &provider, None);
+        if !ok(rc) && rc != ALREADY_EXISTS {
+            return Err(EngineError::Os(format!("FwpmProviderAdd0 failed: {rc:#x}")));
+        }
 
         let mut sublayer: FWPM_SUBLAYER0 = std::mem::zeroed();
         sublayer.subLayerKey = IRIS_SUBLAYER;
@@ -149,7 +157,10 @@ impl Wfp {
         // persistent like the filters: a non-persistent sublayer rejects
         // persistent filter adds with FWP_E_LIFETIME_MISMATCH
         sublayer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT;
-        let _ = FwpmSubLayerAdd0(self.engine, &sublayer, None);
+        let rc = FwpmSubLayerAdd0(self.engine, &sublayer, None);
+        if !ok(rc) && rc != ALREADY_EXISTS {
+            return Err(EngineError::Os(format!("FwpmSubLayerAdd0 failed: {rc:#x}")));
+        }
         Ok(())
     }
 

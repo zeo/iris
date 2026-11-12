@@ -2865,9 +2865,31 @@ button.row.usage[aria-expanded="true"] {
 }
 .usage-host {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) min(240px, 30vw) 110px;
+  grid-template-columns: minmax(0, 1fr) min(240px, 30vw) 110px 52px;
   align-items: center;
   gap: var(--s3);
+}
+.usage-host .block-btn,
+.usage-blocked {
+  justify-self: end;
+}
+.usage-host:hover .block-btn,
+.usage-host:focus-within .block-btn {
+  opacity: 1;
+}
+.usage-host .block-btn:disabled {
+  opacity: 0;
+  cursor: default;
+}
+.usage-host:hover .block-btn:disabled {
+  opacity: 0.4;
+  color: var(--faint);
+  background: transparent;
+}
+.usage-blocked {
+  color: var(--err);
+  font-family: var(--mono);
+  font-size: var(--fz-cap);
 }
 .usage-host .name {
   overflow: hidden;

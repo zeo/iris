@@ -86,6 +86,42 @@ export function isBlocked(path: string): boolean {
   );
 }
 
+const blocksOnly = (rule: Rule, addr: string): boolean => {
+  const { remote, ports, protocol } = rule.scope ?? {};
+  return remote?.addr === addr && remote.prefix === (addr.includes(":") ? 128 : 32) && !ports && !protocol;
+};
+
+/// does each address have an enabled outbound block rule of its own for this app?
+export function blocksHosts(path: string, addresses: string[]): boolean {
+  const p = pathKey(path);
+  return (
+    addresses.length > 0 &&
+    addresses.every((addr) =>
+      rules().some(
+        (r) =>
+          r.enabled &&
+          r.rule.app === p &&
+          r.rule.direction === "outbound" &&
+          r.rule.action === "block" &&
+          !r.rule.profile &&
+          blocksOnly(r.rule, addr),
+      ),
+    )
+  );
+}
+
+/// one outbound block rule per address not blocked yet, so a name that resolved
+/// to several hosts is blocked at each
+export async function blockHosts(path: string, addresses: string[]): Promise<void> {
+  try {
+    for (const remote of addresses.filter((addr) => !blocksHosts(path, [addr]))) {
+      await invoke("rule_add", { path, direction: "outbound", action: "block", options: { remote } });
+    }
+  } finally {
+    await refreshRules();
+  }
+}
+
 // rule mutations are privileged and only accepted over the admin endpoint
 export async function addRule(
   path: string,

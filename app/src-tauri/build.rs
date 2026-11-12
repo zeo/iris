@@ -14,6 +14,7 @@ fn main() {
         "engine_health",
         "firewall_mode",
         "get_host_usage",
+        "host_addresses",
         "get_profiles",
         "list_caps",
         "set_cap",

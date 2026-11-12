@@ -57,9 +57,24 @@ pub fn lookup(map: &DnsMap, ip: &IpAddr) -> Option<String> {
     map.lock().ok()?.get(ip).cloned()
 }
 
+/// every address currently mapped to `host`, so a name the views show can be
+/// acted on by address. a linear scan, as the map is bounded
+pub fn addresses_of(map: &DnsMap, host: &str) -> Vec<IpAddr> {
+    let Ok(guard) = map.lock() else {
+        return Vec::new();
+    };
+    let mut addresses: Vec<IpAddr> = guard
+        .iter()
+        .filter(|(_, name)| name.eq_ignore_ascii_case(host))
+        .map(|(addr, _)| *addr)
+        .collect();
+    addresses.sort();
+    addresses
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{lookup, new_map, record_results};
+    use super::{addresses_of, lookup, new_map, record_results};
 
     #[test]
     fn a_full_map_keeps_the_newest_names() {
@@ -75,6 +90,18 @@ mod tests {
         );
         let len = map.lock().unwrap().len();
         assert!((4096..=8192).contains(&len), "map holds {len} names");
+    }
+
+    #[test]
+    fn a_name_lists_every_address_it_resolved_to() {
+        let map = new_map();
+        record_results(&map, "cdn.example", "type: 5 cname;203.0.113.9;::ffff:198.51.100.4;");
+        record_results(&map, "other.example", "192.0.2.1");
+        assert_eq!(
+            addresses_of(&map, "CDN.example"),
+            vec!["198.51.100.4".parse::<std::net::IpAddr>().unwrap(), "203.0.113.9".parse().unwrap()]
+        );
+        assert!(addresses_of(&map, "unknown.example").is_empty());
     }
 
     #[test]

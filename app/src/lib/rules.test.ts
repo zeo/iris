@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import { coversWholeApp, describeLifetime, describeScope, isBlocked, refreshRules } from "./rules";
+import { blockHosts, blocksHosts, coversWholeApp, describeLifetime, describeScope, isBlocked, refreshRules } from "./rules";
 
 const blockedRule = {
   id: 1,
@@ -49,5 +49,38 @@ describe("scoped rules", () => {
     expect(describeScope(blockedRule.rule)).toBe("all traffic");
     expect(describeLifetime({ ...scoped, lifetime: { kind: "until", at_ms: 90 * 60_000 } }, 0)).toBe("90 min left");
     expect(describeLifetime({ ...scoped, lifetime: { kind: "until_restart" } })).toBe("until restart");
+  });
+});
+
+describe("host blocks", () => {
+  const hostRule = (addr: string, prefix: number) => ({
+    ...blockedRule,
+    rule: { ...blockedRule.rule, scope: { remote: { addr, prefix } } },
+  });
+
+  beforeEach(async () => {
+    vi.stubGlobal("navigator", { userAgent: "X11; Linux x86_64" });
+    invoke.mockReset();
+    invoke.mockResolvedValue([hostRule("203.0.113.7", 32), hostRule("198.51.100.0", 24)]);
+    await refreshRules();
+  });
+
+  it("counts a host as blocked only by a rule for that one address", () => {
+    expect(blocksHosts("/opt/Foo/app", ["203.0.113.7"])).toBe(true);
+    expect(blocksHosts("/opt/Foo/app", ["203.0.113.7", "198.51.100.0"])).toBe(false);
+    expect(blocksHosts("/opt/Foo/app", [])).toBe(false);
+    expect(blocksHosts("/opt/Foo/other", ["203.0.113.7"])).toBe(false);
+  });
+
+  it("adds a block rule for each address not blocked yet", async () => {
+    invoke.mockClear();
+    await blockHosts("/opt/Foo/app", ["203.0.113.7", "2001:db8::7"]);
+    expect(invoke).toHaveBeenCalledWith("rule_add", {
+      path: "/opt/Foo/app",
+      direction: "outbound",
+      action: "block",
+      options: { remote: "2001:db8::7" },
+    });
+    expect(invoke.mock.calls.filter(([command]) => command === "rule_add")).toHaveLength(1);
   });
 });

@@ -45,7 +45,7 @@ pub use adapters::AdapterMap;
 #[cfg(target_os = "linux")]
 pub use conn::{kill_connection, ConnCounter};
 #[cfg(target_os = "linux")]
-pub use dns::{new_map, DnsMap};
+pub use dns::{addresses_of, new_map, DnsMap};
 #[cfg(target_os = "linux")]
 pub use egress::{AppPin, PluginNet};
 #[cfg(target_os = "linux")]

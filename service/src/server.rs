@@ -451,6 +451,16 @@ async fn handle(
                         .unwrap_or_default();
                         reply(&mut send, req, Reply::HostUsage(rows)).await?;
                     }
+                    ClientMessage::HostAddresses { req, host } => {
+                        #[cfg(has_platform)]
+                        let addresses = crate::platform::addresses_of(&engine.dns, &host);
+                        #[cfg(not(has_platform))]
+                        let addresses = {
+                            let _ = host;
+                            Vec::new()
+                        };
+                        reply(&mut send, req, Reply::HostAddresses(addresses)).await?;
+                    }
                     ClientMessage::ListAlerts { req, unacked_only } => {
                         let store = store.clone();
                         let list = tokio::task::spawn_blocking(move || {
@@ -1106,6 +1116,7 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::GetEnrichment { req, .. }
         | ClientMessage::GetAdapterUsage { req, .. }
         | ClientMessage::GetHostUsage { req, .. }
+        | ClientMessage::HostAddresses { req, .. }
         | ClientMessage::ListPlugins { req }
         | ClientMessage::GrantPlugin { req, .. }
         | ClientMessage::SetPluginEnabled { req, .. }

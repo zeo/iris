@@ -29,6 +29,7 @@
     "allow-list-alerts",
     "allow-firewall-mode",
     "allow-get-host-usage",
+    "allow-host-addresses",
     "allow-get-profiles",
     "allow-list-caps",
     "allow-set-cap",

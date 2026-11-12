@@ -1,4 +1,4 @@
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Icon } from "../components/Icon";
@@ -8,6 +8,7 @@ import { persisted } from "../lib/persist";
 import { bytes } from "../lib/format";
 import { fileName } from "../lib/path";
 import { formatGb, quota } from "../lib/quota";
+import { blockHosts, blocksHosts, refreshRules } from "../lib/rules";
 
 // quote a CSV field when it holds a comma, quote, or newline
 function csvCell(v: string | number): string {
@@ -37,6 +38,9 @@ interface AdapterUsageRow {
   kind: AdapterKind;
   bytes: { sent: number; recv: number };
 }
+
+// history names a host by the address itself when no lookup named it
+const isAddress = (host: string) => host.includes(":") || /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
 
 function since(span: Span): number {
   const now = Date.now();
@@ -111,6 +115,49 @@ export function Usage() {
     },
   );
   const HOSTS_SHOWN = 12;
+  createEffect(() => {
+    if (engine.online()) void refreshRules();
+  });
+  const [blockErr, setBlockErr] = createSignal("");
+
+  const HostBlock = (props: { app: string; host: string }) => {
+    // a name can only be blocked at the addresses this session saw it resolve to
+    const [addresses] = createResource(
+      () => engine.online() && props.host,
+      async (host): Promise<string[]> =>
+        isAddress(host) ? [host] : await invoke<string[]>("host_addresses", { host }).catch(() => []),
+    );
+    const [busy, setBusy] = createSignal(false);
+    const known = () => addresses() ?? [];
+    const block = async () => {
+      setBusy(true);
+      setBlockErr("");
+      try {
+        await blockHosts(props.app, known());
+      } catch (error) {
+        setBlockErr(`Could not block ${props.host}: ${String(error)}`);
+      } finally {
+        setBusy(false);
+      }
+    };
+    return (
+      <Show
+        when={!blocksHosts(props.app, known())}
+        fallback={<span class="usage-blocked" title="Unblock it from the Protect tab">blocked</span>}
+      >
+        <button
+          class="block-btn"
+          title={known().length ? "block" : "No address is known for this host yet"}
+          aria-label={`Block ${props.host}`}
+          aria-busy={busy()}
+          disabled={busy() || !known().length}
+          onClick={() => void block()}
+        >
+          <Icon name="block" size={13} />
+        </button>
+      </Show>
+    );
+  };
   const hostPeak = () => (hosts() ?? []).reduce((m, h) => Math.max(m, h.bytes.sent + h.bytes.recv), 1);
 
   const list = () => totals() ?? [];
@@ -168,6 +215,9 @@ export function Usage() {
       </div>
       <Show when={exportErr()}>
         <div class="tool-err">{exportErr()}</div>
+      </Show>
+      <Show when={blockErr()}>
+        <div class="tool-err" role="alert">{blockErr()}</div>
       </Show>
 
       <Show when={quota.plan()}>
@@ -263,6 +313,7 @@ export function Usage() {
                             <span class="dn">↓ {bytes(h.bytes.recv)}</span>
                             <span class="up">↑ {bytes(h.bytes.sent)}</span>
                           </span>
+                          <HostBlock app={a.app} host={h.host} />
                         </div>
                       )}
                     </For>

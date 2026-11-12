@@ -106,6 +106,7 @@ pub fn run() {
             prompt::dismiss_info_card,
             rulectl::firewall_mode,
             ipc::get_host_usage,
+            ipc::host_addresses,
             ipc::get_profiles,
             ipc::list_caps,
             ipc::list_quotas,

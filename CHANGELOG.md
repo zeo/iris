@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 - A connection prompt can be answered for just the host it names, and for 1 hour or until the engine restarts. Other hosts and expired answers prompt again.
+- Usage can block an app from one host in its history. A host name is blocked at each address it resolved to since the engine started, and the row shows it as blocked.
 
 ### Changed
 - The wire protocol is now version 18. The setup updates the app and engine together.

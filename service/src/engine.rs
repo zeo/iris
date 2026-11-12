@@ -7,6 +7,9 @@ use tokio::sync::broadcast;
 #[derive(Clone)]
 pub struct Engine {
     events: broadcast::Sender<ServerMessage>,
+    /// the host names the monitor learned from DNS, which clients can query
+    #[cfg(has_platform)]
+    pub dns: crate::platform::DnsMap,
 }
 
 impl Engine {
@@ -14,7 +17,11 @@ impl Engine {
         // a generous buffer so a briefly-busy client that falls behind drops old
         // ticks (Lagged) rather than stalling the publisher
         let (events, _) = broadcast::channel(512);
-        Engine { events }
+        Engine {
+            events,
+            #[cfg(has_platform)]
+            dns: crate::platform::new_map(),
+        }
     }
 
     /// a receiver for a newly connected client

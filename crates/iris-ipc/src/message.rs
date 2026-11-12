@@ -4,6 +4,7 @@ use iris_core::{
     UsageQuery,
 };
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 
 /// bump when the wire shape changes incompatibly. the UI refuses to drive a
 /// service whose protocol differs, so a partial update never mismatches schemas.
@@ -26,7 +27,8 @@ use serde::{Deserialize, Serialize};
 /// v17 adds per-connection rates.
 /// v18 carries the firewall mode in every tick, adds a totals-only tick
 /// subscription, removes the unused connection list and prompt suppression
-/// messages, and lets a prompt answer carry a host scope and a lifetime.
+/// messages, lets a prompt answer carry a host scope and a lifetime, and adds
+/// the addresses a host name resolved to.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 /// conditions that quietly undermine the engine, for the UI to surface
@@ -195,6 +197,11 @@ pub enum ClientMessage {
     Ping {
         req: u64,
     },
+    /// the addresses the engine has seen `host` resolve to, from its DNS map
+    HostAddresses {
+        req: u64,
+        host: String,
+    },
     /// traffic per app and remote host over a window, for one app or all
     GetHostUsage {
         req: u64,
@@ -311,4 +318,5 @@ pub enum Reply {
     Health(Health),
     /// per-host totals, biggest first
     HostUsage(Vec<HostUsage>),
+    HostAddresses(Vec<IpAddr>),
 }

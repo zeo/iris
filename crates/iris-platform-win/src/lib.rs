@@ -35,7 +35,7 @@ pub use adapters::AdapterMap;
 #[cfg(windows)]
 pub use conn::{kill_connection, ConnCounter};
 #[cfg(windows)]
-pub use dns::{new_map, DnsMap};
+pub use dns::{addresses_of, new_map, DnsMap};
 #[cfg(windows)]
 pub use egress::{AppPin, PluginNet};
 #[cfg(windows)]

@@ -375,7 +375,7 @@ pub fn spawn(
     let agg = Arc::new(Mutex::new(Aggregator::new(Instant::now())));
 
     #[cfg(has_platform)]
-    let dns = crate::platform::new_map();
+    let dns = engine.dns.clone();
 
     #[cfg(has_platform)]
     let byte_monitor = match crate::platform::Monitor::start(agg.clone(), dns.clone()) {

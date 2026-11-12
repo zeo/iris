@@ -73,6 +73,7 @@ pub enum EngineCmd {
     GetUsage(UsageQuery),
     GetAdapterUsage(u64, u64),
     GetHostUsage(Option<String>, u64, u64),
+    HostAddresses(String),
     ListAlerts(bool),
     ListPromptAlerts,
     AckAlert(i64),
@@ -257,6 +258,15 @@ pub async fn get_host_usage(
 ) -> Result<Vec<iris_core::HostUsage>, String> {
     match dispatch(&app, EngineCmd::GetHostUsage(path, from_ms, to_ms)).await? {
         Reply::HostUsage(rows) => Ok(rows),
+        Reply::Error(error) => Err(error),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn host_addresses(app: AppHandle, host: String) -> Result<Vec<String>, String> {
+    match dispatch(&app, EngineCmd::HostAddresses(host)).await? {
+        Reply::HostAddresses(addresses) => Ok(addresses.iter().map(ToString::to_string).collect()),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
@@ -660,6 +670,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                         from_ms,
                         to_ms,
                     },
+                    EngineCmd::HostAddresses(host) => ClientMessage::HostAddresses { req, host },
                     EngineCmd::GetAdapterUsage(from_ms, to_ms) =>
                         ClientMessage::GetAdapterUsage { req, from_ms, to_ms },
                     EngineCmd::ListAlerts(unacked_only) => ClientMessage::ListAlerts { req, unacked_only },

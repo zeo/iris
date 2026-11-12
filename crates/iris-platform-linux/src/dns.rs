@@ -63,6 +63,21 @@ pub fn lookup(map: &DnsMap, ip: &IpAddr) -> Option<String> {
     map.names.lock().ok()?.get(ip).cloned()
 }
 
+/// every address currently mapped to `host`, so a name the views show can be
+/// acted on by address. a linear scan, as the map is bounded
+pub fn addresses_of(map: &DnsMap, host: &str) -> Vec<IpAddr> {
+    let Ok(guard) = map.names.lock() else {
+        return Vec::new();
+    };
+    let mut addresses: Vec<IpAddr> = guard
+        .iter()
+        .filter(|(_, name)| name.eq_ignore_ascii_case(host))
+        .map(|(addr, _)| *addr)
+        .collect();
+    addresses.sort();
+    addresses
+}
+
 pub(crate) fn record_sockets(map: &DnsMap, socks: &[SockInfo], owners: &HashMap<u64, u32>) {
     if let Ok(mut snapshot) = map.sockets.write() {
         *snapshot = Some(SocketSnapshot {

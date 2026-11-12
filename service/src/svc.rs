@@ -129,7 +129,7 @@ fn run_service() -> anyhow::Result<()> {
                 tracing::error!("admin serve loop ended: {r:?}");
                 true
             }
-            r = crate::watch_rules(rules) => {
+            r = crate::watch_rules(rules.clone()) => {
                 tracing::error!("firewall watcher ended: {r:?}");
                 true
             }
@@ -139,6 +139,13 @@ fn run_service() -> anyhow::Result<()> {
             }
         }
     });
+
+    // a loaded packet driver must not outlive the engine; saved caps come back
+    // at the next start
+    rules
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .release_download_caps();
 
     // report a service-specific error on failure so the SCM recovery policy
     // (restart with backoff, configured at install) actually engages; a clean

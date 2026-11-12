@@ -348,6 +348,12 @@ impl RuleStore {
         self.caps.follow_flows(apps)
     }
 
+    /// unload the download driver before the engine exits
+    #[cfg(windows)]
+    pub fn release_download_caps(&mut self) {
+        self.caps.release_downloads();
+    }
+
     pub fn profile_state(&self) -> ProfileState {
         ProfileState {
             profiles: self.profiles.profiles.clone(),

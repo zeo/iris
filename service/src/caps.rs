@@ -63,6 +63,11 @@ impl CapStore {
         self.backend.follow_flows(apps)
     }
 
+    #[cfg(windows)]
+    pub fn release_downloads(&mut self) {
+        self.backend.release_downloads();
+    }
+
     /// cap an app's upload and download, lifting each with none. returns the
     /// mark its flows must now carry, if the platform uses one
     pub fn set(
@@ -220,6 +225,8 @@ mod platform {
 
         pub fn clear(&mut self) -> anyhow::Result<()> {
             self.shape(HashMap::new())?;
+            // a driver left loaded by an earlier run has no handle here to drop
+            divert::stop_driver();
             run(
                 "Get-NetQosPolicy -PolicyStore ActiveStore -ErrorAction SilentlyContinue | \
                  Where-Object Name -like 'iris-cap-*' | Remove-NetQosPolicy -Confirm:$false",
@@ -316,6 +323,11 @@ mod platform {
             if self.shaper.take().is_some() {
                 divert::stop_driver();
             }
+        }
+
+        /// drop the download shaper so the driver unloads, keeping the saved caps
+        pub fn release_downloads(&mut self) {
+            self.stop();
         }
     }
 

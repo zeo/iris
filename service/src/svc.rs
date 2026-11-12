@@ -73,6 +73,7 @@ fn run_service() -> anyhow::Result<()> {
     ))?;
 
     let initialized = (|| -> anyhow::Result<_> {
+        crate::paths::ensure_data_dir()?;
         std::fs::create_dir_all(crate::paths::plugins_dir())?;
         crate::paths::secure_state()?;
         let rt = crate::engine_runtime()?;

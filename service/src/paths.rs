@@ -93,16 +93,74 @@ pub fn secure_state() -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-pub fn secure_state() -> std::io::Result<()> {
-    // O:SY/G:SY cannot be set by an elevated administrator (only the current
-    // owner or SYSTEM may reassign ownership), so ownership is left as-is and
-    // the protected DACL carries the guarantee.
-    const STATE_ROOT: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;GX;;;RC)";
-    const PRIVATE: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
-    const PLUGINS: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;RC)";
+const STATE_ROOT: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;GX;;;RC)";
+#[cfg(windows)]
+const PRIVATE: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+#[cfg(windows)]
+const PLUGINS: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;RC)";
 
+/// make sure the state root exists and is ours before anything is written
+/// under it. a missing root is created with its protected DACL already in place,
+/// so there is no moment where the inherited ProgramData ACL lets users add to it
+#[cfg(windows)]
+pub fn ensure_data_dir() -> std::io::Result<()> {
+    let root = data_dir();
+    match std::fs::symlink_metadata(&root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => create_secure_dir(&root)?,
+        Err(error) => return Err(error),
+        Ok(_) => {}
+    }
+    check_owned(&root)
+}
+
+#[cfg(not(windows))]
+pub fn ensure_data_dir() -> std::io::Result<()> {
+    std::fs::create_dir_all(data_dir())
+}
+
+#[cfg(windows)]
+fn create_secure_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LocalFree, ERROR_ALREADY_EXISTS, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let sddl: Vec<u16> = STATE_ROOT.encode_utf16().chain(Some(0)).collect();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            1,
+            &mut descriptor,
+            None,
+        )
+        .map_err(std::io::Error::other)?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: false.into(),
+        };
+        let created = CreateDirectoryW(PCWSTR(path.as_ptr()), Some(&attributes));
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        match created {
+            // someone created it in between; check_owned judges what they made
+            Err(error) if error.code() == ERROR_ALREADY_EXISTS.to_hresult() => Ok(()),
+            result => result.map_err(std::io::Error::other),
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn secure_state() -> std::io::Result<()> {
+    // an owner can always rewrite a DACL, so the protected DACL only holds when
+    // SYSTEM or Administrators own every entry; ensure_data_dir and set_tree_acl
+    // refuse anything else instead of trusting it
     let root = data_dir();
     let plugins = plugins_dir();
+    ensure_data_dir()?;
     set_acl(&root, STATE_ROOT)?;
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;
@@ -129,6 +187,7 @@ fn set_tree_acl(path: &std::path::Path, sddl: &str) -> std::io::Result<()> {
             ),
         ));
     }
+    check_owned(path)?;
     if metadata.is_file() && has_multiple_links(path)? {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -143,6 +202,67 @@ fn set_tree_acl(path: &std::path::Path, sddl: &str) -> std::io::Result<()> {
         for entry in std::fs::read_dir(path)? {
             set_tree_acl(&entry?.path(), sddl)?;
         }
+    }
+    Ok(())
+}
+
+/// SYSTEM and the Administrators group are the only owners the state may have:
+/// an owner can always rewrite the DACL, so any other owner defeats it
+#[cfg(windows)]
+fn trusted_owner(sid: &str) -> bool {
+    matches!(sid, "S-1-5-18" | "S-1-5-32-544")
+}
+
+/// refuse a path that is a reparse point or that someone other than SYSTEM or
+/// Administrators owns
+#[cfg(windows)]
+fn check_owned(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+    use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
+
+    if std::fs::symlink_metadata(path)?.file_attributes() & 0x400 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing reparse point in protected state: {}",
+                path.display()
+            ),
+        ));
+    }
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut owner = PSID::default();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    let sid = unsafe {
+        let code = GetNamedSecurityInfoW(
+            PCWSTR(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            None,
+            None,
+            &mut descriptor,
+        );
+        if code != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(code.0 as i32));
+        }
+        // the owner sid lives inside the descriptor, so read it before freeing
+        let sid = crate::grant::sid_to_string(owner);
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        sid?
+    };
+    if !trusted_owner(&sid) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is owned by {sid}, not SYSTEM or Administrators; delete it and start the service again",
+                path.display()
+            ),
+        ));
     }
     Ok(())
 }
@@ -286,4 +406,37 @@ fn chown(path: &std::path::Path, uid: u32, gid: u32) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::{check_owned, trusted_owner};
+
+    #[test]
+    fn only_system_and_administrators_may_own_the_state() {
+        assert!(trusted_owner("S-1-5-18"));
+        assert!(trusted_owner("S-1-5-32-544"));
+        assert!(!trusted_owner("S-1-5-32-545"));
+        assert!(!trusted_owner("S-1-5-21-1-2-3-1001"));
+        assert!(!trusted_owner("S-1-1-0"));
+    }
+
+    #[test]
+    fn a_junction_is_refused() {
+        let base = std::env::temp_dir().join(format!("iris-owner-test-{}", std::process::id()));
+        let target = base.join("target");
+        let link = base.join("link");
+        std::fs::create_dir_all(&target).unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let error = check_owned(&link).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }

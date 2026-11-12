@@ -135,7 +135,7 @@ impl std::io::Write for RollingLog {
 fn init_logging(to_file: bool) {
     let filter =
         || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    if to_file {
+    if to_file && paths::ensure_data_dir().is_ok() {
         let dir = paths::log_dir();
         let _ = std::fs::create_dir_all(&dir);
         if let Ok(log) = RollingLog::open(dir.join("engine.log")) {
@@ -200,6 +200,7 @@ pub(crate) fn open_rules(store: &Arc<Mutex<Store>>) -> anyhow::Result<Arc<Mutex<
 pub(crate) async fn run_engine() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     paths::ensure_runtime_dirs()?;
+    paths::ensure_data_dir()?;
     std::fs::create_dir_all(paths::plugins_dir())?;
     paths::secure_state()?;
     let engine = Engine::new();

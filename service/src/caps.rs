@@ -37,6 +37,12 @@ impl CapStore {
         CapStore { caps, backend }
     }
 
+    /// no caps and an idle backend, for tests that must not touch the os shaper
+    #[cfg(test)]
+    pub fn empty() -> CapStore {
+        CapStore { caps: Vec::new(), backend: platform::Backend::default() }
+    }
+
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     /// the flow mark each capped app's connections must carry; empty where the
     /// os shaper keys on the app itself

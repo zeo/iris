@@ -11,6 +11,11 @@ use iris_core::{
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[cfg(all(has_platform, not(test)))]
+use crate::platform::Wfp;
+#[cfg(all(has_platform, test))]
+use fake::Wfp;
+
 #[derive(Serialize, Deserialize)]
 struct Persisted {
     /// stable rule id, persisted so a UI-cached id still targets the right rule
@@ -59,7 +64,7 @@ fn back_up_corrupt(path: &Path) {
 
 pub struct RuleStore {
     #[cfg(has_platform)]
-    wfp: Option<crate::platform::Wfp>,
+    wfp: Option<Wfp>,
     rules: Vec<StoredRule>,
     next_id: i64,
     path: PathBuf,
@@ -72,8 +77,8 @@ pub struct RuleStore {
     quotas: crate::quota::QuotaBook,
 }
 
-fn mode_path() -> PathBuf {
-    crate::paths::rules_file().with_file_name("mode.json")
+fn mode_path(rules: &Path) -> PathBuf {
+    rules.with_file_name("mode.json")
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -84,12 +89,12 @@ struct SavedProfiles {
     manual: Option<String>,
 }
 
-fn profiles_path() -> PathBuf {
-    crate::paths::rules_file().with_file_name("profiles.json")
+fn profiles_path(rules: &Path) -> PathBuf {
+    rules.with_file_name("profiles.json")
 }
 
-fn load_profiles() -> SavedProfiles {
-    std::fs::read_to_string(profiles_path())
+fn load_profiles(rules: &Path) -> SavedProfiles {
+    std::fs::read_to_string(profiles_path(rules))
         .ok()
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default()
@@ -107,19 +112,19 @@ pub(crate) fn write_atomic(path: &Path, json: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(has_platform)]
+#[cfg(all(has_platform, not(test)))]
 fn current_network() -> Option<NetworkIdentity> {
     crate::platform::current_network()
 }
 
-#[cfg(not(has_platform))]
+#[cfg(any(not(has_platform), test))]
 fn current_network() -> Option<NetworkIdentity> {
     None
 }
 
 /// the saved mode, or the ask-first default when none was saved or it is unreadable
-fn load_mode() -> FirewallMode {
-    std::fs::read_to_string(mode_path())
+fn load_mode(rules: &Path) -> FirewallMode {
+    std::fs::read_to_string(mode_path(rules))
         .ok()
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default()
@@ -127,11 +132,21 @@ fn load_mode() -> FirewallMode {
 
 impl RuleStore {
     pub fn new() -> anyhow::Result<Self> {
-        let path = store_path();
+        Self::open_at(store_path(), crate::caps::CapStore::open, crate::quota::QuotaBook::open)
+    }
+
+    /// load the rules file at `path`, with its mode and profile files beside
+    /// it. caps and quotas come from the given openers, called after the rules
+    /// are in force, so tests can pass ones that touch nothing on the machine
+    fn open_at(
+        path: PathBuf,
+        open_caps: fn() -> crate::caps::CapStore,
+        open_quotas: fn() -> crate::quota::QuotaBook,
+    ) -> anyhow::Result<Self> {
         let loaded = load_persisted(&path);
 
         #[cfg(has_platform)]
-        let mut wfp = Some(crate::platform::Wfp::open()?);
+        let mut wfp = Some(Wfp::open()?);
 
         // a corrupt file is the one case we must not reset on: we cannot know the
         // intended rules, so leaving the last-good filters enforcing and starting
@@ -164,7 +179,7 @@ impl RuleStore {
         for p in &persisted {
             next_id = next_id.max(p.id + 1);
         }
-        let profiles = load_profiles();
+        let profiles = load_profiles(&path);
         let network = current_network();
         let active = active_profile(&profiles.profiles, profiles.manual.as_deref(), network.as_ref())
             .map(|profile| profile.name.clone());
@@ -215,18 +230,19 @@ impl RuleStore {
             });
         }
 
+        let mode = load_mode(&path);
         let store = RuleStore {
             #[cfg(has_platform)]
             wfp,
             rules,
             next_id,
             path,
-            mode: load_mode(),
+            mode,
             profiles,
             network,
             active,
-            caps: crate::caps::CapStore::open(),
-            quotas: crate::quota::QuotaBook::open(),
+            caps: open_caps(),
+            quotas: open_quotas(),
         };
         #[cfg(target_os = "linux")]
         if let Some(wfp) = store.wfp.as_ref() {
@@ -259,7 +275,7 @@ impl RuleStore {
     pub fn set_mode(&mut self, mode: FirewallMode) -> anyhow::Result<()> {
         self.enforce_mode(effective_mode(mode, self.active_profile()))?;
         self.mode = mode;
-        write_atomic(&mode_path(), &serde_json::to_vec(&mode)?)
+        write_atomic(&mode_path(&self.path), &serde_json::to_vec(&mode)?)
     }
 
     /// bring the platform in line with the saved mode; run once at startup
@@ -376,7 +392,7 @@ impl RuleStore {
             }
         }
         let saved = SavedProfiles { profiles, manual };
-        write_atomic(&profiles_path(), &serde_json::to_vec_pretty(&saved)?)?;
+        write_atomic(&profiles_path(&self.path), &serde_json::to_vec_pretty(&saved)?)?;
         self.profiles = saved;
         self.settle_profile()
     }
@@ -516,7 +532,7 @@ impl RuleStore {
     pub fn enforcement_healthy(&self) -> bool {
         self.wfp
             .as_ref()
-            .is_some_and(crate::platform::Wfp::is_healthy)
+            .is_some_and(Wfp::is_healthy)
     }
 
     /// the stream of connections held or denied pending a user decision. on
@@ -531,13 +547,13 @@ impl RuleStore {
         {
             self.wfp
                 .as_mut()
-                .and_then(crate::platform::Wfp::take_pending_receiver)
+                .and_then(Wfp::take_pending_receiver)
         }
         #[cfg(windows)]
         {
             self.wfp
                 .as_mut()
-                .and_then(crate::platform::Wfp::take_denied_receiver)
+                .and_then(Wfp::take_denied_receiver)
         }
     }
 
@@ -556,7 +572,7 @@ impl RuleStore {
         {
             self.wfp
                 .as_ref()
-                .is_some_and(crate::platform::Wfp::ask_mode_active)
+                .is_some_and(Wfp::ask_mode_active)
         }
     }
 
@@ -699,7 +715,7 @@ impl RuleStore {
 }
 
 #[cfg(has_platform)]
-fn apply(wfp: Option<&mut crate::platform::Wfp>, rule: &Rule) -> iris_core::EngineResult<Vec<u64>> {
+fn apply(wfp: Option<&mut Wfp>, rule: &Rule) -> iris_core::EngineResult<Vec<u64>> {
     match wfp {
         Some(w) => w.apply(rule.app.as_str(), rule.direction, rule.action, &rule.scope),
         None => Err(iris_core::EngineError::NotInitialized),
@@ -719,4 +735,287 @@ fn now_ms() -> u64 {
 
 fn store_path() -> PathBuf {
     crate::paths::rules_file()
+}
+
+#[cfg(all(test, has_platform))]
+mod fake {
+    use iris_core::{Direction, EngineError, EngineResult, RuleAction, RuleScope};
+    use std::collections::BTreeSet;
+
+    /// the platform firewall as the rule store sees it, kept in memory: it
+    /// hands out filter ids, tracks which are live, and treats an app path
+    /// containing "missing" as gone from disk
+    #[derive(Default)]
+    pub struct Wfp {
+        next: u64,
+        pub live: BTreeSet<u64>,
+        #[cfg(windows)]
+        ask: bool,
+        #[cfg(target_os = "linux")]
+        mode: std::cell::Cell<iris_core::FirewallMode>,
+    }
+
+    impl Wfp {
+        pub fn open() -> EngineResult<Wfp> {
+            Ok(Wfp::default())
+        }
+
+        pub fn reset(&mut self) -> EngineResult<()> {
+            self.live.clear();
+            Ok(())
+        }
+
+        pub fn apply(
+            &mut self,
+            path: &str,
+            _direction: Direction,
+            _action: RuleAction,
+            _scope: &RuleScope,
+        ) -> EngineResult<Vec<u64>> {
+            if path.contains("missing") {
+                return Err(EngineError::NotFound(path.to_string()));
+            }
+            self.next += 1;
+            self.live.insert(self.next);
+            Ok(vec![self.next])
+        }
+
+        pub fn remove(&mut self, filter_ids: &[u64]) -> EngineResult<()> {
+            for id in filter_ids {
+                self.live.remove(id);
+            }
+            Ok(())
+        }
+
+        #[cfg(windows)]
+        pub fn set_ask_mode(&mut self, enabled: bool) -> EngineResult<()> {
+            self.ask = enabled;
+            Ok(())
+        }
+
+        #[cfg(windows)]
+        pub fn set_lockdown(&mut self, _enabled: bool) -> EngineResult<()> {
+            Ok(())
+        }
+
+        #[cfg(windows)]
+        pub fn ask_mode_active(&self) -> bool {
+            self.ask
+        }
+
+        #[cfg(windows)]
+        pub fn take_denied_receiver(
+            &mut self,
+        ) -> Option<std::sync::mpsc::Receiver<crate::platform::PendingConnection>> {
+            None
+        }
+
+        #[cfg(windows)]
+        pub fn trust_apps(&mut self, _paths: &[String]) {}
+
+        #[cfg(target_os = "linux")]
+        pub fn set_mode(&self, mode: iris_core::FirewallMode) {
+            self.mode.set(mode);
+        }
+
+        #[cfg(target_os = "linux")]
+        pub fn mode(&self) -> iris_core::FirewallMode {
+            self.mode.get()
+        }
+
+        #[cfg(target_os = "linux")]
+        pub fn is_healthy(&self) -> bool {
+            true
+        }
+
+        #[cfg(target_os = "linux")]
+        pub fn take_pending_receiver(
+            &mut self,
+        ) -> Option<std::sync::mpsc::Receiver<crate::platform::PendingConnection>> {
+            None
+        }
+
+        #[cfg(target_os = "linux")]
+        pub fn set_cap_mark(&self, _path: &str, _mark: Option<u32>) {}
+
+        #[cfg(target_os = "linux")]
+        pub fn trust_apps(&self, _paths: &[String]) {}
+
+        #[cfg(target_os = "linux")]
+        pub fn forget_app(&self, _path: &str) {}
+    }
+}
+
+#[cfg(all(test, has_platform))]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("iris-rules-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn open(dir: &Path) -> RuleStore {
+        RuleStore::open_at(dir.join("rules.json"), crate::caps::CapStore::empty, crate::quota::QuotaBook::default)
+            .unwrap()
+    }
+
+    fn rule(path: &str) -> Rule {
+        Rule {
+            app: AppId::from_path(path),
+            direction: Direction::Outbound,
+            action: RuleAction::Allow,
+            label: None,
+            scope: RuleScope::default(),
+            lifetime: RuleLifetime::Permanent,
+            profile: None,
+        }
+    }
+
+    fn profile(name: &str) -> Profile {
+        Profile { name: name.into(), networks: Vec::new(), mode: None }
+    }
+
+    fn write_rules(dir: &Path, rules: &[(i64, Rule)]) {
+        let persisted: Vec<Persisted> = rules
+            .iter()
+            .map(|(id, rule)| Persisted { id: *id, rule: rule.clone(), enabled: true })
+            .collect();
+        std::fs::write(dir.join("rules.json"), serde_json::to_vec(&persisted).unwrap()).unwrap();
+    }
+
+    fn live(store: &RuleStore) -> Vec<u64> {
+        store.wfp.as_ref().unwrap().live.iter().copied().collect()
+    }
+
+    #[test]
+    fn a_new_store_keeps_added_rules_across_a_reopen() {
+        let dir = scratch("reopen");
+        let mut store = open(&dir);
+        assert!(store.list().is_empty());
+        let stored = store.add(rule(r"C:\apps\editor.exe")).unwrap();
+        assert!(!stored.filter_ids.is_empty());
+        assert!(stored.enabled);
+        assert_eq!(live(&store), stored.filter_ids);
+        drop(store);
+        let store = open(&dir);
+        let rules = store.list();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, stored.id);
+        assert!(rules[0].enabled);
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_mode_and_profiles_are_saved_beside_the_rules_file() {
+        let dir = scratch("side-files");
+        let mut store = open(&dir);
+        assert!(store.set_mode(FirewallMode::Notify).is_ok());
+        assert!(dir.join("mode.json").exists());
+        assert!(store.set_profiles(vec![profile("home")], None).is_ok());
+        assert!(dir.join("profiles.json").exists());
+        drop(store);
+        let store = open(&dir);
+        assert_eq!(store.mode(), FirewallMode::Notify);
+        assert_eq!(store.profile_state().profiles.len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_corrupt_rules_file_is_set_aside_and_not_rewritten() {
+        let dir = scratch("corrupt");
+        std::fs::write(dir.join("rules.json"), b"not json").unwrap();
+        let store = open(&dir);
+        assert!(store.list().is_empty());
+        assert!(dir.join("rules.json.corrupt").exists());
+        assert!(!dir.join("rules.json").exists());
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn session_and_lapsed_rules_are_dropped_and_the_drop_is_saved() {
+        let dir = scratch("dropped");
+        let session = Rule { lifetime: RuleLifetime::UntilRestart, ..rule(r"C:\apps\chat.exe") };
+        let lapsed = Rule { lifetime: RuleLifetime::Until { at_ms: 1 }, ..rule(r"C:\apps\game.exe") };
+        write_rules(&dir, &[(1, rule(r"C:\apps\editor.exe")), (2, session), (3, lapsed)]);
+        let store = open(&dir);
+        let rules = store.list();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, 1);
+        let saved: Vec<Persisted> =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("rules.json")).unwrap()).unwrap();
+        assert_eq!(saved.len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_rule_for_a_missing_app_waits_without_filters() {
+        let dir = scratch("missing-app");
+        write_rules(&dir, &[(1, rule(r"C:\apps\missing.exe"))]);
+        let store = open(&dir);
+        let rules = store.list();
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].enabled);
+        assert!(rules[0].filter_ids.is_empty());
+        assert!(live(&store).is_empty());
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn adding_in_the_same_slot_replaces_the_old_rule_and_its_filters() {
+        let dir = scratch("same-slot");
+        let mut store = open(&dir);
+        let allow = store.add(rule(r"C:\apps\editor.exe")).unwrap();
+        let block = store.add(Rule { action: RuleAction::Block, ..rule(r"C:\apps\editor.exe") }).unwrap();
+        let rules = store.list();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule.action, RuleAction::Block);
+        assert_eq!(rules[0].id, block.id);
+        assert_ne!(rules[0].id, allow.id);
+        assert_eq!(live(&store), block.filter_ids);
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn disabling_and_removing_take_the_filters_out() {
+        let dir = scratch("disable-remove");
+        let mut store = open(&dir);
+        let stored = store.add(rule(r"C:\apps\editor.exe")).unwrap();
+        let disabled = store.set_enabled(stored.id, false).unwrap().unwrap();
+        assert!(disabled.filter_ids.is_empty());
+        assert!(!disabled.enabled);
+        assert!(live(&store).is_empty());
+        let enabled = store.set_enabled(stored.id, true).unwrap().unwrap();
+        assert!(!enabled.filter_ids.is_empty());
+        assert_eq!(live(&store), enabled.filter_ids);
+        assert!(store.remove(stored.id).unwrap());
+        assert!(store.list().is_empty());
+        assert!(live(&store).is_empty());
+        assert!(!store.remove(stored.id).unwrap());
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn profile_rules_follow_the_active_profile() {
+        let dir = scratch("profile-rules");
+        let mut store = open(&dir);
+        let stored = store.add(Rule { profile: Some("home".into()), ..rule(r"C:\apps\editor.exe") }).unwrap();
+        assert!(stored.filter_ids.is_empty());
+        store.set_profiles(vec![profile("home")], Some("home".into())).unwrap();
+        assert!(!store.list()[0].filter_ids.is_empty());
+        store.set_profiles(vec![profile("home")], None).unwrap();
+        assert!(store.list()[0].filter_ids.is_empty());
+        assert!(live(&store).is_empty());
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

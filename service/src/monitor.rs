@@ -388,7 +388,7 @@ pub fn spawn(
 
     #[cfg(has_platform)]
     // the first monitor handle moves into the first spawned sampler; later
-    // respawns start with no capture and their ETW restart path brings it
+    // respawns start with no capture and their capture restart path brings it
     // back within 30 ticks, the same self-heal a degraded boot gets
     let mut first_monitor = Some(byte_monitor);
 
@@ -517,9 +517,8 @@ fn sample_forever(
     let mut tracker = Tracker::new(agg);
     let mut watcher = crate::watch::Watcher::default();
 
-    // the ETW restart loop on Windows reassigns this; every other target only
-    // reads it, so mutability lives in a local instead of the signature
-    #[cfg(all(has_platform, target_os = "windows"))]
+    // the capture restart paths reassign this, so mutability lives in a local instead of the signature
+    #[cfg(has_platform)]
     let mut byte_monitor = byte_monitor;
 
     let mut ticks: u64 = 0;
@@ -692,6 +691,15 @@ fn sample_forever(
                         }
                     }
                 }
+            }
+        }
+        // a respawned loop starts without capture; linux has no stale-session
+        // signal, so only a missing monitor is restarted
+        #[cfg(all(has_platform, target_os = "linux"))]
+        if ticks.is_multiple_of(30) && byte_monitor.is_none() {
+            match crate::platform::Monitor::start(agg.clone(), dns.clone()) {
+                Ok(monitor) => byte_monitor = Some(monitor),
+                Err(e) => tracing::error!("byte monitor restart failed: {e}"),
             }
         }
         if ticks.is_multiple_of(10) {

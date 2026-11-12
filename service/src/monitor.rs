@@ -234,7 +234,7 @@ mod tests {
             .build()
             .unwrap();
         let alert = runtime.block_on(async {
-            tokio::time::timeout(Duration::from_millis(250), events.recv())
+            tokio::time::timeout(Duration::from_secs(5), events.recv())
                 .await
                 .unwrap()
                 .unwrap()

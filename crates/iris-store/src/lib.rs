@@ -858,22 +858,12 @@ impl Store {
         out
     }
 
-    pub fn suppress_prompt_alerts(&mut self) -> usize {
-        0
-    }
-
     pub fn ack_alert(&self, id: i64) {
         if let Err(e) = self.conn.execute(
             "UPDATE alerts SET acknowledged = 1 WHERE id = ?1",
             params![id],
         ) {
             tracing::warn!("could not ack alert {id}: {e}");
-        }
-    }
-
-    pub fn ack_all_alerts(&self) {
-        if let Err(e) = self.conn.execute("UPDATE alerts SET acknowledged = 1", []) {
-            tracing::warn!("could not ack alerts: {e}");
         }
     }
 

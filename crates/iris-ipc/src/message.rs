@@ -1,6 +1,6 @@
 use iris_core::{
     AdapterKind, Alert, Annotation, AppId, ByteCounts, EnrichTarget, FirewallMode, HostUsage, KnownApp, Profile, ProfileState, RateCap,
-    LiveConnection, Panel, Quota, QuotaLimit, Rule, RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket,
+    Panel, Quota, QuotaLimit, Rule, RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket,
     UsageQuery,
 };
 use serde::{Deserialize, Serialize};
@@ -24,8 +24,9 @@ use serde::{Deserialize, Serialize};
 /// could not decode while they were skipped when empty, and adds data quotas.
 /// v16 adds download caps.
 /// v17 adds per-connection rates.
-/// v18 carries the firewall mode in every tick and adds a totals-only tick
-/// subscription.
+/// v18 carries the firewall mode in every tick, adds a totals-only tick
+/// subscription, and removes the unused connection list and prompt suppression
+/// messages.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 /// conditions that quietly undermine the engine, for the UI to surface
@@ -71,9 +72,6 @@ pub enum ClientMessage {
     /// receive [`ServerMessage::Totals`] in place of full ticks, for a client
     /// that shows only aggregate throughput
     SubscribeTotals,
-    ListConnections {
-        req: u64,
-    },
     ListRules {
         req: u64,
     },
@@ -165,11 +163,6 @@ pub enum ClientMessage {
     /// pending connection decisions that have not been deferred from the
     /// desktop prompt surface
     ListPromptAlerts {
-        req: u64,
-    },
-    /// keep pending connection decisions in the Alerts view without replaying
-    /// them as desktop prompt cards
-    SuppressAlertPrompts {
         req: u64,
     },
     AckAlert {
@@ -287,7 +280,6 @@ pub enum ServerMessage {
 pub enum Reply {
     Ok,
     Pong,
-    Connections(Vec<LiveConnection>),
     Rules(Vec<StoredRule>),
     Apps(Vec<KnownApp>),
     RuleAdded(StoredRule),

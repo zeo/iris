@@ -488,17 +488,6 @@ async fn handle(
                         .unwrap_or_default();
                         reply(&mut send, req, Reply::Alerts(list)).await?;
                     }
-                    ClientMessage::SuppressAlertPrompts { req } => {
-                        let store = store.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            store
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .suppress_prompt_alerts();
-                        })
-                        .await;
-                        reply(&mut send, req, Reply::Ok).await?;
-                    }
                     ClientMessage::AckAlert { req, id } => {
                         let store = store.clone();
                         let _ = tokio::task::spawn_blocking(move || {
@@ -736,13 +725,6 @@ async fn handle(
                         .await
                         .unwrap_or_default();
                         reply(&mut send, req, Reply::AdapterUsage(rows)).await?;
-                    }
-                    // commands whose engine support arrives in later slices: answer
-                    // rather than leave the UI awaiting a reply that never comes
-                    other => {
-                        if let Some(req) = req_of(&other) {
-                            reply(&mut send, req, Reply::Error("not yet supported".into())).await?;
-                        }
                     }
                 }
             }
@@ -1098,8 +1080,7 @@ async fn reply(send: &mut transport::SendHalf, req: u64, result: Reply) -> io::R
 
 fn req_of(m: &ClientMessage) -> Option<u64> {
     match m {
-        ClientMessage::ListConnections { req }
-        | ClientMessage::ListRules { req }
+        ClientMessage::ListRules { req }
         | ClientMessage::ListApps { req }
         | ClientMessage::ForgetApp { req, .. }
         | ClientMessage::ForgetApps { req, .. }
@@ -1120,7 +1101,6 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::GetUsage { req, .. }
         | ClientMessage::ListAlerts { req, .. }
         | ClientMessage::ListPromptAlerts { req }
-        | ClientMessage::SuppressAlertPrompts { req }
         | ClientMessage::AckAlert { req, .. }
         | ClientMessage::DecideAlert { req, .. }
         | ClientMessage::KillConnection { req, .. }

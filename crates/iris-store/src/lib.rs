@@ -4,10 +4,12 @@
 //! is a handful of writes per second and the occasional query.
 
 use iris_core::{
-    AdapterKind, Alert, AlertKind, AppId, Granularity, HostUsage, KnownApp, ProposalState, Rule,
-    RuleAction, RuleProposal, StatsTick, UsageBucket, UsageQuery,
+    AdapterKind, Alert, AlertKind, AppId, BlockedConnection, Direction, Endpoint, Granularity,
+    HostUsage, KnownApp, ProposalState, Protocol, Rule, RuleAction, RuleProposal, StatsTick,
+    UsageBucket, UsageQuery,
 };
 use rusqlite::{params, Connection, OptionalExtension};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 
 const LAST_SEEN_WRITE_INTERVAL_MS: u64 = 60_000;
@@ -116,11 +118,31 @@ CREATE TABLE IF NOT EXISTS gateway_seen (
 );
 ";
 
+/// v10: connections iris's own filters dropped, one row per app and remote so a
+/// retry storm bumps a count instead of adding rows
+const SCHEMA_V10_BLOCKED: &str = "
+CREATE TABLE IF NOT EXISTS blocked (
+    path TEXT NOT NULL,
+    addr TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    protocol TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    first_ms INTEGER NOT NULL,
+    last_ms INTEGER NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (path, addr, port, protocol, direction)
+);
+CREATE INDEX IF NOT EXISTS blocked_last ON blocked(last_ms);
+";
+
 /// most rows a host breakdown returns, biggest first
 const HOST_USAGE_LIMIT: i64 = 500;
 
+/// most blocked-connection rows kept, newest first
+const BLOCKED_KEEP: i64 = 5000;
+
 /// bump when the schema changes; drives the migration ladder in [`Store::migrate`]
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 pub struct Store {
     conn: Connection,
@@ -150,6 +172,20 @@ fn grant_row(r: &rusqlite::Row) -> rusqlite::Result<PluginGrant> {
         enabled: enabled != 0,
         granted_at: granted_at as u64,
     })
+}
+
+fn protocol_name(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::Tcp => "tcp",
+        Protocol::Udp => "udp",
+    }
+}
+
+fn direction_name(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Outbound => "outbound",
+        Direction::Inbound => "inbound",
+    }
 }
 
 impl Store {
@@ -237,6 +273,9 @@ impl Store {
         }
         if version < 9 {
             self.conn.execute_batch(SCHEMA_V9_WATCH)?;
+        }
+        if version < 10 {
+            self.conn.execute_batch(SCHEMA_V10_BLOCKED)?;
         }
         if version < SCHEMA_VERSION {
             self.conn
@@ -889,6 +928,93 @@ impl Store {
         }
     }
 
+    /// fold already-coalesced drops into the blocked log, one upsert per row
+    pub fn record_blocked(&mut self, rows: &[BlockedConnection]) {
+        if rows.is_empty() {
+            return;
+        }
+        let result = (|| -> rusqlite::Result<()> {
+            let transaction = self.conn.transaction()?;
+            {
+                let mut statement = transaction.prepare_cached(
+                    "INSERT INTO blocked(path, addr, port, protocol, direction, first_ms, last_ms, count)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(path, addr, port, protocol, direction) DO UPDATE SET
+                     first_ms = MIN(first_ms, ?6), last_ms = MAX(last_ms, ?7), count = count + ?8",
+                )?;
+                for row in rows {
+                    statement.execute(params![
+                        row.app.as_str(),
+                        row.remote.addr.to_string(),
+                        row.remote.port,
+                        protocol_name(row.remote.protocol),
+                        direction_name(row.direction),
+                        row.first_ms as i64,
+                        row.last_ms as i64,
+                        row.count as i64
+                    ])?;
+                }
+            }
+            transaction.commit()
+        })();
+        if let Err(error) = result {
+            tracing::warn!("could not record blocked connections: {error}");
+        }
+    }
+
+    /// the most recently blocked connections, newest first
+    pub fn list_blocked(&self, limit: u32) -> Vec<BlockedConnection> {
+        let row = |r: &rusqlite::Row| {
+            let path: String = r.get(0)?;
+            let addr: String = r.get(1)?;
+            let protocol: String = r.get(3)?;
+            let direction: String = r.get(4)?;
+            let first_ms: i64 = r.get(5)?;
+            let last_ms: i64 = r.get(6)?;
+            let count: i64 = r.get(7)?;
+            Ok(BlockedConnection {
+                app: AppId(path),
+                remote: Endpoint {
+                    addr: addr.parse().unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+                    port: r.get(2)?,
+                    protocol: if protocol == "udp" { Protocol::Udp } else { Protocol::Tcp },
+                },
+                direction: if direction == "inbound" { Direction::Inbound } else { Direction::Outbound },
+                first_ms: first_ms as u64,
+                last_ms: last_ms as u64,
+                count: count as u64,
+            })
+        };
+        let result = self
+            .conn
+            .prepare_cached(
+                "SELECT path, addr, port, protocol, direction, first_ms, last_ms, count FROM blocked
+                 ORDER BY last_ms DESC LIMIT ?1",
+            )
+            .and_then(|mut statement| statement.query_map(params![limit], row)?.collect());
+        result.unwrap_or_else(|error| {
+            tracing::warn!("could not list blocked connections: {error}");
+            Vec::new()
+        })
+    }
+
+    /// drop blocked-log rows last seen before the cutoff, then all but the newest
+    pub fn prune_blocked(&self, older_than_ms: u64) {
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM blocked WHERE last_ms < ?1",
+            params![older_than_ms as i64],
+        ) {
+            tracing::warn!("could not prune blocked connections: {e}");
+        }
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM blocked WHERE rowid NOT IN \
+             (SELECT rowid FROM blocked ORDER BY last_ms DESC LIMIT ?1)",
+            params![BLOCKED_KEEP],
+        ) {
+            tracing::warn!("could not bound blocked connections: {e}");
+        }
+    }
+
     /// record (or replace) the user's consent for a plugin
     pub fn set_plugin_grant(
         &self,
@@ -1178,6 +1304,40 @@ mod tests {
 
         store.prune_usage(2 * hour);
         assert_eq!(store.host_usage(None, 0, 3 * hour).len(), 1);
+    }
+
+    #[test]
+    fn blocked_drops_fold_into_one_row_per_remote_and_prune_by_age_and_count() {
+        use iris_core::{BlockedConnection, Direction, Endpoint, Protocol};
+        let mut store = super::Store::open_in_memory().expect("store");
+        let row = |port, protocol, first_ms, last_ms, count| BlockedConnection {
+            app: super::AppId::from_path("c:\\apps\\game.exe"),
+            remote: Endpoint { addr: "203.0.113.7".parse().unwrap(), port, protocol },
+            direction: Direction::Outbound,
+            first_ms,
+            last_ms,
+            count,
+        };
+        store.record_blocked(&[row(443, Protocol::Tcp, 100, 200, 3), row(443, Protocol::Udp, 150, 150, 1)]);
+        store.record_blocked(&[row(443, Protocol::Tcp, 50, 900, 2)]);
+
+        let rows = store.list_blocked(10);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], row(443, Protocol::Tcp, 50, 900, 5));
+        assert_eq!(rows[1], row(443, Protocol::Udp, 150, 150, 1));
+        assert_eq!(store.list_blocked(1).len(), 1);
+
+        store.prune_blocked(500);
+        assert_eq!(store.list_blocked(10), vec![row(443, Protocol::Tcp, 50, 900, 5)]);
+
+        let many: Vec<_> = (0..super::BLOCKED_KEEP as u64 + 3)
+            .map(|n| row(n as u16 + 1000, Protocol::Tcp, 1000 + n, 1000 + n, 1))
+            .collect();
+        store.record_blocked(&many);
+        store.prune_blocked(0);
+        let kept = store.list_blocked(u32::MAX);
+        assert_eq!(kept.len(), super::BLOCKED_KEEP as usize);
+        assert!(kept.iter().all(|row| row.last_ms >= 1003));
     }
 
     use super::*;

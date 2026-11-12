@@ -1,16 +1,20 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import {
   ackAlert,
   ackAll,
   alerts,
+  blockedLogSupported,
+  blockedSummary,
   decideAlert,
   fileName,
   initAlerts,
+  listBlocked,
   needsDecision,
   refreshAlerts,
   type Alert,
+  type BlockedConnection,
 } from "../lib/alerts";
 import { persisted } from "../lib/persist";
 
@@ -50,11 +54,16 @@ export function Alerts() {
     const f = filter();
     let a = alerts();
     if (f === "new apps") a = a.filter((x) => x.kind.kind === "new_app");
-    else if (f === "blocks") a = a.filter((x) => x.kind.kind === "blocked");
     else if (f === "flags") a = a.filter((x) => x.kind.kind === "plugin" || x.kind.kind === "watch");
     return a;
   });
   const shown = createMemo(() => list().slice(0, RENDER_CAP));
+  // the blocks filter reads the blocked log rather than alerts, refetched on
+  // the coarse clock while it is open
+  const [blocked] = createResource(
+    () => filter() === "blocks" && now(),
+    () => listBlocked(RENDER_CAP),
+  );
 
   const title = (a: Alert) =>
     a.kind.kind === "new_app"
@@ -117,6 +126,44 @@ export function Alerts() {
     </div>
   );
 
+  const blockedRow = (b: BlockedConnection) => (
+    <div class="row alert">
+      <span class="unread-dot" />
+      <span class="alert-badge block">
+        <Icon name="block" size={13} />
+      </span>
+      <AppIcon path={b.app} />
+      <div class="alert-body">
+        <b>{fileName(b.app)}</b> {blockedSummary(b)}
+      </div>
+      <div class="alert-when">
+        <span class="alert-cat">Blocked connection</span>
+        <span class="alert-time">{ago(b.last_ms, now())}</span>
+      </div>
+    </div>
+  );
+
+  const blocksView = () => (
+    <Show
+      when={(blocked() ?? []).length > 0}
+      fallback={
+        <div class="empty">
+          <Icon name="block" class="glyph" size={44} />
+          <h3>Nothing blocked</h3>
+          <p>
+            {blockedLogSupported
+              ? "When a block rule, lockdown, or ask mode stops a connection, Iris lists it here with how often it was tried."
+              : "Blocked connections are only logged on Windows."}
+          </p>
+        </div>
+      }
+    >
+      <div class="rows">
+        <For each={blocked()}>{blockedRow}</For>
+      </div>
+    </Show>
+  );
+
   return (
     <section>
       <div class="head">
@@ -139,9 +186,9 @@ export function Alerts() {
       </div>
 
       <Show
-        when={list().length > 0}
+        when={filter() !== "blocks" && list().length > 0}
         fallback={
-          <div class="empty">
+          filter() === "blocks" ? blocksView() : <div class="empty">
             <Icon name="bell" class="glyph" size={44} />
             <h3>Nothing to report</h3>
             <p>

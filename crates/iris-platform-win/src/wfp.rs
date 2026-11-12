@@ -8,6 +8,7 @@
 //! freed only after the add returns.
 
 use iris_core::{Direction, EngineError, EngineResult, Protocol, RuleAction, RuleScope};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::ptr;
 use windows::core::{GUID, PCWSTR, PWSTR};
@@ -73,18 +74,24 @@ pub struct Wfp {
     /// paired with the direction its layer represents
     ask_filters: Vec<(u64, Direction)>,
     /// the live classify-drop subscription that turns ask-mode denials into
-    /// prompts; present only while ask mode is on
+    /// prompts and iris's other drops into log rows; present only while some
+    /// iris filter can drop
     events: Option<crate::netevent::NetEvents>,
     /// the receiving end of that subscription, handed to the service once
     denied: Option<std::sync::mpsc::Receiver<crate::netevent::DeniedConnection>>,
     /// the sending end, kept for the engine's life so ask mode switched off and
     /// back on feeds the receiver the service already holds
     denied_tx: std::sync::mpsc::SyncSender<crate::netevent::DeniedConnection>,
+    /// every drop by an iris filter, for the blocked-connection log
+    blocked: Option<std::sync::mpsc::Receiver<crate::netevent::DeniedConnection>>,
+    blocked_tx: std::sync::mpsc::SyncSender<crate::netevent::DeniedConnection>,
+    /// the filters behind block rules, each with its layer's direction
+    rule_blocks: HashMap<u64, Direction>,
     /// permits seeded for apps accepted before ask mode existed, so turning it
     /// on does not retroactively cut off the whole machine
     trusted_filters: Vec<u64>,
     /// the deny-everything filters behind lockdown, empty when it is off
-    lockdown_filters: Vec<u64>,
+    lockdown_filters: Vec<(u64, Direction)>,
 }
 
 // a WFP engine handle is safe to use from any thread; the rule store guards all
@@ -107,6 +114,7 @@ impl Wfp {
     pub fn open() -> EngineResult<Wfp> {
         unsafe {
             let (denied_tx, denied) = std::sync::mpsc::sync_channel(DENIED_QUEUE);
+            let (blocked_tx, blocked) = std::sync::mpsc::sync_channel(DENIED_QUEUE);
             let mut engine = HANDLE::default();
             let rc = FwpmEngineOpen0(None, RPC_C_AUTHN_WINNT, None, None, &mut engine);
             if !ok(rc) {
@@ -118,6 +126,9 @@ impl Wfp {
                 events: None,
                 denied: Some(denied),
                 denied_tx,
+                blocked: Some(blocked),
+                blocked_tx,
+                rule_blocks: HashMap::new(),
                 trusted_filters: Vec::new(),
                 lockdown_filters: Vec::new(),
             };
@@ -175,6 +186,8 @@ impl Wfp {
             self.clear_filters();
             self.ask_filters.clear();
             self.lockdown_filters.clear();
+            self.rule_blocks.clear();
+            self.events = None;
             // now that the sublayer is empty this succeeds; a fresh install
             // reports FWP_E_SUBLAYER_NOT_FOUND, which ensure_objects then fixes
             let _ = FwpmSubLayerDeleteByKey0(self.engine, &IRIS_SUBLAYER);
@@ -193,6 +206,7 @@ impl Wfp {
             self.clear_filters();
             self.ask_filters.clear();
             self.lockdown_filters.clear();
+            self.rule_blocks.clear();
             self.trusted_filters.clear();
             let rc = FwpmSubLayerDeleteByKey0(self.engine, &IRIS_SUBLAYER);
             if !ok(rc) && rc != SUBLAYER_NOT_FOUND {
@@ -284,7 +298,12 @@ impl Wfp {
         } else {
             WEIGHT_SCOPED_RULE
         };
-        self.apply_weighted(path, direction, action, scope, &rule_weight)
+        let ids = self.apply_weighted(path, direction, action, scope, &rule_weight)?;
+        if action == RuleAction::Block {
+            self.rule_blocks.extend(ids.iter().map(|id| (*id, direction)));
+            self.watch_blocks();
+        }
+        Ok(ids)
     }
 
     fn apply_weighted(
@@ -384,7 +403,44 @@ impl Wfp {
                 }
             }
         }
+        let before = self.rule_blocks.len();
+        self.rule_blocks.retain(|id, _| !filter_ids.contains(id));
+        if self.rule_blocks.len() != before {
+            self.watch_blocks();
+        }
         Ok(())
+    }
+
+    /// point the drop subscription at the current filter sets, subscribing for
+    /// the first iris filter that can drop and unsubscribing after the last
+    fn sync_events(&mut self) -> Result<(), String> {
+        let block: Vec<(u64, Direction)> = self
+            .rule_blocks
+            .iter()
+            .map(|(id, direction)| (*id, *direction))
+            .chain(self.lockdown_filters.iter().copied())
+            .collect();
+        if self.ask_filters.is_empty() && block.is_empty() {
+            self.events = None;
+        } else if self.events.is_some() {
+            crate::netevent::set_filters(&self.ask_filters, &block);
+        } else {
+            self.events = Some(crate::netevent::NetEvents::subscribe(
+                self.engine,
+                &self.ask_filters,
+                &block,
+                self.denied_tx.clone(),
+                self.blocked_tx.clone(),
+            )?);
+        }
+        Ok(())
+    }
+
+    /// the blocked log is a record, so losing it never fails a rule change
+    fn watch_blocks(&mut self) {
+        if let Err(error) = self.sync_events() {
+            tracing::warn!("blocked connections will not be logged: {error}");
+        }
     }
 
     pub fn ask_mode_active(&self) -> bool {
@@ -446,7 +502,7 @@ impl Wfp {
             self.remove(&ids)?;
             self.ask_filters.clear();
             // only now: a deny still in place needs the prompt source live
-            self.events = None;
+            self.watch_blocks();
             return Ok(());
         }
         unsafe {
@@ -473,25 +529,13 @@ impl Wfp {
 
             // the prompt source has to be live before the deny takes effect, or
             // the first denied connection is silent
-            match self.events.as_ref() {
-                Some(_) => crate::netevent::set_ask_filters(&ids),
-                None => {
-                    match crate::netevent::NetEvents::subscribe(
-                        self.engine,
-                        &ids,
-                        self.denied_tx.clone(),
-                    ) {
-                        Ok(events) => self.events = Some(events),
-                        Err(error) => {
-                            for (id, _) in &ids {
-                                let _ = FwpmFilterDeleteById0(self.engine, *id);
-                            }
-                            return Err(EngineError::Os(error));
-                        }
-                    }
-                }
-            }
             self.ask_filters = ids;
+            if let Err(error) = self.sync_events() {
+                for (id, _) in std::mem::take(&mut self.ask_filters) {
+                    let _ = FwpmFilterDeleteById0(self.engine, id);
+                }
+                return Err(EngineError::Os(error));
+            }
         }
         Ok(())
     }
@@ -506,26 +550,28 @@ impl Wfp {
             return Ok(());
         }
         if !enabled {
-            let ids = self.lockdown_filters.clone();
+            let ids: Vec<u64> = self.lockdown_filters.iter().map(|(id, _)| *id).collect();
             self.remove(&ids)?;
             self.lockdown_filters.clear();
+            self.watch_blocks();
             return Ok(());
         }
         let mut ids = Vec::with_capacity(4);
-        for layer in [Direction::Outbound, Direction::Inbound]
-            .into_iter()
-            .flat_map(Self::layers)
-        {
-            match unsafe { self.add_catch_all(layer, "Iris lockdown", &WEIGHT_LOCKDOWN) } {
-                Ok(id) => ids.push(id),
-                Err(error) => {
-                    // a half lockdown would block one family and not the other
-                    let _ = self.remove(&ids);
-                    return Err(error);
+        for direction in [Direction::Outbound, Direction::Inbound] {
+            for layer in Self::layers(direction) {
+                match unsafe { self.add_catch_all(layer, "Iris lockdown", &WEIGHT_LOCKDOWN) } {
+                    Ok(id) => ids.push((id, direction)),
+                    Err(error) => {
+                        // a half lockdown would block one family and not the other
+                        let added: Vec<u64> = ids.iter().map(|(id, _)| *id).collect();
+                        let _ = self.remove(&added);
+                        return Err(error);
+                    }
                 }
             }
         }
         self.lockdown_filters = ids;
+        self.watch_blocks();
         Ok(())
     }
 
@@ -570,6 +616,13 @@ impl Wfp {
         &mut self,
     ) -> Option<std::sync::mpsc::Receiver<crate::netevent::DeniedConnection>> {
         self.denied.take()
+    }
+
+    /// the stream of every drop by an iris filter, taken once by the service
+    pub fn take_blocked_receiver(
+        &mut self,
+    ) -> Option<std::sync::mpsc::Receiver<crate::netevent::DeniedConnection>> {
+        self.blocked.take()
     }
 }
 

@@ -6,7 +6,7 @@
 //! admin pipe (see `rulectl`). it reconnects on its own.
 
 use iris_core::{
-    AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, Granularity, KnownApp, Panel,
+    AdapterKind, Alert, Annotation, BlockedConnection, ByteCounts, EnrichTarget, Granularity, KnownApp, Panel,
     RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket, UsageQuery,
 };
 use iris_ipc::message::{ClientMessage, PluginInfo, Reply, ServerMessage, PROTOCOL_VERSION};
@@ -75,6 +75,7 @@ pub enum EngineCmd {
     GetHostUsage(Option<String>, u64, u64),
     HostAddresses(String),
     ListAlerts(bool),
+    ListBlocked(u32),
     ListPromptAlerts,
     AckAlert(i64),
     DecideAlert(i64, RuleAction, iris_core::RuleScope, iris_core::RuleLifetime),
@@ -276,6 +277,15 @@ pub async fn host_addresses(app: AppHandle, host: String) -> Result<Vec<String>,
 pub async fn list_alerts(app: AppHandle, unacked_only: bool) -> Result<Vec<Alert>, String> {
     match dispatch(&app, EngineCmd::ListAlerts(unacked_only)).await? {
         Reply::Alerts(a) => Ok(a),
+        Reply::Error(e) => Err(e),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn list_blocked(app: AppHandle, limit: u32) -> Result<Vec<BlockedConnection>, String> {
+    match dispatch(&app, EngineCmd::ListBlocked(limit)).await? {
+        Reply::Blocked(rows) => Ok(rows),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
     }
@@ -674,6 +684,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     EngineCmd::GetAdapterUsage(from_ms, to_ms) =>
                         ClientMessage::GetAdapterUsage { req, from_ms, to_ms },
                     EngineCmd::ListAlerts(unacked_only) => ClientMessage::ListAlerts { req, unacked_only },
+                    EngineCmd::ListBlocked(limit) => ClientMessage::ListBlocked { req, limit },
                     EngineCmd::ListPromptAlerts => ClientMessage::ListPromptAlerts { req },
                     EngineCmd::AckAlert(id) => ClientMessage::AckAlert { req, id },
                     EngineCmd::DecideAlert(id, action, scope, lifetime) =>

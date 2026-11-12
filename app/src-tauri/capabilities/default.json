@@ -27,6 +27,7 @@
     "allow-list-apps",
     "allow-forget-app",
     "allow-list-alerts",
+    "allow-list-blocked",
     "allow-firewall-mode",
     "allow-get-host-usage",
     "allow-host-addresses",

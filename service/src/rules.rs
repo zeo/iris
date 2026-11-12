@@ -600,6 +600,14 @@ impl RuleStore {
         }
     }
 
+    /// every connection an iris filter dropped, for the blocked log
+    #[cfg(windows)]
+    pub fn take_blocked_receiver(
+        &mut self,
+    ) -> Option<std::sync::mpsc::Receiver<crate::platform::PendingConnection>> {
+        self.wfp.as_mut().and_then(Wfp::take_blocked_receiver)
+    }
+
     /// whether an application with no decision yet is denied until the user
     /// answers, rather than allowed and reported afterwards
     #[cfg(has_platform)]
@@ -896,6 +904,13 @@ mod fake {
 
         #[cfg(windows)]
         pub fn take_denied_receiver(
+            &mut self,
+        ) -> Option<std::sync::mpsc::Receiver<crate::platform::PendingConnection>> {
+            None
+        }
+
+        #[cfg(windows)]
+        pub fn take_blocked_receiver(
             &mut self,
         ) -> Option<std::sync::mpsc::Receiver<crate::platform::PendingConnection>> {
             None

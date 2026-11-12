@@ -169,6 +169,66 @@ fn start_pending_publisher(
     })
 }
 
+#[cfg(windows)]
+type BlockedKey = (iris_core::AppId, iris_core::Endpoint, iris_core::Direction);
+
+/// count one drop into the row for its app, remote, and direction
+#[cfg(windows)]
+fn fold_blocked(
+    rows: &mut HashMap<BlockedKey, iris_core::BlockedConnection>,
+    drop: crate::platform::PendingConnection,
+    at_ms: u64,
+) {
+    rows.entry((drop.app.clone(), drop.remote.clone(), drop.direction))
+        .and_modify(|row| {
+            row.last_ms = at_ms;
+            row.count += 1;
+        })
+        .or_insert(iris_core::BlockedConnection {
+            app: drop.app,
+            remote: drop.remote,
+            direction: drop.direction,
+            first_ms: at_ms,
+            last_ms: at_ms,
+            count: 1,
+        });
+}
+
+/// how long drops gather in memory before one upsert writes them, so a retry
+/// storm costs a transaction a second rather than one per dropped packet
+#[cfg(windows)]
+const BLOCKED_FLUSH: Duration = Duration::from_secs(1);
+
+#[cfg(windows)]
+fn start_blocked_logger(
+    blocked: Receiver<crate::platform::PendingConnection>,
+    store: Arc<Mutex<Store>>,
+) -> io::Result<()> {
+    let blocked = Arc::new(Mutex::new(blocked));
+    respawn("iris-blocked-logger", move || {
+        let blocked = blocked.clone();
+        let store = store.clone();
+        move || {
+            let blocked = blocked.lock().unwrap_or_else(|error| error.into_inner());
+            while let Ok(first) = blocked.recv() {
+                let mut rows = HashMap::new();
+                fold_blocked(&mut rows, first, now_ms());
+                let flush_at = Instant::now() + BLOCKED_FLUSH;
+                while let Ok(drop) =
+                    blocked.recv_timeout(flush_at.saturating_duration_since(Instant::now()))
+                {
+                    fold_blocked(&mut rows, drop, now_ms());
+                }
+                let rows: Vec<_> = rows.into_values().collect();
+                store
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .record_blocked(&rows);
+            }
+        }
+    })
+}
+
 #[cfg(all(test, has_platform))]
 mod tests {
     use super::*;
@@ -340,6 +400,40 @@ mod tests {
         assert_eq!(store.lock().unwrap().list_prompt_alerts().len(), 1);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_drop_storm_lands_as_one_counted_row_per_remote() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (send, blocked) = std::sync::mpsc::sync_channel(64);
+        start_blocked_logger(blocked, store.clone()).unwrap();
+        let drop = |port| crate::platform::PendingConnection {
+            app: AppId::from_path(r"C:\Apps\retrying.exe"),
+            remote: Endpoint {
+                addr: "203.0.113.9".parse::<IpAddr>().unwrap(),
+                port,
+                protocol: Protocol::Tcp,
+            },
+            direction: Direction::Outbound,
+        };
+        for _ in 0..40 {
+            send.send(drop(443)).unwrap();
+        }
+        send.send(drop(80)).unwrap();
+
+        let started = Instant::now();
+        let rows = loop {
+            let rows = store.lock().unwrap().list_blocked(10);
+            if rows.len() == 2 || started.elapsed() > Duration::from_secs(5) {
+                break rows;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let count = |port| rows.iter().find(|row| row.remote.port == port).map(|row| row.count);
+        assert_eq!(count(443), Some(40));
+        assert_eq!(count(80), Some(1));
+        assert!(rows.iter().all(|row| row.first_ms <= row.last_ms));
+    }
+
     #[test]
     fn respawn_returns_at_once_and_restarts_after_a_panic() {
         let (runs, ran) = std::sync::mpsc::channel();
@@ -399,6 +493,16 @@ pub fn spawn(
     {
         if let Err(error) = start_pending_publisher(pending, store.clone(), engine.clone()) {
             tracing::error!("cannot start the pending publisher: {error}");
+        }
+    }
+    #[cfg(windows)]
+    if let Some(blocked) = rules
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take_blocked_receiver()
+    {
+        if let Err(error) = start_blocked_logger(blocked, store.clone()) {
+            tracing::error!("cannot start the blocked logger: {error}");
         }
     }
 
@@ -708,10 +812,11 @@ fn sample_forever(
         if ticks == 1 || ticks.is_multiple_of(3600) {
             settle_stale_prompts(&store.lock().unwrap_or_else(|e| e.into_inner()), now);
         }
-        // prune usage older than 45 days, hourly
+        // prune usage older than 45 days and blocked rows older than 30, hourly
         if ticks.is_multiple_of(3600) {
             let store = store.lock().unwrap_or_else(|e| e.into_inner());
             store.prune_usage(now.saturating_sub(45 * 86_400_000));
+            store.prune_blocked(now.saturating_sub(30 * 86_400_000));
         }
     }
 }

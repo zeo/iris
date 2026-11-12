@@ -473,6 +473,18 @@ async fn handle(
                         .unwrap_or_default();
                         reply(&mut send, req, Reply::Alerts(list)).await?;
                     }
+                    ClientMessage::ListBlocked { req, limit } => {
+                        let store = store.clone();
+                        let list = tokio::task::spawn_blocking(move || {
+                            store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .list_blocked(limit)
+                        })
+                        .await
+                        .unwrap_or_default();
+                        reply(&mut send, req, Reply::Blocked(list)).await?;
+                    }
                     ClientMessage::GetHealth { req } => {
                         let store = store.clone();
                         let health = tokio::task::spawn_blocking(move || Health {
@@ -1109,6 +1121,7 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::SetRuleEnabled { req, .. }
         | ClientMessage::GetUsage { req, .. }
         | ClientMessage::ListAlerts { req, .. }
+        | ClientMessage::ListBlocked { req, .. }
         | ClientMessage::ListPromptAlerts { req }
         | ClientMessage::AckAlert { req, .. }
         | ClientMessage::DecideAlert { req, .. }

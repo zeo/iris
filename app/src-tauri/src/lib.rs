@@ -99,6 +99,7 @@ pub fn run() {
             ipc::rule_grant,
             rulectl::set_rule_grant,
             ipc::list_alerts,
+            ipc::list_blocked,
             prompt::resize_connection_prompts,
             prompt::set_prompt_hit_region,
             prompt::prompt_cards,

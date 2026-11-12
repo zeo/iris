@@ -2,7 +2,8 @@
 //! just denied, the moment it happens. WFP publishes that as a classify-drop net
 //! event carrying the filter id that dropped the packet plus the app id of the
 //! process behind it, so iris subscribes to the event stream and reports only
-//! the drops attributable to its own ask-mode filters.
+//! the drops attributable to its own ask-mode filters. drops by its block rules
+//! and lockdown ride the same subscription into the blocked-connection log.
 //!
 //! the subscription callback runs on a BFE-owned thread and must not block, so
 //! it does nothing but decode the event and push it down a channel. collecting
@@ -27,7 +28,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 // the engine option index for net event collection; FWPM_ENGINE_COLLECT_NET_EVENTS
 const COLLECT_NET_EVENTS: FWPM_ENGINE_OPTION = FWPM_ENGINE_OPTION(0);
 
-/// one connection the ask-mode filter denied, ready to become a prompt
+/// one connection an iris filter denied, ready to become a prompt or a log row
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeniedConnection {
     pub app: AppId,
@@ -40,10 +41,14 @@ pub struct DeniedConnection {
 /// live in process-wide state that outlives any single subscription
 struct Sink {
     tx: SyncSender<DeniedConnection>,
+    /// every drop by an iris filter, ask or block, for the blocked log
+    blocked_tx: SyncSender<DeniedConnection>,
     /// which of iris's own ask-mode filters dropped it, and the direction that
     /// filter's layer represents. taking the direction from our own bookkeeping
     /// avoids depending on the undocumented numeric values of msFwpDirection.
     ask_filters: HashMap<u64, Direction>,
+    /// iris's block rule and lockdown filters, logged but never prompted
+    block_filters: HashMap<u64, Direction>,
 }
 
 fn sink() -> &'static Mutex<Option<Sink>> {
@@ -51,12 +56,13 @@ fn sink() -> &'static Mutex<Option<Sink>> {
     SINK.get_or_init(|| Mutex::new(None))
 }
 
-/// tell the subscriber which filter ids belong to ask mode. a drop by any other
-/// filter is an explicit user block and must not raise a prompt.
-pub fn set_ask_filters(ids: &[(u64, Direction)]) {
+/// tell the subscriber which filter ids belong to ask mode and which to iris's
+/// blocks. a block drop is already the user's answer and must not raise a prompt
+pub fn set_filters(ask: &[(u64, Direction)], block: &[(u64, Direction)]) {
     if let Ok(mut guard) = sink().lock() {
         if let Some(sink) = guard.as_mut() {
-            sink.ask_filters = ids.iter().copied().collect();
+            sink.ask_filters = ask.iter().copied().collect();
+            sink.block_filters = block.iter().copied().collect();
         }
     }
 }
@@ -71,16 +77,21 @@ unsafe impl Send for NetEvents {}
 
 impl NetEvents {
     /// subscribe to classify-drop events on `engine`, pushing ask-mode denials
-    /// to `tx`. `ask_filters` seeds the id set the callback matches against.
+    /// to `tx` and every iris drop to `blocked_tx`. the filter sets seed the
+    /// ids the callback matches against
     pub fn subscribe(
         engine: HANDLE,
         ask_filters: &[(u64, Direction)],
+        block_filters: &[(u64, Direction)],
         tx: SyncSender<DeniedConnection>,
+        blocked_tx: SyncSender<DeniedConnection>,
     ) -> Result<NetEvents, String> {
         if let Ok(mut guard) = sink().lock() {
             *guard = Some(Sink {
                 tx,
+                blocked_tx,
                 ask_filters: ask_filters.iter().copied().collect(),
+                block_filters: block_filters.iter().copied().collect(),
             });
         }
         unsafe {
@@ -147,8 +158,10 @@ unsafe extern "system" fn on_net_event(
     let Ok(mut guard) = sink().lock() else { return };
     let Some(sink) = guard.as_mut() else { return };
     // only our own default-deny raises a prompt; a drop from a user's block rule
-    // is already the answer to this question
-    let Some(direction) = sink.ask_filters.get(&drop.filterId).copied() else {
+    // is already the answer to this question, and another provider's drop is
+    // not ours to report at all
+    let ask = sink.ask_filters.get(&drop.filterId).copied();
+    let Some(direction) = ask.or_else(|| sink.block_filters.get(&drop.filterId).copied()) else {
         return;
     };
 
@@ -195,11 +208,20 @@ unsafe extern "system" fn on_net_event(
     };
     // never block BFE's callback thread on a stalled consumer: a full queue
     // means a retry storm the consumer already has prompts for
-    if let Err(TrySendError::Full(_)) = sink.tx.try_send(denied) {
+    if ask.is_some() {
+        if let Err(TrySendError::Full(_)) = sink.tx.try_send(denied.clone()) {
+            static DROPPED: AtomicU64 = AtomicU64::new(0);
+            let dropped = DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped.is_power_of_two() {
+                tracing::warn!(dropped, "ask-mode denial queue full, dropping events");
+            }
+        }
+    }
+    if let Err(TrySendError::Full(_)) = sink.blocked_tx.try_send(denied) {
         static DROPPED: AtomicU64 = AtomicU64::new(0);
         let dropped = DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
         if dropped.is_power_of_two() {
-            tracing::warn!(dropped, "ask-mode denial queue full, dropping events");
+            tracing::warn!(dropped, "blocked log queue full, dropping events");
         }
     }
 }

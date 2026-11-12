@@ -188,6 +188,19 @@ impl<'de> Deserialize<'de> for AlertKind {
     }
 }
 
+/// repeated drops of one app's connection by an iris filter, folded into a
+/// single row so a retry storm costs one upsert rather than one alert per drop
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlockedConnection {
+    pub app: AppId,
+    pub remote: Endpoint,
+    pub direction: Direction,
+    /// milliseconds since unix epoch
+    pub first_ms: u64,
+    pub last_ms: u64,
+    pub count: u64,
+}
+
 /// a durable alert. persisted so it survives a UI that is closed when the event
 /// fires, then surfaced (and toasted) on next UI launch if still unacknowledged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

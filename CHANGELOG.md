@@ -10,6 +10,9 @@ All notable changes to this project are documented here. The format follows
 - A connection prompt can be answered for just the host it names, and for 1 hour or until the engine restarts. Other hosts and expired answers prompt again.
 - Usage can block an app from one host in its history. A host name is blocked at each address it resolved to since the engine started, and the row shows it as blocked.
 
+### Added
+- On Windows the Alerts blocks filter lists connections Iris stopped, from block rules, lockdown, and ask mode, with the remote address, how many tries, and when it last happened. Repeated tries fold into one row; rows older than 30 days or past the newest 5000 are dropped.
+
 ### Changed
 - The wire protocol is now version 18. The setup updates the app and engine together.
 

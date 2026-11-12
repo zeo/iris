@@ -1,5 +1,5 @@
 use iris_core::{
-    AdapterKind, Alert, Annotation, AppId, ByteCounts, EnrichTarget, FirewallMode, HostUsage, KnownApp, Profile, ProfileState, RateCap,
+    AdapterKind, Alert, Annotation, AppId, BlockedConnection, ByteCounts, EnrichTarget, FirewallMode, HostUsage, KnownApp, Profile, ProfileState, RateCap,
     Panel, Quota, QuotaLimit, Rule, RuleAction, RuleLifetime, RuleProposal, RuleScope, StatsTick, StoredRule, UsageBucket,
     UsageQuery,
 };
@@ -27,8 +27,8 @@ use std::net::IpAddr;
 /// v17 adds per-connection rates.
 /// v18 carries the firewall mode in every tick, adds a totals-only tick
 /// subscription, removes the unused connection list and prompt suppression
-/// messages, lets a prompt answer carry a host scope and a lifetime, and adds
-/// the addresses a host name resolved to.
+/// messages, lets a prompt answer carry a host scope and a lifetime, adds
+/// the addresses a host name resolved to, and adds the blocked-connection log.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 /// conditions that quietly undermine the engine, for the UI to surface
@@ -161,6 +161,11 @@ pub enum ClientMessage {
     ListAlerts {
         req: u64,
         unacked_only: bool,
+    },
+    /// connections iris's own filters dropped, most recent first
+    ListBlocked {
+        req: u64,
+        limit: u32,
     },
     /// pending connection decisions that have not been deferred from the
     /// desktop prompt surface
@@ -295,6 +300,7 @@ pub enum Reply {
     Apps(Vec<KnownApp>),
     RuleAdded(StoredRule),
     Alerts(Vec<Alert>),
+    Blocked(Vec<BlockedConnection>),
     Usage(Vec<UsageBucket>),
     /// cached annotations, one entry per requested target that had any
     Enrichment(Vec<(EnrichTarget, Vec<Annotation>)>),

@@ -26,6 +26,36 @@ export interface Alert {
   acknowledged: boolean;
 }
 
+// repeated drops of one connection by an iris filter, folded into one row
+export interface BlockedConnection {
+  app: string;
+  remote: { addr: string; port: number; protocol: "tcp" | "udp" };
+  direction: "inbound" | "outbound";
+  first_ms: number;
+  last_ms: number;
+  count: number;
+}
+
+// only the windows engine records what its filters drop
+export const blockedLogSupported = navigator.userAgent.includes("Windows");
+
+export function blockedSummary(row: BlockedConnection): string {
+  const { addr, port } = row.remote;
+  const host = addr.includes(":") ? `[${addr}]` : addr;
+  const remote = port ? `${host}:${port}` : addr;
+  const verb = row.direction === "inbound" ? "accepting" : "reaching";
+  const times = row.count > 1 ? `, ${row.count} times` : "";
+  return `was blocked from ${verb} ${remote}${times}.`;
+}
+
+export async function listBlocked(limit: number): Promise<BlockedConnection[]> {
+  try {
+    return await invoke<BlockedConnection[]>("list_blocked", { limit });
+  } catch {
+    return [];
+  }
+}
+
 const [alerts, setAlerts] = createSignal<Alert[]>([]);
 export { alerts };
 

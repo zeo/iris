@@ -60,6 +60,12 @@ pub fn current(app: &tauri::AppHandle) -> HostPrefs {
         .unwrap_or_default()
 }
 
+/// the saved prefs for the settings page, or none before the host first saved any
+#[tauri::command]
+pub fn host_prefs(app: tauri::AppHandle) -> Option<HostPrefs> {
+    path(&app).is_some_and(|path| path.exists()).then(|| current(&app))
+}
+
 /// change and save the prefs; a failed write only costs the change at next boot
 pub fn update(app: &tauri::AppHandle, change: impl FnOnce(&mut HostPrefs)) {
     let state = app.state::<PrefsState>();

@@ -119,6 +119,7 @@ pub fn run() {
             rulectl::set_firewall_mode,
             notify::set_notifications_enabled,
             notify::set_info_cards,
+            prefs::host_prefs,
             report_display_scale,
             ipc::ack_alert,
             ipc::decide_alert,

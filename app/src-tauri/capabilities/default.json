@@ -44,6 +44,7 @@
     "allow-set-rule-grant",
     "allow-set-notifications-enabled",
     "allow-set-info-cards",
+    "allow-host-prefs",
     "allow-set-firewall-mode",
     "allow-resize-connection-prompts",
     "allow-report-display-scale",

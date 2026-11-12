@@ -23,6 +23,7 @@ fn main() {
         "set_profiles",
         "set_tray_graph",
         "set_info_cards",
+        "host_prefs",
         "forget_apps",
         "rule_grant",
         "set_rule_grant",

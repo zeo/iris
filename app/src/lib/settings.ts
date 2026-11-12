@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { createSignal } from "solid-js";
 import { persisted } from "./persist";
 
 // user preferences that live only in the UI. anything the engine must enforce
@@ -10,62 +11,79 @@ export type RateUnits = "bytes" | "bits";
 // usually quoted). totals always stay in bytes.
 const [rateUnits, setRateUnits] = persisted<RateUnits>("settings.rateUnits", "bytes");
 
-// whether an alert that needs no answer raises a passing card. the card is
-// raised by the Rust host, which saves the preference so it holds from boot
-// while this webview is closed; it is mirrored there on load and on change.
-const [showNotifications, setShowNotificationsSignal] = persisted<boolean>(
-  "settings.notifications",
-  true,
-);
-const syncNotifications = (enabled: boolean) => {
-  try {
-    void invoke("set_notifications_enabled", { enabled }).catch(() => {});
-  } catch {
-    /* host command unavailable (tests, plain browser) */
-  }
-};
-const setShowNotifications = (enabled: boolean): boolean => {
-  setShowNotificationsSignal(enabled);
-  syncNotifications(enabled);
-  return enabled;
-};
-syncNotifications(showNotifications());
-
 // which kinds of passing card show; decision prompts always do
 export type InfoKind = "new_app" | "watch" | "quota" | "caps" | "plugin";
 type InfoCards = Record<InfoKind, boolean>;
 const ALL_CARDS: InfoCards = { new_app: true, watch: true, quota: true, caps: true, plugin: true };
-const [savedCards, setSavedCards] = persisted<Partial<InfoCards>>("settings.infoCards", ALL_CARDS);
-const infoCards = (): InfoCards => ({ ...ALL_CARDS, ...savedCards() });
-const syncInfoCards = (cards: InfoCards) => {
-  try {
-    void invoke("set_info_cards", { cards }).catch(() => {});
-  } catch {
-    /* host command unavailable (tests, plain browser) */
-  }
-};
-const setInfoCard = (kind: InfoKind, enabled: boolean) => {
-  const cards = { ...infoCards(), [kind]: enabled };
-  setSavedCards(cards);
-  syncInfoCards(cards);
-};
-syncInfoCards(infoCards());
 
-// the live throughput graph in the tray icon, drawn by the Rust host
-const [trayGraph, setTrayGraphSignal] = persisted<boolean>("settings.trayGraph", true);
-const syncTrayGraph = (enabled: boolean) => {
+// the rust host acts on these and saves them so they hold from boot with this
+// webview closed; it owns them, and this module shows and edits its copy
+interface HostPrefs {
+  notifications: boolean;
+  tray_graph: boolean;
+  info_cards: InfoCards;
+}
+const [showNotifications, setNotificationsSignal] = createSignal(true);
+const [infoCards, setInfoCardsSignal] = createSignal<InfoCards>(ALL_CARDS);
+const [trayGraph, setTrayGraphSignal] = createSignal(true);
+
+const host = <T>(command: string, args?: Record<string, unknown>): Promise<T | undefined> => {
   try {
-    void invoke("set_tray_graph", { enabled }).catch(() => {});
+    return invoke<T>(command, args).catch(() => undefined);
   } catch {
     /* host command unavailable (tests, plain browser) */
+    return Promise.resolve(undefined);
   }
 };
-const setTrayGraph = (enabled: boolean): boolean => {
-  setTrayGraphSignal(enabled);
-  syncTrayGraph(enabled);
+
+const setShowNotifications = (enabled: boolean): boolean => {
+  setNotificationsSignal(enabled);
+  void host("set_notifications_enabled", { enabled });
   return enabled;
 };
-syncTrayGraph(trayGraph());
+const setInfoCards = (cards: InfoCards) => {
+  setInfoCardsSignal(cards);
+  void host("set_info_cards", { cards });
+};
+const setInfoCard = (kind: InfoKind, enabled: boolean) => setInfoCards({ ...infoCards(), [kind]: enabled });
+const setTrayGraph = (enabled: boolean): boolean => {
+  setTrayGraphSignal(enabled);
+  void host("set_tray_graph", { enabled });
+  return enabled;
+};
+
+// before 0.2.0 these lived only in this webview's storage
+const LEGACY_KEYS = ["settings.notifications", "settings.trayGraph", "settings.infoCards"];
+const legacy = (key: string): unknown => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw == null ? undefined : JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+};
+
+void host<HostPrefs | null>("host_prefs").then((prefs) => {
+  if (prefs === undefined) return;
+  if (prefs) {
+    setNotificationsSignal(prefs.notifications);
+    setInfoCardsSignal({ ...ALL_CARDS, ...prefs.info_cards });
+    setTrayGraphSignal(prefs.tray_graph);
+  } else {
+    // the host has saved nothing yet: carry over what an older version kept here
+    const notifications = legacy("settings.notifications");
+    if (typeof notifications === "boolean") setShowNotifications(notifications);
+    const cards = legacy("settings.infoCards");
+    if (cards && typeof cards === "object") setInfoCards({ ...ALL_CARDS, ...(cards as Partial<InfoCards>) });
+    const graph = legacy("settings.trayGraph");
+    if (typeof graph === "boolean") setTrayGraph(graph);
+  }
+  try {
+    for (const key of LEGACY_KEYS) localStorage.removeItem(key);
+  } catch {
+    /* storage unavailable */
+  }
+});
 
 
 export {

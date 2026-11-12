@@ -50,9 +50,9 @@ pub struct Aggregator {
     /// per-adapter-kind rollup across all processes; ordered so every flush
     /// lists kinds stably
     adapters: BTreeMap<AdapterKind, KindAccum>,
-    /// this window's bytes per (app path, remote address, local port); emptied
-    /// every flush
-    remotes: HashMap<(String, IpAddr, u16), ByteCounts>,
+    /// this window's bytes per app path, then per (remote address, local
+    /// port); emptied every flush
+    remotes: HashMap<String, HashMap<(IpAddr, u16), ByteCounts>>,
     window_start: Instant,
 }
 
@@ -130,10 +130,13 @@ impl Aggregator {
         if sent == 0 && recv == 0 {
             return;
         }
-        self.remotes
-            .entry((path.to_string(), remote, local_port))
-            .or_default()
-            .add(ByteCounts { sent, recv });
+        let delta = ByteCounts { sent, recv };
+        let key = (remote, local_port);
+        if let Some(by_remote) = self.remotes.get_mut(path) {
+            by_remote.entry(key).or_default().add(delta);
+        } else {
+            self.remotes.insert(path.to_string(), HashMap::from([(key, delta)]));
+        }
     }
 
     /// ensure a process is tracked even with no bytes yet (it only holds open
@@ -184,12 +187,14 @@ impl Aggregator {
         let remotes = self
             .remotes
             .drain()
-            .map(|((path, remote, local_port), bytes)| RemoteBytes {
-                path,
-                remote,
-                local_port,
-                bytes,
-                rate: ByteCounts { sent: per_sec(bytes.sent), recv: per_sec(bytes.recv) },
+            .flat_map(|(path, by_remote)| {
+                by_remote.into_iter().map(move |((remote, local_port), bytes)| RemoteBytes {
+                    path: path.clone(),
+                    remote,
+                    local_port,
+                    bytes,
+                    rate: ByteCounts { sent: per_sec(bytes.sent), recv: per_sec(bytes.recv) },
+                })
             })
             .collect();
 
@@ -244,6 +249,35 @@ mod tests {
         assert_eq!(remotes[1].rate, ByteCounts { sent: 30, recv: 40 });
         assert_eq!(remotes[2].bytes.recv, 900);
         assert!(agg.flush(at(t0, 2000)).remotes.is_empty());
+    }
+
+    #[test]
+    fn remote_rows_for_two_apps_on_one_address_stay_apart() {
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
+        let dns: IpAddr = "1.1.1.1".parse().unwrap();
+        agg.record_remote("c:/x.exe", dns, 5000, 10, 0);
+        agg.record_remote("c:/y.exe", dns, 5000, 0, 7);
+        let mut remotes = agg.flush(at(t0, 1000)).remotes;
+        remotes.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(remotes.len(), 2);
+        assert_eq!(remotes[0].path, "c:/x.exe");
+        assert_eq!(remotes[0].bytes, ByteCounts { sent: 10, recv: 0 });
+        assert_eq!(remotes[1].path, "c:/y.exe");
+        assert_eq!(remotes[1].bytes, ByteCounts { sent: 0, recv: 7 });
+    }
+
+    #[test]
+    fn remote_map_starts_empty_after_flush_and_refills() {
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
+        let dns: IpAddr = "1.1.1.1".parse().unwrap();
+        agg.record_remote("c:/x.exe", dns, 5000, 10, 20);
+        assert_eq!(agg.flush(at(t0, 1000)).remotes.len(), 1);
+        agg.record_remote("c:/x.exe", dns, 5000, 3, 4);
+        let remotes = agg.flush(at(t0, 2000)).remotes;
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].bytes, ByteCounts { sent: 3, recv: 4 });
     }
 
     #[test]

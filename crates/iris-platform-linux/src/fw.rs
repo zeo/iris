@@ -417,8 +417,7 @@ impl Drop for Wfp {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         remove_table();
-        // the verdict threads block in recv; they exit when their queue closes on
-        // process teardown. detach rather than join so drop never hangs.
+        // the verdict threads poll stop between reads and exit within one poll; detach so drop never waits
         self.threads.clear();
     }
 }
@@ -518,6 +517,9 @@ fn verdict_loop(
         let _ = ready.send(Err(format!("cannot bind NFQUEUE {queue}: {e}")));
         return;
     }
+    // the loop checks held packets, timeouts, and stop between reads, so a read
+    // must never wait for the next packet
+    nfq.set_nonblocking(true);
     ready_workers.fetch_add(1, Ordering::Release);
     let _ = ready.send(Ok(()));
     let mut held: Vec<HeldPacket> = Vec::new();

@@ -47,13 +47,17 @@ pub(crate) fn publish_attribution(owners: &HashMap<u64, u32>, sockets: &[sockets
     snapshot.generation = snapshot.generation.wrapping_add(1).max(1);
     snapshot.published_at = Some(std::time::Instant::now());
     snapshot.owners.clone_from(owners);
-    snapshot.by_local.clear();
+    snapshot.by_local = index_by_local(sockets);
+}
+
+/// index sockets by local endpoint. a dual-stack socket reports ipv4 peers as
+/// ::ffff:a.b.c.d, so keys are canonical to match the plain address in a packet
+fn index_by_local<'a>(sockets: impl IntoIterator<Item = &'a sockets::SockInfo>) -> HashMap<(IpAddr, u16), u32> {
+    let mut by_local = HashMap::new();
     for socket in sockets {
-        snapshot
-            .by_local
-            .entry(socket.local)
-            .or_insert(socket.inode);
+        by_local.entry((socket.local.0.to_canonical(), socket.local.1)).or_insert(socket.inode);
     }
+    by_local
 }
 
 #[derive(Clone)]
@@ -958,12 +962,7 @@ impl Resolver {
             return;
         }
         self.owners = crate::proc::socket_inode_owners();
-        self.by_local.clear();
-        for s in sockets::dump_for_attribution() {
-            self.by_local
-                .entry((s.local.0, s.local.1))
-                .or_insert(s.inode);
-        }
+        self.by_local = index_by_local(&sockets::dump_for_attribution());
         self.refreshed_at = std::time::Instant::now();
         if self.cache_cleared_at.elapsed() >= std::time::Duration::from_secs(30) {
             self.cache.clear();
@@ -978,43 +977,28 @@ impl Resolver {
     // right now, not only the ones the monitor saw up to a second ago.
     fn refresh_live(&mut self) {
         self.owners = crate::proc::socket_inode_owners();
-        self.by_local.clear();
-        for s in sockets::dump_for_attribution() {
-            self.by_local
-                .entry((s.local.0, s.local.1))
-                .or_insert(s.inode);
-        }
+        self.by_local = index_by_local(&sockets::dump_for_attribution());
         self.refreshed_at = std::time::Instant::now();
     }
 
+    /// the exact local address first, then a wildcard-bound socket on the port
+    fn inode_for(&self, local: (IpAddr, u16)) -> Option<u32> {
+        let addr = local.0.to_canonical();
+        let any_v4 = IpAddr::from([0u8; 4]);
+        let any_v6 = IpAddr::from([0u8; 16]);
+        // a socket bound to [::] without v6only also receives ipv4
+        let candidates: &[IpAddr] = if addr.is_ipv4() { &[addr, any_v4, any_v6] } else { &[addr, any_v6] };
+        candidates.iter().find_map(|candidate| self.by_local.get(&(*candidate, local.1)).copied())
+    }
+
     fn cached_exe(&mut self, local: (IpAddr, u16)) -> Option<String> {
-        // try the exact local address first, then any socket on the port (a
-        // wildcard-bound socket shows 0.0.0.0 in sock_diag)
-        let inode = self
-            .by_local
-            .get(&local)
-            .or_else(|| {
-                let wild = if local.0.is_ipv4() {
-                    IpAddr::from([0, 0, 0, 0])
-                } else {
-                    IpAddr::from([0u8; 16])
-                };
-                self.by_local.get(&(wild, local.1))
-            })
-            .copied()?;
+        let inode = self.inode_for(local)?;
         let pid = *self.owners.get(&(inode as u64))?;
         self.cache.resolve(pid)
     }
 
     fn attribution_owner(&self, local: (IpAddr, u16)) -> (Option<u32>, Option<u32>) {
-        let inode = self.by_local.get(&local).copied().or_else(|| {
-            let wild = if local.0.is_ipv4() {
-                IpAddr::from([0, 0, 0, 0])
-            } else {
-                IpAddr::from([0u8; 16])
-            };
-            self.by_local.get(&(wild, local.1)).copied()
-        });
+        let inode = self.inode_for(local);
         let pid = inode.and_then(|inode| self.owners.get(&(inode as u64)).copied());
         (inode, pid)
     }
@@ -1023,8 +1007,8 @@ impl Resolver {
 #[cfg(test)]
 mod packet_tests {
     use super::{
-        attribution_timeout_verdict, parse_tuple, publish_attribution, ruleset, Enforce, Outcome,
-        Resolver, RuleMap, QUEUE_IN, QUEUE_OUT,
+        attribution_timeout_verdict, index_by_local, parse_tuple, publish_attribution, ruleset,
+        Enforce, Outcome, Resolver, RuleMap, QUEUE_IN, QUEUE_OUT,
     };
     use crate::sockets::SockInfo;
     use iris_core::{AppId, Direction, Endpoint, FirewallMode, Protocol, RuleScope};
@@ -1163,6 +1147,29 @@ mod packet_tests {
 
         release.send(()).unwrap();
         client.join().unwrap();
+    }
+
+    #[test]
+    fn mapped_and_wildcard_v6_sockets_attribute_ipv4_packets() {
+        let socket = |local: (IpAddr, u16), inode: u32| SockInfo {
+            protocol: Protocol::Tcp,
+            state: 1,
+            local,
+            remote: (IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+            uid: 0,
+            inode,
+            cookie: 1,
+            bytes: None,
+        };
+        let sockets = [
+            socket(("::ffff:192.0.2.10".parse().unwrap(), 5000), 11),
+            socket((IpAddr::from([0u8; 16]), 6000), 12),
+        ];
+        let mut resolver = Resolver::new();
+        resolver.by_local = index_by_local(&sockets);
+        assert_eq!(resolver.inode_for(("192.0.2.10".parse().unwrap(), 5000)), Some(11));
+        assert_eq!(resolver.inode_for(("192.0.2.99".parse().unwrap(), 6000)), Some(12));
+        assert_eq!(resolver.inode_for(("2001:db8::1".parse().unwrap(), 5000)), None);
     }
 
 }

@@ -911,10 +911,11 @@ mod tests {
             cookie: 9,
             bytes: Some((350, 600)),
         };
-        let aggregator = Mutex::new(Aggregator::new(0));
+        let start = std::time::Instant::now();
+        let aggregator = Mutex::new(Aggregator::new(start));
 
         account_closed_tcp(&socket, &seen, &owners, &HashMap::new(), &aggregator);
-        let sample = aggregator.lock().unwrap().flush(1000).procs.pop().unwrap();
+        let sample = aggregator.lock().unwrap().flush(start + std::time::Duration::from_secs(1)).procs.pop().unwrap();
         assert_eq!(sample.pid, 42);
         assert_eq!(sample.total.sent, 250);
         assert_eq!(sample.total.recv, 400);
@@ -947,7 +948,8 @@ mod tests {
                 std::time::Instant::now(),
             ),
         );
-        let aggregator = Mutex::new(Aggregator::new(0));
+        let start = std::time::Instant::now();
+        let aggregator = Mutex::new(Aggregator::new(start));
 
         account_closed_tcp(
             &socket,
@@ -956,7 +958,7 @@ mod tests {
             &flow_owners,
             &aggregator,
         );
-        let sample = aggregator.lock().unwrap().flush(1000).procs.pop().unwrap();
+        let sample = aggregator.lock().unwrap().flush(start + std::time::Duration::from_secs(1)).procs.pop().unwrap();
         assert_eq!(sample.total.sent, 350);
         assert_eq!(sample.total.recv, 600);
     }

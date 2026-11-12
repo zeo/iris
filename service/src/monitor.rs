@@ -16,7 +16,7 @@ use std::io;
 use std::net::IpAddr;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -372,7 +372,7 @@ pub fn spawn(
 ) {
     #[cfg(not(has_platform))]
     let _ = &rules;
-    let agg = Arc::new(Mutex::new(Aggregator::new(now_ms())));
+    let agg = Arc::new(Mutex::new(Aggregator::new(Instant::now())));
 
     #[cfg(has_platform)]
     let dns = crate::platform::new_map();

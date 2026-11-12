@@ -2,6 +2,7 @@ use crate::model::{AdapterKind, AdapterSample, ByteCounts};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
+use std::time::Instant;
 
 /// one process's byte deltas for a sample window, produced by [`Aggregator::flush`].
 /// the service's tracker groups these by app path and attaches connections.
@@ -40,9 +41,10 @@ pub struct Flushed {
 /// (keyed by owning PID); the service's tracker calls [`Aggregator::flush`] on a
 /// fixed cadence and rolls the per-process rows up into per-app tree nodes.
 ///
-/// rates are computed over the real elapsed wall-clock window, not the nominal
-/// cadence. the aggregator does not decide process lifetime: it keeps every
-/// process until the tracker [`Aggregator::forget`]s it.
+/// rates are computed over the real elapsed monotonic window, not the nominal
+/// cadence, so a wall-clock step cannot inflate them. the aggregator does not
+/// decide process lifetime: it keeps every process until the tracker
+/// [`Aggregator::forget`]s it.
 pub struct Aggregator {
     procs: HashMap<u32, PidAccum>,
     /// per-adapter-kind rollup across all processes; ordered so every flush
@@ -51,7 +53,7 @@ pub struct Aggregator {
     /// this window's bytes per (app path, remote address, local port); emptied
     /// every flush
     remotes: HashMap<(String, IpAddr, u16), ByteCounts>,
-    window_start_ms: u64,
+    window_start: Instant,
 }
 
 struct PidAccum {
@@ -68,12 +70,12 @@ struct KindAccum {
 }
 
 impl Aggregator {
-    pub fn new(now_ms: u64) -> Self {
+    pub fn new(now: Instant) -> Self {
         Aggregator {
             procs: HashMap::new(),
             adapters: BTreeMap::new(),
             remotes: HashMap::new(),
-            window_start_ms: now_ms,
+            window_start: now,
         }
     }
 
@@ -150,10 +152,10 @@ impl Aggregator {
     /// is capped at one second's worth of bytes so a stalled tick (system
     /// sleep, debugger) reports a momentary burst rather than hours of
     /// accumulated traffic as a single-second spike.
-    pub fn flush(&mut self, now_ms: u64) -> Flushed {
-        let elapsed_ms = now_ms.saturating_sub(self.window_start_ms).max(1);
+    pub fn flush(&mut self, now: Instant) -> Flushed {
+        let elapsed_ms = now.duration_since(self.window_start).as_millis().max(1);
         let elapsed = elapsed_ms.min(1000);
-        let per_sec = |bytes: u64| -> u64 { ((bytes as u128 * 1000) / elapsed as u128) as u64 };
+        let per_sec = |bytes: u64| -> u64 { ((bytes as u128 * 1000) / elapsed) as u64 };
 
         let mut procs = Vec::with_capacity(self.procs.len());
         for (pid, accum) in self.procs.iter_mut() {
@@ -191,7 +193,7 @@ impl Aggregator {
             })
             .collect();
 
-        self.window_start_ms = now_ms;
+        self.window_start = now;
         Flushed {
             procs,
             adapters,
@@ -203,14 +205,20 @@ impl Aggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     const ETH: AdapterKind = AdapterKind::Ethernet;
 
+    fn at(start: Instant, ms: u64) -> Instant {
+        start + Duration::from_millis(ms)
+    }
+
     #[test]
     fn rate_is_bytes_over_elapsed_seconds() {
-        let mut agg = Aggregator::new(0);
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
         agg.record(100, "c:/x.exe", Some("X"), ETH, 1000, 2000);
-        let out = agg.flush(1000).procs;
+        let out = agg.flush(at(t0, 1000)).procs;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].rate_sent, 1000);
         assert_eq!(out[0].rate_recv, 2000);
@@ -219,7 +227,8 @@ mod tests {
 
     #[test]
     fn remote_bytes_split_by_app_and_address_and_reset_each_window() {
-        let mut agg = Aggregator::new(0);
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
         let dns: IpAddr = "1.1.1.1".parse().unwrap();
         let cdn: IpAddr = "203.0.113.5".parse().unwrap();
         agg.record_remote("c:/x.exe", dns, 5000, 10, 20);
@@ -227,29 +236,31 @@ mod tests {
         agg.record_remote("c:/x.exe", dns, 5001, 1, 1);
         agg.record_remote("c:/x.exe", cdn, 5002, 0, 900);
         agg.record_remote("c:/y.exe", dns, 5000, 0, 0);
-        let mut remotes = agg.flush(500).remotes;
+        let mut remotes = agg.flush(at(t0, 500)).remotes;
         remotes.sort_by_key(|r| r.bytes.total());
         assert_eq!(remotes.len(), 3);
         assert_eq!((remotes[1].remote, remotes[1].local_port), (dns, 5000));
         assert_eq!(remotes[1].bytes, ByteCounts { sent: 15, recv: 20 });
         assert_eq!(remotes[1].rate, ByteCounts { sent: 30, recv: 40 });
         assert_eq!(remotes[2].bytes.recv, 900);
-        assert!(agg.flush(2000).remotes.is_empty());
+        assert!(agg.flush(at(t0, 2000)).remotes.is_empty());
     }
 
     #[test]
     fn half_second_window_doubles_the_rate() {
-        let mut agg = Aggregator::new(0);
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
         agg.record(1, "c:/x.exe", None, ETH, 500, 0);
-        assert_eq!(agg.flush(500).procs[0].rate_sent, 1000);
+        assert_eq!(agg.flush(at(t0, 500)).procs[0].rate_sent, 1000);
     }
 
     #[test]
     fn totals_accumulate_but_rate_resets_and_proc_persists() {
-        let mut agg = Aggregator::new(0);
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
         agg.record(1, "c:/x.exe", None, ETH, 100, 0);
-        let _ = agg.flush(1000);
-        let out = agg.flush(2000).procs;
+        let _ = agg.flush(at(t0, 1000));
+        let out = agg.flush(at(t0, 2000)).procs;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].rate_sent, 0);
         assert_eq!(out[0].total.sent, 100);
@@ -257,11 +268,12 @@ mod tests {
 
     #[test]
     fn pid_reuse_by_a_different_image_starts_fresh() {
-        let mut agg = Aggregator::new(0);
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
         agg.record(1, "c:/old.exe", Some("Old"), ETH, 500, 0);
         // the old process exited and the pid was reused by a different image
         agg.record(1, "c:/new.exe", Some("New"), ETH, 100, 0);
-        let out = agg.flush(1000).procs;
+        let out = agg.flush(at(t0, 1000)).procs;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, "c:/new.exe");
         assert_eq!(out[0].name.as_deref(), Some("New"));
@@ -271,28 +283,31 @@ mod tests {
 
     #[test]
     fn separate_pids_stay_separate() {
-        let mut agg = Aggregator::new(0);
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
         agg.record(1, "c:/x.exe", None, ETH, 100, 0);
         agg.record(2, "c:/x.exe", None, ETH, 200, 0);
-        assert_eq!(agg.flush(1000).procs.len(), 2);
+        assert_eq!(agg.flush(at(t0, 1000)).procs.len(), 2);
     }
 
     #[test]
     fn touch_then_forget() {
-        let mut agg = Aggregator::new(0);
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
         agg.touch(5, "c:/conn.exe");
-        assert_eq!(agg.flush(1000).procs.len(), 1);
+        assert_eq!(agg.flush(at(t0, 1000)).procs.len(), 1);
         agg.forget(5);
-        assert!(agg.flush(2000).procs.is_empty());
+        assert!(agg.flush(at(t0, 2000)).procs.is_empty());
     }
 
     #[test]
     fn adapter_rollup_splits_by_kind_and_keeps_totals() {
-        let mut agg = Aggregator::new(0);
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
         agg.record(1, "c:/x.exe", None, AdapterKind::Wifi, 300, 0);
         agg.record(2, "c:/y.exe", None, AdapterKind::Wifi, 200, 100);
         agg.record(1, "c:/x.exe", None, AdapterKind::Vpn, 0, 50);
-        let first = agg.flush(1000).adapters;
+        let first = agg.flush(at(t0, 1000)).adapters;
         assert_eq!(first.len(), 2);
         // btree order: vpn sorts after wifi in enum order (wifi < vpn)
         assert_eq!(first[0].kind, AdapterKind::Wifi);
@@ -301,20 +316,31 @@ mod tests {
         assert_eq!(first[1].kind, AdapterKind::Vpn);
         assert_eq!(first[1].total.recv, 50);
         // window resets, session totals persist
-        let second = agg.flush(2000).adapters;
+        let second = agg.flush(at(t0, 2000)).adapters;
         assert_eq!(second[0].rate_sent, 0);
         assert_eq!(second[0].total.sent, 500);
     }
 
     #[test]
     fn a_stalled_window_does_not_report_hours_of_traffic_as_one_second() {
-        let mut agg = Aggregator::new(0);
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
         agg.record(1, "c:/x.exe", None, ETH, 3_600_000_000, 0);
         // the machine slept for an hour between ticks; the rate still reads as
         // one second of traffic, and the window start advances to now so the
         // next flush does not re-spike on the same backlog
-        let out = agg.flush(3_600_000_000).procs;
+        let out = agg.flush(at(t0, 3_600_000_000)).procs;
         assert_eq!(out[0].rate_sent, 3_600_000_000);
-        assert_eq!(agg.flush(3_600_001_000).procs[0].rate_sent, 0);
+        assert_eq!(agg.flush(at(t0, 3_600_001_000)).procs[0].rate_sent, 0);
+    }
+
+    #[test]
+    fn the_window_is_timed_by_the_instant_passed_in() {
+        let t0 = Instant::now();
+        let mut agg = Aggregator::new(t0);
+        agg.record(1, "c:/x.exe", None, ETH, 1000, 0);
+        assert_eq!(agg.flush(at(t0, 1000)).procs[0].rate_sent, 1000);
+        agg.record(1, "c:/x.exe", None, ETH, 1000, 0);
+        assert_eq!(agg.flush(at(t0, 2000)).procs[0].rate_sent, 1000);
     }
 }

@@ -135,7 +135,7 @@ impl Tracker {
             procs: pid_samples,
             adapters,
             remotes,
-        } = lock_agg(&self.agg).flush(now);
+        } = lock_agg(&self.agg).flush(std::time::Instant::now());
 
         // name each remote by the hostname its connection resolved, when it did
         let names: HashMap<std::net::IpAddr, &str> = conns_by_pid

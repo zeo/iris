@@ -569,7 +569,9 @@ fn verdict_loop(
                     tracing::warn!(?dir, ?local, ?inode, ?pid, "unable to attribute queued connection");
                     decisions.push((
                         packet.message,
-                        PacketDecision::Verdict(attribution_timeout_verdict()),
+                        PacketDecision::Verdict(attribution_timeout_verdict(
+                            rules.lock().unwrap_or_else(|error| error.into_inner()).mode,
+                        )),
                     ));
                 } else {
                     waiting.push(packet);
@@ -764,8 +766,12 @@ enum PacketDecision {
     },
 }
 
-fn attribution_timeout_verdict() -> nfq::Verdict {
-    nfq::Verdict::Drop
+fn attribution_timeout_verdict(mode: FirewallMode) -> nfq::Verdict {
+    // notify lets every connection through, so one it cannot name passes too
+    match mode {
+        FirewallMode::Notify => nfq::Verdict::Accept,
+        FirewallMode::Ask | FirewallMode::Lockdown => nfq::Verdict::Drop,
+    }
 }
 
 /// decide a fresh packet, giving a socket that is still being created a few
@@ -1067,8 +1073,10 @@ mod packet_tests {
     }
 
     #[test]
-    fn unresolved_owner_fails_closed() {
-        assert!(matches!(attribution_timeout_verdict(), nfq::Verdict::Drop));
+    fn an_unattributed_flow_fails_closed_unless_notify() {
+        assert!(matches!(attribution_timeout_verdict(FirewallMode::Ask), nfq::Verdict::Drop));
+        assert!(matches!(attribution_timeout_verdict(FirewallMode::Lockdown), nfq::Verdict::Drop));
+        assert!(matches!(attribution_timeout_verdict(FirewallMode::Notify), nfq::Verdict::Accept));
     }
 
     #[test]

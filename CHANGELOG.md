@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+## [0.2.2] - 2026-11-12
+
+### Added
+- Settings choose which info cards show: first-seen apps, watcher alerts, data quotas, paused download limits, and plugin alerts, each on its own switch. Allow and Block prompts always show.
+
+### Fixed
+- One decision card per app and direction. Answering it settles every connection that app was waiting on, instead of leaving a stack of older cards for the same app.
+- Prompts for an app that no longer exists on disk (an updated Store app moves to a new folder) or that are over a day old are settled by the engine. Answering one no longer fails with "resource not found".
+- Cards no longer flicker or replay their entrance when the stack refreshes.
+- An error on a card stays inside the card and the Allow and Block buttons stay reachable.
+- Right-clicking the app or a card no longer opens the browser menu.
+- The main window opens dark straight away instead of flashing white while the page loads.
+
+### Changed
+- Windows releases ship only the shared installer: the online and offline setups and the signed package. The NSIS setup, the MSI, and the updater's latest.json are gone. Copies installed with an NSIS or MSI setup from 0.1.6 on move to the shared installer at their next update check; older copies need the new setup installed by hand.
+- The Linux release no longer publishes updater metadata; the .deb, .rpm, and AppImage stay.
+
 ## [0.2.1] - 2026-11-12
 
 ### Fixed

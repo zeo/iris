@@ -357,13 +357,16 @@ impl Wfp {
 
     /// remove the filters backing a rule
     pub fn remove(&mut self, filter_ids: &[u64]) -> EngineResult<()> {
+        // already gone is the outcome the caller wants, and a retry after a
+        // partial failure meets the filters that did go
+        const FILTER_NOT_FOUND: u32 = 0x8032_0003;
         unsafe {
             for id in filter_ids {
                 // a delete that fails silently leaves the filter enforcing in
                 // BFE while the rules file says otherwise; surface it so the
                 // caller can report and retry instead of trusting a lie
                 let rc = FwpmFilterDeleteById0(self.engine, *id);
-                if !ok(rc) {
+                if !ok(rc) && rc != FILTER_NOT_FOUND {
                     return Err(EngineError::Os(format!(
                         "FwpmFilterDeleteById0({id}) failed: {rc:#x}"
                     )));
@@ -428,12 +431,12 @@ impl Wfp {
             return Ok(());
         }
         if !enabled {
+            let ids: Vec<u64> = self.ask_filters.iter().map(|(id, _)| *id).collect();
+            self.remove(&ids)?;
+            self.ask_filters.clear();
+            // only now: a deny still in place needs the prompt source live
             self.events = None;
-            let ids: Vec<u64> = std::mem::take(&mut self.ask_filters)
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect();
-            return self.remove(&ids);
+            return Ok(());
         }
         unsafe {
             const LAYERS: [(GUID, Direction); 4] = [
@@ -492,8 +495,10 @@ impl Wfp {
             return Ok(());
         }
         if !enabled {
-            let ids = std::mem::take(&mut self.lockdown_filters);
-            return self.remove(&ids);
+            let ids = self.lockdown_filters.clone();
+            self.remove(&ids)?;
+            self.lockdown_filters.clear();
+            return Ok(());
         }
         let mut ids = Vec::with_capacity(4);
         for layer in [Direction::Outbound, Direction::Inbound]

@@ -7,10 +7,12 @@ use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_
 
 const POLICY: &str = r"SOFTWARE\Policies\Microsoft\WindowsFirewall";
 const LOCAL: &str = r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy";
-const PROFILES: [(&str, &str); 3] = [
-    ("DomainProfile", "domain"),
-    ("StandardProfile", "private"),
-    ("PublicProfile", "public"),
+// group policy names the private profile PrivateProfile; the local store and
+// older policy templates name it StandardProfile
+const PROFILES: [(&[&str], &str, &str); 3] = [
+    (&["DomainProfile"], "DomainProfile", "domain"),
+    (&["PrivateProfile", "StandardProfile"], "StandardProfile", "private"),
+    (&["PublicProfile"], "PublicProfile", "public"),
 ];
 
 fn dword(key: &str, value: &str) -> Option<u32> {
@@ -31,17 +33,20 @@ fn dword(key: &str, value: &str) -> Option<u32> {
 }
 
 /// a group policy value wins over the local one, as the firewall applies them
-fn setting(profile: &str, value: &str) -> Option<u32> {
-    dword(&format!(r"{POLICY}\{profile}"), value).or_else(|| dword(&format!(r"{LOCAL}\{profile}"), value))
+fn setting(policy: &[&str], local: &str, value: &str) -> Option<u32> {
+    policy
+        .iter()
+        .find_map(|key| dword(&format!(r"{POLICY}\{key}"), value))
+        .or_else(|| dword(&format!(r"{LOCAL}\{local}"), value))
 }
 
 /// the firewall profiles that are on and block outbound connections by default
 pub fn outbound_blocked_profiles() -> Vec<String> {
     PROFILES
         .iter()
-        .filter(|(key, _)| setting(key, "EnableFirewall").unwrap_or(1) != 0)
-        .filter(|(key, _)| setting(key, "DefaultOutboundAction") == Some(1))
-        .map(|(_, name)| name.to_string())
+        .filter(|(policy, local, _)| setting(policy, local, "EnableFirewall").unwrap_or(1) != 0)
+        .filter(|(policy, local, _)| setting(policy, local, "DefaultOutboundAction") == Some(1))
+        .map(|(_, _, name)| name.to_string())
         .collect()
 }
 

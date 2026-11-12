@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, Index, onCleanup, onMount, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -182,25 +182,27 @@ export function ConnectionPrompt() {
 
   return (
     <main class="connection-prompt-stack" ref={stack}>
-      <For each={visibleInfo()}>
+      {/* index by slot: a refresh brings new objects, and keying on identity
+          would remount every card and replay its rise animation */}
+      <Index each={visibleInfo()}>
         {(card) => (
           <section
             class="connection-prompt info"
             role="status"
-            onPointerEnter={() => holdTimeout(card.id)}
-            onPointerLeave={() => armTimeout(card.id)}
+            onPointerEnter={() => holdTimeout(card().id)}
+            onPointerLeave={() => armTimeout(card().id)}
           >
             <header>
               <span class="prompt-mark"><Icon name="shield" /></span>
-              <span><b>{card.title}</b></span>
-              <button class="iconbtn" aria-label="dismiss" onClick={() => dismissInfo(card.id)}>
+              <span><b>{card().title}</b></span>
+              <button class="iconbtn" aria-label="dismiss" onClick={() => dismissInfo(card().id)}>
                 <Icon name="x" />
               </button>
             </header>
-            <p class="prompt-body">{card.body}</p>
+            <p class="prompt-body">{card().body}</p>
           </section>
         )}
-      </For>
+      </Index>
       <Show when={loadError()}>
         {(message) => (
           <section class="connection-prompt info" role="alert">
@@ -215,45 +217,45 @@ export function ConnectionPrompt() {
           </section>
         )}
       </Show>
-      <For each={visibleDecisions()}>
+      <Index each={visibleDecisions()}>
         {(alert) => {
-          const application = alert.kind as Extract<AlertKind, { kind: "new_app" }>;
+          const application = () => alert().kind as Extract<AlertKind, { kind: "new_app" }>;
           return (
             <section
               class="connection-prompt"
               role="alertdialog"
               aria-modal="true"
-              aria-label={`New network connection from ${fileName(application.app)}`}
+              aria-label={`New network connection from ${fileName(application().app)}`}
             >
               <header data-tauri-drag-region>
                 <span class="prompt-mark"><Icon name="shield" /></span>
                 <span><b>New network connection</b><small>Choose how Iris should handle this application</small></span>
-                <button class="iconbtn" aria-label="dismiss" onClick={() => setDecisionAside(alert.id)}>
+                <button class="iconbtn" aria-label="dismiss" onClick={() => setDecisionAside(alert().id)}>
                   <Icon name="x" />
                 </button>
               </header>
               <div class="prompt-app">
-                <AppIcon path={application.app} />
-                <span><b>{fileName(application.app)}</b><small>{application.app}</small></span>
+                <AppIcon path={application().app} />
+                <span><b>{fileName(application().app)}</b><small>{application().app}</small></span>
               </div>
               <div class="prompt-target">
-                <span><small>Destination</small><b>{destination(application.remote)}</b></span>
-                <span><small>Protocol</small><b>{application.remote?.protocol.toUpperCase() ?? "Unknown"}</b></span>
-                <span><small>Direction</small><b>{application.direction ?? "outbound"}</b></span>
+                <span><small>Destination</small><b>{destination(application().remote)}</b></span>
+                <span><small>Protocol</small><b>{application().remote?.protocol.toUpperCase() ?? "Unknown"}</b></span>
+                <span><small>Direction</small><b>{application().direction ?? "outbound"}</b></span>
               </div>
-              <Show when={error()?.id === alert.id}>
+              <Show when={error()?.id === alert().id}>
                 <div class="prompt-error" role="alert">{error()?.message}</div>
               </Show>
               <footer>
-                <button class="prompt-btn block" disabled={isBusy(alert.id)} onClick={() => decide(alert, "block")}>Block</button>
-                <button class="prompt-btn allow" disabled={isBusy(alert.id)} onClick={() => decide(alert, "allow")}>
-                  {isBusy(alert.id) ? "Applying…" : "Allow"}
+                <button class="prompt-btn block" disabled={isBusy(alert().id)} onClick={() => decide(alert(), "block")}>Block</button>
+                <button class="prompt-btn allow" disabled={isBusy(alert().id)} onClick={() => decide(alert(), "allow")}>
+                  {isBusy(alert().id) ? "Applying…" : "Allow"}
                 </button>
               </footer>
             </section>
           );
         }}
-      </For>
+      </Index>
     </main>
   );
 }

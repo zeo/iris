@@ -624,10 +624,11 @@ html {
 }
 .connection-prompt {
   width: 420px;
-  height: 228px;
-  flex: 0 0 228px;
+  flex: 0 0 auto;
   display: grid;
-  grid-template-rows: 48px auto auto 1fr 48px;
+  /* the host sizes its window by card count, so an error shrinks to fit the card instead of pushing the footer out */
+  max-height: 228px;
+  grid-template-rows: 48px auto auto minmax(0, auto) 48px;
   overflow: hidden;
   border: 1px solid var(--line2);
   border-radius: var(--r-lg);
@@ -635,8 +636,6 @@ html {
   animation: rise var(--t-slow) var(--spring-soft);
 }
 .connection-prompt.info {
-  height: auto;
-  flex: 0 0 auto;
   grid-template-rows: 48px auto;
 }
 .prompt-body {
@@ -749,6 +748,7 @@ html {
   white-space: nowrap;
 }
 .connection-prompt > footer {
+  grid-row: -2;
   display: grid;
   grid-template-columns: 1fr 1fr;
   align-items: center;
@@ -800,6 +800,9 @@ html {
   font-size: var(--fz-ui);
 }
 .prompt-error {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
   color: var(--err);
 }
 .sb .cell {

@@ -19,6 +19,11 @@ if (connectionPrompts) {
   document.documentElement.classList.add("prompt-window");
 }
 
+// the webview's own menu (reload, inspect) has no place in the app; text fields keep theirs for paste
+window.addEventListener("contextmenu", (event) => {
+  if (!(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)) event.preventDefault();
+});
+
 render(
   () => (
     <ErrorBoundary

@@ -297,7 +297,10 @@ mod platform {
                         self.shaper = Some(shaper);
                         self.notice = Some(caps_notice(format!("Download caps are back on now that {name} closed")));
                     }
-                    Err(error) => tracing::warn!("could not resume download caps: {error}"),
+                    Err(error) => {
+                        tracing::warn!("could not resume download caps, retrying: {error}");
+                        self.paused_for = Some(name);
+                    }
                 },
                 (None, None) => {}
             }

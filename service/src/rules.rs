@@ -456,8 +456,9 @@ impl RuleStore {
                     Err(error) => return Err(error),
                 }
             } else if !wanted && applied {
-                let ids = std::mem::take(&mut self.rules[index].filter_ids);
+                let ids = self.rules[index].filter_ids.clone();
                 self.unapply(&ids)?;
+                self.rules[index].filter_ids.clear();
             }
         }
         Ok(())
@@ -620,22 +621,28 @@ impl RuleStore {
 
     /// add (or replace) a rule for an app, direction, and scope and enforce it now
     pub fn add(&mut self, rule: Rule) -> anyhow::Result<StoredRule> {
-        let dupes: Vec<usize> = self
-            .rules
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.rule.same_slot(&rule))
-            .map(|(i, _)| i)
-            .collect();
-        for i in dupes.into_iter().rev() {
-            let old = self.rules.remove(i);
-            self.unapply(&old.filter_ids)?;
+        // take each rule in the slot out of force before dropping it, so a
+        // failure leaves the store matching what the firewall enforces
+        let mut replaced = Vec::new();
+        while let Some(pos) = self.rules.iter().position(|r| r.rule.same_slot(&rule)) {
+            let ids = self.rules[pos].filter_ids.clone();
+            if let Err(error) = self.unapply(&ids) {
+                self.put_back(replaced);
+                return Err(error);
+            }
+            replaced.push(self.rules.remove(pos));
         }
 
         let id = self.next_id;
         self.next_id += 1;
         let filter_ids = if rule.applies_in(self.active.as_deref()) {
-            self.apply_rule(&rule)?
+            match self.apply_rule(&rule) {
+                Ok(ids) => ids,
+                Err(error) => {
+                    self.put_back(replaced);
+                    return Err(error);
+                }
+            }
         } else {
             Vec::new()
         };
@@ -650,17 +657,35 @@ impl RuleStore {
         Ok(stored)
     }
 
+    /// re-enforce the rules a failed replace already took out, so the failure
+    /// leaves the rule set as it was
+    fn put_back(&mut self, replaced: Vec<StoredRule>) {
+        for mut stored in replaced {
+            if !stored.filter_ids.is_empty() {
+                let rule = stored.rule.clone();
+                stored.filter_ids = match self.apply_rule(&rule) {
+                    Ok(ids) => ids,
+                    Err(error) => {
+                        tracing::warn!(app = %rule.app.0, "rule deferred after a failed replace: {error}");
+                        Vec::new()
+                    }
+                };
+            }
+            self.rules.push(stored);
+        }
+    }
+
     /// remove a rule; returns whether a rule with that id existed, so the caller
     /// can tell the UI the truth instead of a blanket success
     pub fn remove(&mut self, id: i64) -> anyhow::Result<bool> {
-        if let Some(pos) = self.rules.iter().position(|r| r.id == id) {
-            let removed = self.rules.remove(pos);
-            self.unapply(&removed.filter_ids)?;
-            self.save()?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        let Some(pos) = self.rules.iter().position(|r| r.id == id) else {
+            return Ok(false);
+        };
+        let ids = self.rules[pos].filter_ids.clone();
+        self.unapply(&ids)?;
+        self.rules.remove(pos);
+        self.save()?;
+        Ok(true)
     }
 
     pub fn set_enabled(&mut self, id: i64, enabled: bool) -> anyhow::Result<Option<StoredRule>> {
@@ -674,8 +699,9 @@ impl RuleStore {
             }
             self.rules[pos].enabled = true;
         } else if !enabled && self.rules[pos].enabled {
-            let ids = std::mem::take(&mut self.rules[pos].filter_ids);
+            let ids = self.rules[pos].filter_ids.clone();
             self.unapply(&ids)?;
+            self.rules[pos].filter_ids.clear();
             self.rules[pos].enabled = false;
         }
         self.save()?;
@@ -767,6 +793,10 @@ mod fake {
     pub struct Wfp {
         next: u64,
         pub live: BTreeSet<u64>,
+        /// make every remove fail without touching the live set
+        pub fail_remove: bool,
+        /// make the next apply fail, then work again
+        pub fail_next_apply: bool,
         #[cfg(windows)]
         ask: bool,
         #[cfg(target_os = "linux")]
@@ -790,6 +820,9 @@ mod fake {
             _action: RuleAction,
             _scope: &RuleScope,
         ) -> EngineResult<Vec<u64>> {
+            if std::mem::take(&mut self.fail_next_apply) {
+                return Err(EngineError::Os("apply refused".into()));
+            }
             if path.contains("missing") {
                 return Err(EngineError::NotFound(path.to_string()));
             }
@@ -802,6 +835,9 @@ mod fake {
         }
 
         pub fn remove(&mut self, filter_ids: &[u64]) -> EngineResult<()> {
+            if self.fail_remove {
+                return Err(EngineError::Os("remove refused".into()));
+            }
             for id in filter_ids {
                 self.live.remove(id);
             }
@@ -909,6 +945,10 @@ mod tests {
 
     fn live(store: &RuleStore) -> Vec<u64> {
         store.wfp.as_ref().unwrap().live.iter().copied().collect()
+    }
+
+    fn firewall(store: &mut RuleStore) -> &mut Wfp {
+        store.wfp.as_mut().unwrap()
     }
 
     #[test]
@@ -1064,6 +1104,90 @@ mod tests {
         store.set_profiles(vec![profile("home")], None).unwrap();
         assert!(store.list()[0].filter_ids.is_empty());
         assert!(live(&store).is_empty());
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_remove_keeps_the_rule_and_its_filters() {
+        let dir = scratch("failed-remove");
+        let mut store = open(&dir);
+        let stored = store.add(rule(r"C:\apps\editor.exe")).unwrap();
+        firewall(&mut store).fail_remove = true;
+        assert!(store.remove(stored.id).is_err());
+        let rules = store.list();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].filter_ids, stored.filter_ids);
+        assert_eq!(live(&store), stored.filter_ids);
+        firewall(&mut store).fail_remove = false;
+        assert!(store.remove(stored.id).unwrap());
+        drop(store);
+        let store = open(&dir);
+        assert!(store.list().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_disable_keeps_the_filters_in_force() {
+        let dir = scratch("failed-disable");
+        let mut store = open(&dir);
+        let stored = store.add(rule(r"C:\apps\editor.exe")).unwrap();
+        firewall(&mut store).fail_remove = true;
+        assert!(store.set_enabled(stored.id, false).is_err());
+        let rules = store.list();
+        assert!(rules[0].enabled);
+        assert_eq!(rules[0].filter_ids, stored.filter_ids);
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_replace_that_cannot_remove_the_old_rule_keeps_it() {
+        let dir = scratch("replace-remove");
+        let mut store = open(&dir);
+        let allow = store.add(rule(r"C:\apps\editor.exe")).unwrap();
+        firewall(&mut store).fail_remove = true;
+        assert!(store.add(Rule { action: RuleAction::Block, ..rule(r"C:\apps\editor.exe") }).is_err());
+        let rules = store.list();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, allow.id);
+        assert_eq!(rules[0].rule.action, RuleAction::Allow);
+        assert_eq!(rules[0].filter_ids, allow.filter_ids);
+        assert_eq!(live(&store), allow.filter_ids);
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_replace_that_cannot_apply_the_new_rule_puts_the_old_one_back() {
+        let dir = scratch("replace-apply");
+        let mut store = open(&dir);
+        let allow = store.add(rule(r"C:\apps\editor.exe")).unwrap();
+        firewall(&mut store).fail_next_apply = true;
+        assert!(store.add(Rule { action: RuleAction::Block, ..rule(r"C:\apps\editor.exe") }).is_err());
+        let rules = store.list();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, allow.id);
+        assert_eq!(rules[0].rule.action, RuleAction::Allow);
+        assert!(!rules[0].filter_ids.is_empty());
+        assert_eq!(live(&store), rules[0].filter_ids);
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_profile_switch_keeps_the_filters_it_could_not_remove() {
+        let dir = scratch("failed-switch");
+        let mut store = open(&dir);
+        store.add(Rule { profile: Some("home".into()), ..rule(r"C:\apps\editor.exe") }).unwrap();
+        store.set_profiles(vec![profile("home")], Some("home".into())).unwrap();
+        assert!(!store.list()[0].filter_ids.is_empty());
+        firewall(&mut store).fail_remove = true;
+        assert!(store.set_profiles(vec![profile("home")], None).is_err());
+        let rules = store.list();
+        assert!(!rules[0].filter_ids.is_empty());
+        assert_eq!(rules[0].filter_ids, live(&store));
         drop(store);
         std::fs::remove_dir_all(&dir).unwrap();
     }

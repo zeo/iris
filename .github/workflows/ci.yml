@@ -10,6 +10,7 @@ on:
   schedule:
     - cron: '0 0 * * 0'
   workflow_dispatch:
+  workflow_call:
 
 # the windows and linux jobs build the whole (heavy) Rust workspace on hosted
 # runners, so back-to-back pushes would otherwise stack full runs. collapse a

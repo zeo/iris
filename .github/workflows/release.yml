@@ -22,8 +22,15 @@ env:
   RUSTC_WRAPPER: ""
 
 jobs:
+  ci:
+    if: github.actor == 'zeo'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build-windows:
     if: github.actor == 'zeo'
+    needs: ci
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -639,22 +639,7 @@ fn verdict_loop(
                         if nfq.verdict(message).is_err() {
                             worker_failed = true;
                         }
-                    } else if let Some(decision) = {
-                        let mut resolver = resolver
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
-                        let mut decision = decide(flow, dir, &rules, &mut resolver);
-                        // socket ownership can lag the first queued SYN by a few milliseconds
-                        for _ in 0..6 {
-                            if decision.is_some() {
-                                break;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(25));
-                            resolver.refresh_live();
-                            decision = decide(flow, dir, &rules, &mut resolver);
-                        }
-                        decision
-                    } {
+                    } else if let Some(decision) = decide_soon(flow, dir, &rules, &resolver) {
                         decisions.push((message, decision));
                     } else {
                         unresolved.push(UnresolvedPacket {
@@ -781,6 +766,31 @@ enum PacketDecision {
 
 fn attribution_timeout_verdict() -> nfq::Verdict {
     nfq::Verdict::Drop
+}
+
+/// decide a fresh packet, giving a socket that is still being created a few
+/// short live retries. the resolver is released while sleeping so the other
+/// direction's thread keeps deciding
+fn decide_soon(
+    flow: PacketFlow,
+    dir: Direction,
+    rules: &Arc<Mutex<RuleMap>>,
+    resolver: &Mutex<Resolver>,
+) -> Option<PacketDecision> {
+    let lock = || resolver.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(decision) = decide(flow, dir, rules, &mut lock()) {
+        return Some(decision);
+    }
+    // socket ownership can lag the first queued SYN by a few milliseconds
+    for _ in 0..6 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let mut resolver = lock();
+        resolver.refresh_live();
+        if let Some(decision) = decide(flow, dir, rules, &mut resolver) {
+            return Some(decision);
+        }
+    }
+    None
 }
 
 fn decide(

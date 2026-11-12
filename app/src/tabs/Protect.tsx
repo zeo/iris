@@ -268,10 +268,9 @@ export function Protect() {
     setChanging(key);
     setToolError("");
     try {
-      for (const stored of wholeAppRules(row, direction)) {
-        await removeRule(stored.id);
-      }
+      // the engine replaces the rule in the same slot, so a switch is one change
       if (next === "allow" || next === "block") await addRule(row.app, direction, next);
+      else for (const stored of wholeAppRules(row, direction)) await removeRule(stored.id);
     } catch (error) {
       setToolError(String(error));
       await refreshRules();

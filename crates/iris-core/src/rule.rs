@@ -462,6 +462,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_allow_and_a_block_for_one_app_and_direction_share_a_slot() {
+        let app = AppId::from_path("/usr/bin/a");
+        let allow = Rule::new(app.clone(), Direction::Outbound, RuleAction::Allow);
+        let block = Rule::new(app.clone(), Direction::Outbound, RuleAction::Block);
+        assert!(allow.same_slot(&block));
+        let inbound = Rule::new(app, Direction::Inbound, RuleAction::Block);
+        assert!(!allow.same_slot(&inbound));
+    }
+
+    #[test]
     fn backup_parses_the_export_shape() {
         let json = r#"[
             {"app":"c:\\apps\\a.exe","direction":"outbound","action":"block","enabled":false},

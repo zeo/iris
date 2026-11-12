@@ -248,15 +248,15 @@ export function Activity() {
 }
 
 function ConnRow(props: { c: Conn; onSelect: () => void }) {
-  const c = props.c;
-  const out = () => c.direction === "outbound";
+  const c = () => props.c;
+  const out = () => c().direction === "outbound";
   return (
     <tr
       class="conn-row"
       classList={{ out: out(), in: !out() }}
       role="button"
       tabindex={0}
-      aria-label={`Inspect connection ${connLabel(c)}`}
+      aria-label={`Inspect connection ${connLabel(c())}`}
       onClick={props.onSelect}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -268,15 +268,15 @@ function ConnRow(props: { c: Conn; onSelect: () => void }) {
       <td>
         <div class="conn-cell">
           <span class="dir"><Icon name={out() ? "out" : "in"} size={13} /></span>
-          <span class="addr" classList={{ host: !!c.host }} title={connLabel(c)}>{connLabel(c)}</span>
-          <span class="proto">{c.remote.protocol}</span>
-          <span class="state">{c.state}</span>
+          <span class="addr" classList={{ host: !!c().host }} title={connLabel(c())}>{connLabel(c())}</span>
+          <span class="proto">{c().remote.protocol}</span>
+          <span class="state">{c().state}</span>
         </div>
       </td>
-      <td class="num">{rate(c.rate_recv)}</td>
-      <td class="num">{rate(c.rate_sent)}</td>
+      <td class="num">{rate(c().rate_recv)}</td>
+      <td class="num">{rate(c().rate_sent)}</td>
       <td colSpan={3} />
-      <td class="num local">:{c.local_port}</td>
+      <td class="num local">:{c().local_port}</td>
       <td />
     </tr>
   );

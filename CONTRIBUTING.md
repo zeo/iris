@@ -14,29 +14,30 @@ Iris is a Cargo workspace plus a Tauri frontend:
 
 The desktop bundle builds the release engine and embeds it as a Tauri resource,
 so `pnpm tauri build` runs `cargo build --release -p iris-service` first.
+`pnpm desktop:dev` does not, so run that cargo command once before it.
 
 ## Building and running
 
-You need a recent stable Rust toolchain, Node 20, and pnpm 9. On Linux you also
+You need a recent stable Rust toolchain, Node 22, and pnpm 9. On Linux you also
 need the usual Tauri system dependencies (GTK, WebKitGTK, and the AppImage
 tooling); see the Tauri prerequisites for your distribution.
 
 ```
 cd app
 pnpm install
-pnpm tauri dev      # run the UI against a dev build
+pnpm desktop:dev    # run the UI with hot reload
 pnpm tauri build    # release build; on Linux also .deb, .rpm, and AppImage
 ```
 
 ## Checks to run before a PR
 
-CI runs on private self-hosted runners and does not execute on pull requests from
-forks, so it will not give you automated feedback. Run the same checks locally
+CI runs on GitHub-hosted Windows and Ubuntu runners. It skips pull requests
+from forks, so a fork PR gets no automated feedback. Run the same checks locally
 before you open a PR:
 
 ```
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
 cd app && pnpm test && pnpm build
 ```
 

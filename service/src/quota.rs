@@ -49,15 +49,19 @@ pub struct Reached {
 #[derive(Default)]
 pub struct QuotaBook {
     entries: Vec<Entry>,
+    /// where the list is saved; a book without one stays in memory, so tests
+    /// never touch the engine's real state directory
+    path: Option<PathBuf>,
 }
 
 impl QuotaBook {
     pub fn open() -> QuotaBook {
-        let entries = std::fs::read_to_string(quotas_path())
+        let path = quotas_path();
+        let entries = std::fs::read_to_string(&path)
             .ok()
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
-        QuotaBook { entries }
+        QuotaBook { entries, path: Some(path) }
     }
 
     pub fn list(&self, now_ms: u64) -> Vec<Quota> {
@@ -160,7 +164,8 @@ impl QuotaBook {
     }
 
     fn save(&self) -> anyhow::Result<()> {
-        crate::rules::write_atomic(&quotas_path(), &serde_json::to_vec_pretty(&self.entries)?)
+        let Some(path) = &self.path else { return Ok(()) };
+        crate::rules::write_atomic(path, &serde_json::to_vec_pretty(&self.entries)?)
     }
 }
 
@@ -355,6 +360,7 @@ mod tests {
                 Entry { app: Some(app.clone()), limit: limit(QuotaPeriod::Day, 1), fired: None, blocks: vec![], counted: Counted::default() },
                 Entry { app: None, limit: limit(QuotaPeriod::Day, 1), fired: None, blocks: vec![], counted: Counted::default() },
             ],
+            path: None,
         };
         let used = std::cell::Cell::new(0u64);
         let usage = |_: Option<&AppId>, from: u64, _to: u64| if from == at(2026, 11, 11, 0) { used.get() } else { 0 };
@@ -373,6 +379,17 @@ mod tests {
         book.entries[0].blocks = vec![7];
         assert_eq!(check(&mut book, at(2026, 11, 12, 1)), vec![]);
         assert!(book.entries[0].fired.is_none() && book.entries[0].blocks.is_empty());
+    }
+
+    #[test]
+    fn a_book_saves_only_to_its_own_path() {
+        let dir = std::env::temp_dir().join(format!("iris-quota-test-{}", std::process::id()));
+        let mut book = QuotaBook { entries: vec![], path: Some(dir.join("quotas.json")) };
+        book.set(None, Some(limit(QuotaPeriod::Day, 1))).unwrap();
+        let saved = std::fs::read_to_string(dir.join("quotas.json")).unwrap();
+        let entries = serde_json::from_str::<Vec<Entry>>(&saved).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(entries.len(), 1);
     }
 
     #[test]

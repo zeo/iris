@@ -21,7 +21,8 @@
         "transparent": false,
         "resizable": true,
         "zoomHotkeysEnabled": true,
-        "theme": "Dark"
+        "theme": "Dark",
+        "backgroundColor": "#0b0c0e"
       }
     ],
     "security": {

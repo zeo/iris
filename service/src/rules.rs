@@ -73,6 +73,9 @@ pub struct RuleStore {
     network: Option<NetworkIdentity>,
     /// the profile in force, which decides which profile-tagged rules apply
     active: Option<String>,
+    /// the last profile switch or mode change did not fully take, so the next
+    /// network check runs it again even if nothing moved
+    unsettled: bool,
     caps: crate::caps::CapStore,
     quotas: crate::quota::QuotaBook,
 }
@@ -249,6 +252,7 @@ impl RuleStore {
             profiles,
             network,
             active,
+            unsettled: false,
             caps: open_caps(),
             quotas: open_quotas(),
         };
@@ -286,9 +290,12 @@ impl RuleStore {
         write_atomic(&mode_path(&self.path), &serde_json::to_vec(&mode)?)
     }
 
-    /// bring the platform in line with the saved mode; run once at startup
+    /// bring the platform in line with the saved mode; run once at startup.
+    /// a failure is retried on the next network check
     pub fn restore_mode(&mut self) -> anyhow::Result<()> {
-        self.enforce_mode(self.mode())
+        let result = self.enforce_mode(self.mode());
+        self.unsettled = result.is_err();
+        result
     }
 
     pub fn caps(&self) -> Vec<iris_core::RateCap> {
@@ -406,16 +413,17 @@ impl RuleStore {
     }
 
     /// note the network now in use; switches profile when it changed which one
-    /// applies
+    /// applies, and finishes a switch that did not fully take
     pub fn observe_network(&mut self, network: Option<NetworkIdentity>) -> anyhow::Result<()> {
-        if network == self.network {
+        if network != self.network {
+            tracing::info!(
+                network = network.as_ref().map_or("none", |network| network.label.as_str()),
+                "network changed"
+            );
+            self.network = network;
+        } else if !self.unsettled {
             return Ok(());
         }
-        tracing::info!(
-            network = network.as_ref().map_or("none", |network| network.label.as_str()),
-            "network changed"
-        );
-        self.network = network;
         self.settle_profile()
     }
 
@@ -433,16 +441,22 @@ impl RuleStore {
         if switched {
             tracing::info!(profile = active.as_deref().unwrap_or("none"), "network profile active");
             self.active = active;
-            self.sync_profile_rules()?;
         }
         let mode = self.mode();
-        if switched || mode != mode_before {
-            self.enforce_mode(mode)?;
+        if switched || self.unsettled || mode != mode_before {
+            // enforce the mode even when a rule failed, so a stricter profile
+            // still takes hold
+            let synced = self.sync_profile_rules();
+            let enforced = self.enforce_mode(mode);
+            self.unsettled = synced.is_err() || enforced.is_err();
+            synced?;
+            enforced?;
         }
         Ok(())
     }
 
     fn sync_profile_rules(&mut self) -> anyhow::Result<()> {
+        let mut failure = None;
         for index in 0..self.rules.len() {
             let stored = &self.rules[index];
             let wanted = stored.enabled && stored.rule.applies_in(self.active.as_deref());
@@ -453,15 +467,26 @@ impl RuleStore {
                     Ok(ids) => self.rules[index].filter_ids = ids,
                     // the app is gone; the deferred retry picks it up later
                     Err(error) if is_not_found(&error) => {}
-                    Err(error) => return Err(error),
+                    // the deferred retry keeps trying it too
+                    Err(error) => {
+                        tracing::warn!(app = %rule.app.0, "rule deferred after it failed to apply: {error}");
+                    }
                 }
             } else if !wanted && applied {
                 let ids = self.rules[index].filter_ids.clone();
-                self.unapply(&ids)?;
-                self.rules[index].filter_ids.clear();
+                match self.unapply(&ids) {
+                    Ok(()) => self.rules[index].filter_ids.clear(),
+                    // keep going so one stuck filter does not hold back the rest
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                    }
+                }
             }
         }
-        Ok(())
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     #[cfg(windows)]
@@ -797,6 +822,9 @@ mod fake {
         pub fail_remove: bool,
         /// make the next apply fail, then work again
         pub fail_next_apply: bool,
+        /// make set_ask_mode and set_lockdown fail before changing anything
+        #[cfg(windows)]
+        pub fail_mode: bool,
         #[cfg(windows)]
         ask: bool,
         #[cfg(target_os = "linux")]
@@ -846,12 +874,18 @@ mod fake {
 
         #[cfg(windows)]
         pub fn set_ask_mode(&mut self, enabled: bool) -> EngineResult<()> {
+            if self.fail_mode {
+                return Err(EngineError::Os("mode refused".into()));
+            }
             self.ask = enabled;
             Ok(())
         }
 
         #[cfg(windows)]
         pub fn set_lockdown(&mut self, _enabled: bool) -> EngineResult<()> {
+            if self.fail_mode {
+                return Err(EngineError::Os("mode refused".into()));
+            }
             Ok(())
         }
 
@@ -1188,6 +1222,70 @@ mod tests {
         let rules = store.list();
         assert!(!rules[0].filter_ids.is_empty());
         assert_eq!(rules[0].filter_ids, live(&store));
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_profile_switch_that_failed_partway_finishes_on_the_next_check() {
+        let dir = scratch("switch-retry");
+        let mut store = open(&dir);
+        store.add(Rule { profile: Some("home".into()), ..rule(r"C:\apps\editor.exe") }).unwrap();
+        assert!(store.set_profiles(vec![profile("home")], Some("home".into())).is_ok());
+        assert!(!store.list()[0].filter_ids.is_empty());
+        firewall(&mut store).fail_remove = true;
+        assert!(store.set_profiles(vec![profile("home")], None).is_err());
+        firewall(&mut store).fail_remove = false;
+        assert!(store.observe_network(None).is_ok());
+        assert!(store.list()[0].filter_ids.is_empty());
+        assert!(live(&store).is_empty());
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_rule_that_fails_during_a_switch_is_left_for_the_retry() {
+        let dir = scratch("switch-broken");
+        let mut store = open(&dir);
+        store.add(Rule { profile: Some("home".into()), ..rule(r"C:\apps\broken.exe") }).unwrap();
+        store.add(Rule { profile: Some("home".into()), ..rule(r"C:\apps\editor.exe") }).unwrap();
+        assert!(store.set_profiles(vec![profile("home")], Some("home".into())).is_ok());
+        let rules = store.list();
+        assert!(rules[0].filter_ids.is_empty());
+        assert!(!rules[1].filter_ids.is_empty());
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_profile_mode_that_failed_to_enforce_is_retried() {
+        let dir = scratch("profile-mode-retry");
+        let mut store = open(&dir);
+        store.restore_mode().unwrap();
+        assert!(store.ask_mode());
+        firewall(&mut store).fail_mode = true;
+        let work = Profile { name: "work".into(), networks: Vec::new(), mode: Some(FirewallMode::Notify) };
+        assert!(store.set_profiles(vec![work], Some("work".into())).is_err());
+        assert!(store.ask_mode());
+        firewall(&mut store).fail_mode = false;
+        assert!(store.observe_network(None).is_ok());
+        assert!(!store.ask_mode());
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_mode_that_failed_at_startup_is_retried() {
+        let dir = scratch("startup-mode-retry");
+        let mut store = open(&dir);
+        firewall(&mut store).fail_mode = true;
+        assert!(store.restore_mode().is_err());
+        assert!(!store.ask_mode());
+        firewall(&mut store).fail_mode = false;
+        assert!(store.observe_network(None).is_ok());
+        assert!(store.ask_mode());
         drop(store);
         std::fs::remove_dir_all(&dir).unwrap();
     }

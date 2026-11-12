@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Threading::{
@@ -10,7 +11,7 @@ use windows::Win32::System::Threading::{
 /// periodically by the monitor to bound the window in which PID reuse could
 /// misattribute traffic to the wrong app.
 pub struct PidCache {
-    map: HashMap<u32, Option<String>>,
+    map: HashMap<u32, Option<Arc<str>>>,
 }
 
 impl PidCache {
@@ -20,11 +21,11 @@ impl PidCache {
         }
     }
 
-    pub fn resolve(&mut self, pid: u32) -> Option<String> {
+    pub fn resolve(&mut self, pid: u32) -> Option<Arc<str>> {
         if let Some(hit) = self.map.get(&pid) {
             return hit.clone();
         }
-        let path = query_image_path(pid);
+        let path: Option<Arc<str>> = query_image_path(pid).map(Arc::from);
         self.map.insert(pid, path.clone());
         path
     }

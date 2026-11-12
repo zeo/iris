@@ -115,7 +115,7 @@ impl ConnCounter {
             let Some(path) = self.cache.resolve(r.pid) else {
                 continue;
             };
-            let entry = out.entry(r.pid).or_insert_with(|| (path, Vec::new()));
+            let entry = out.entry(r.pid).or_insert_with(|| (path.to_string(), Vec::new()));
             if entry.1.len() < MAX_CONNS_PER_PROC {
                 let host = dns::lookup(&self.dns, &r.remote.addr);
                 let dir = direction(r.local_port, r.remote.port);

@@ -1,10 +1,12 @@
 //! data quotas: an allowance of bytes per local day, week, or month, for one
 //! app or the whole machine. the quota list lives in a json file beside the
 //! rules, like the caps. an app that spends its quota is blocked by timed rules
-//! that lapse when the period starts over; the machine-wide quota only warns.
+//! that lapse when the period starts over, or slowed by a cap laid over its own
+//! until then; the machine-wide quota only warns.
 
-use iris_core::{AppId, Granularity, Quota, QuotaLimit, QuotaPeriod};
+use iris_core::{AppId, Granularity, Quota, QuotaAction, QuotaLimit, QuotaPeriod};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 const DAY_MS: i64 = 86_400_000;
@@ -85,6 +87,10 @@ impl QuotaBook {
         if let Some(limit) = &limit {
             anyhow::ensure!(limit.bytes > 0, "a quota must be above zero; block the app instead");
             anyhow::ensure!((1..=28).contains(&limit.reset_day), "the reset day must be from 1 to 28");
+            anyhow::ensure!(
+                limit.action != QuotaAction::Throttle { bytes_per_sec: 0 },
+                "a quota's slower speed must be above zero; block the app instead"
+            );
         }
         let lifted = self
             .entries
@@ -108,6 +114,20 @@ impl QuotaBook {
         if let Err(error) = self.save() {
             tracing::warn!("could not save the quota list: {error}");
         }
+    }
+
+    /// the rate each app whose throttle quota is spent this period is held to.
+    /// the spend is the saved warning, so this holds across an engine restart
+    pub fn throttles(&self, now_ms: u64, offset: impl Fn(i64) -> i64) -> HashMap<AppId, u64> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let QuotaAction::Throttle { bytes_per_sec } = entry.limit.action else { return None };
+                let (start, _) = period_bounds(now_ms, &entry.limit, &offset);
+                let spent = entry.fired.is_some_and(|(period, percent)| period == start && percent >= 100);
+                Some((entry.app.clone().filter(|_| spent)?, bytes_per_sec))
+            })
+            .collect()
     }
 
     /// count what each quota has used and return the ones that crossed a
@@ -179,7 +199,12 @@ impl Reached {
                     QuotaPeriod::Week => ("weekly", "Monday".to_string()),
                     QuotaPeriod::Month => ("monthly", format!("the {}", ordinal(self.limit.reset_day))),
                 };
-                format!("{} used its {limit} {period} quota and is blocked until {until}", app.file_name())
+                let outcome = match self.limit.action {
+                    QuotaAction::Block => "is blocked".to_string(),
+                    // the ui enters speeds in binary kilobytes
+                    QuotaAction::Throttle { bytes_per_sec } => format!("is slowed to {:.0} KB/s", bytes_per_sec as f64 / 1024.0),
+                };
+                format!("{} used its {limit} {period} quota and {outcome} until {until}", app.file_name())
             }
             None if self.percent >= 100 => format!("Data plan used up: {used} of {limit} this period"),
             None => format!("Data plan {}% used: {used} of {limit} this period", self.percent),
@@ -319,7 +344,7 @@ mod tests {
     }
 
     fn limit(period: QuotaPeriod, reset_day: u8) -> QuotaLimit {
-        QuotaLimit { period, bytes: 1000, reset_day }
+        QuotaLimit { period, bytes: 1000, reset_day, action: QuotaAction::Block }
     }
 
     #[test]
@@ -382,6 +407,29 @@ mod tests {
     }
 
     #[test]
+    fn a_spent_throttle_quota_holds_through_its_period_and_lifts_after() {
+        let app = AppId::from_path("c:/games/game.exe");
+        let slow = QuotaLimit { action: QuotaAction::Throttle { bytes_per_sec: 4096 }, ..limit(QuotaPeriod::Day, 1) };
+        let mut book = QuotaBook {
+            entries: vec![
+                Entry { app: Some(app.clone()), limit: slow, fired: None, blocks: vec![], counted: Counted::default() },
+                Entry { app: Some(AppId::from_path("c:/other.exe")), limit: limit(QuotaPeriod::Day, 1), fired: None, blocks: vec![], counted: Counted::default() },
+            ],
+            path: None,
+        };
+        let noon = at(2026, 11, 11, 12);
+        assert!(book.throttles(noon, |_| 0).is_empty());
+        let reached = book.check(noon, |_| 0, |_, _, _| 2000);
+        assert_eq!(reached.len(), 2);
+        assert_eq!(book.throttles(noon, |_| 0), HashMap::from([(app.clone(), 4096)]));
+        // a restart reads the warning back from the file, so the throttle holds
+        let reopened = QuotaBook { entries: serde_json::from_slice(&serde_json::to_vec(&book.entries).unwrap()).unwrap(), path: None };
+        assert_eq!(reopened.throttles(noon, |_| 0), HashMap::from([(app, 4096)]));
+        assert!(book.throttles(at(2026, 11, 12, 0), |_| 0).is_empty());
+        assert!(book.set(None, Some(QuotaLimit { action: QuotaAction::Throttle { bytes_per_sec: 0 }, ..slow })).is_err());
+    }
+
+    #[test]
     fn a_book_saves_only_to_its_own_path() {
         let dir = std::env::temp_dir().join(format!("iris-quota-test-{}", std::process::id()));
         let mut book = QuotaBook { entries: vec![], path: Some(dir.join("quotas.json")) };
@@ -403,7 +451,7 @@ mod tests {
     fn messages_name_the_app_the_limit_and_when_it_lifts() {
         let reached = Reached {
             app: Some(AppId::from_path("c:/games/game.exe")),
-            limit: QuotaLimit { period: QuotaPeriod::Month, bytes: 5_000_000_000, reset_day: 2 },
+            limit: QuotaLimit { period: QuotaPeriod::Month, bytes: 5_000_000_000, reset_day: 2, action: QuotaAction::Block },
             used: 5_100_000_000,
             percent: 100,
             until_ms: 0,
@@ -411,6 +459,9 @@ mod tests {
         assert_eq!(reached.message(), "game.exe used its 5.0 GB monthly quota and is blocked until the 2nd");
         let plan = Reached { app: None, percent: 80, used: 400_000_000_000, limit: QuotaLimit { bytes: 500_000_000_000, ..reached.limit }, ..reached };
         assert_eq!(plan.message(), "Data plan 80% used: 400.0 GB of 500.0 GB this period");
+        let throttle = QuotaAction::Throttle { bytes_per_sec: 51_200 };
+        let slowed = Reached { app: reached.app.clone(), limit: QuotaLimit { action: throttle, ..reached.limit }, ..plan };
+        assert_eq!(slowed.message(), "game.exe used its 5.0 GB monthly quota and is slowed to 50 KB/s until the 2nd");
         assert_eq!(ordinal(11), "11th");
         assert_eq!(ordinal(22), "22nd");
     }

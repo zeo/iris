@@ -297,6 +297,13 @@ mod tests {
         let args = ["--quota", "C:\\a b\\app.exe", r#"{"period":"day","bytes":1,"reset_day":1}"#]
             .map(String::from);
         assert!(build_op(&args).is_ok());
+        let slow = r#"{"period":"day","bytes":1,"reset_day":1,"action":{"throttle":{"bytes_per_sec":2048}}}"#;
+        match build_op(&["--quota", "C:\\app.exe", slow].map(String::from)) {
+            Ok(super::Op::Single(iris_ipc::message::ClientMessage::SetQuota { limit: Some(limit), .. })) => {
+                assert_eq!(limit.action, iris_core::QuotaAction::Throttle { bytes_per_sec: 2048 });
+            }
+            _ => panic!("expected a throttle quota"),
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@ import { AppIcon } from "../components/AppIcon";
 import { ConnDetails } from "../components/ConnDetails";
 import { engine, type AppSample, type Conn } from "../lib/engine";
 import { blockApp, caps, downloadLimitsSupported, isBlocked, setCap, unblockApp } from "../lib/rules";
-import { formatGb, GB, quota, setQuota, type QuotaPeriod } from "../lib/quota";
+import { formatGb, GB, quota, setQuota, throttleRate, type QuotaPeriod } from "../lib/quota";
 import { persisted } from "../lib/persist";
 import { bytes, rate } from "../lib/format";
 import { fileName, pathKey } from "../lib/path";
@@ -371,14 +371,21 @@ const PERIODS: QuotaPeriod[] = ["day", "week", "month"];
 function QuotaCell(props: { app: string; name: string; onError: (message: string) => void }) {
   const edit = useInlineEdit();
   let input!: HTMLInputElement;
+  let rateInput: HTMLInputElement | undefined;
   const current = () => quota.forApp(props.app);
+  const slowedTo = () => {
+    const q = current();
+    return q ? throttleRate(q.limit) : null;
+  };
   const [period, setPeriod] = createSignal<QuotaPeriod>("day");
+  const [slow, setSlow] = createSignal(false);
   const used = () => {
     const q = current();
     return q ? q.used / q.limit.bytes : 0;
   };
   const open = () => {
     setPeriod(current()?.limit.period ?? "day");
+    setSlow(slowedTo() !== null);
     edit.setEditing(true);
   };
   const save = async () => {
@@ -388,13 +395,28 @@ function QuotaCell(props: { app: string; name: string; onError: (message: string
       props.onError("Enter a quota in GB, or clear the field to remove it.");
       return;
     }
+    const kb = Number(rateInput?.value.trim() || 0);
+    if (gb > 0 && slow() && !(Number.isFinite(kb) && kb > 0)) {
+      props.onError("Enter the speed in KB/s to slow the app to once its quota is spent.");
+      return;
+    }
     edit.setEditing(false);
     const q = current();
+    const action = slow() ? { throttle: { bytes_per_sec: Math.round(kb * 1024) } } : ("block" as const);
     // monthly app quotas roll over with the data plan
     const limit =
-      gb > 0 ? { period: period(), bytes: Math.round(gb * GB), reset_day: quota.plan()?.limit.reset_day ?? 1 } : null;
+      gb > 0
+        ? { period: period(), bytes: Math.round(gb * GB), reset_day: quota.plan()?.limit.reset_day ?? 1, action }
+        : null;
     if (!limit && !q) return;
-    if (limit && q && limit.bytes === q.limit.bytes && limit.period === q.limit.period) return;
+    if (
+      limit &&
+      q &&
+      limit.bytes === q.limit.bytes &&
+      limit.period === q.limit.period &&
+      throttleRate(limit) === throttleRate(q.limit)
+    )
+      return;
     props.onError("");
     try {
       await setQuota(q?.app ?? props.app, limit);
@@ -410,7 +432,12 @@ function QuotaCell(props: { app: string; name: string; onError: (message: string
           <button
             class="inline-btn"
             classList={{ set: !!current(), warn: used() >= 0.8, over: used() >= 1 }}
-            title={current() ? `${formatGb(current()!.used)} used this ${current()!.limit.period}` : undefined}
+            title={
+              current()
+                ? `${formatGb(current()!.used)} used this ${current()!.limit.period}` +
+                  (slowedTo() === null ? "" : `, then slowed to ${bytes(slowedTo()!)}/s`)
+                : undefined
+            }
             aria-label={current() ? `Change the data quota for ${props.name}` : `Set a data quota for ${props.name}`}
             onClick={open}
           >
@@ -441,6 +468,25 @@ function QuotaCell(props: { app: string; name: string; onError: (message: string
           >
             /{period()}
           </button>
+          <button
+            class="period-btn"
+            aria-label={`once the quota is spent, ${slow() ? "slow" : "block"} ${props.name}`}
+            title={slow() && !downloadLimitsSupported ? "Linux slows only uploads" : undefined}
+            onClick={() => setSlow(!slow())}
+            onKeyDown={edit.keys(() => void save())}
+          >
+            {slow() ? "slow" : "block"}
+          </button>
+          <Show when={slow()}>
+            <input
+              ref={(el) => (rateInput = el)}
+              inputmode="decimal"
+              aria-label={`${props.name} speed once its quota is spent, in KB/s`}
+              value={slowedTo() === null ? "" : String(Math.round(slowedTo()! / 1024))}
+              onKeyDown={edit.keys(() => void save())}
+            />
+            <span class="unit">KB/s</span>
+          </Show>
         </span>
       </Show>
     </td>

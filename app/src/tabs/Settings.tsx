@@ -22,7 +22,7 @@ import {
 const CARD_KINDS: { id: InfoKind; name: string; desc: string }[] = [
   { id: "new_app", name: "First-seen apps", desc: "An app reaches the network for the first time." },
   { id: "watch", name: "Watcher alerts", desc: "An app changed on disk, a traffic spike, a new destination, or a new gateway." },
-  { id: "quota", name: "Data quotas", desc: "An app spent its quota and is blocked until the period resets." },
+  { id: "quota", name: "Data quotas", desc: "An app spent its quota and is blocked or slowed until the period resets." },
   { id: "caps", name: "Download limits paused", desc: "An anti-cheat started, so download limits stepped aside." },
   { id: "plugin", name: "Plugin alerts", desc: "Messages raised by installed plugins." },
 ];

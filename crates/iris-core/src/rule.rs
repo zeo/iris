@@ -341,6 +341,20 @@ pub struct QuotaLimit {
     pub bytes: u64,
     /// the day of the month a monthly period starts over, 1 to 28
     pub reset_day: u8,
+    /// what an app's quota does once spent; the machine-wide one only warns
+    #[serde(default)]
+    pub action: QuotaAction,
+}
+
+/// blocking an app over its quota, or capping it both ways until the period
+/// starts over. linux shapes only uploads, so there a throttle leaves
+/// downloads alone
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuotaAction {
+    #[default]
+    Block,
+    Throttle { bytes_per_sec: u64 },
 }
 
 /// a data quota and where it stands. an app's quota blocks the app once it is
@@ -531,6 +545,17 @@ mod tests {
         let written = serde_json::to_string(&rule).unwrap();
         assert!(written.contains(r#""lifetime":{"kind":"permanent"}"#));
         assert_eq!(serde_json::from_str::<Rule>(&written).unwrap(), rule);
+    }
+
+    #[test]
+    fn a_quota_saved_before_throttles_still_blocks() {
+        let old: QuotaLimit = serde_json::from_str(r#"{"period":"day","bytes":1,"reset_day":1}"#).unwrap();
+        assert_eq!(old.action, QuotaAction::Block);
+        let slow = QuotaLimit { action: QuotaAction::Throttle { bytes_per_sec: 10_240 }, ..old };
+        let written = serde_json::to_string(&slow).unwrap();
+        assert!(written.contains(r#""action":{"throttle":{"bytes_per_sec":10240}}"#));
+        assert_eq!(serde_json::from_str::<QuotaLimit>(&written).unwrap(), slow);
+        assert!(serde_json::to_string(&old).unwrap().contains(r#""action":"block""#));
     }
 
     #[test]

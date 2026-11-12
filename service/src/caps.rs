@@ -4,9 +4,12 @@
 //! start. qos only throttles what a host sends, so download caps pace inbound
 //! packets through WinDivert instead (see `shaper`). on linux each upload cap is
 //! an htb class keyed by a flow mark the verdict thread sets, so the store also
-//! hands back the mark each capped app's flows must carry.
+//! hands back the mark each capped app's flows must carry. a spent throttle
+//! quota lays a lower cap over the saved one until its period ends; that
+//! overlay lives only here and never reaches the file.
 
 use iris_core::{AlertKind, AppId, AppSample, RateCap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn caps_path() -> PathBuf {
@@ -15,6 +18,8 @@ fn caps_path() -> PathBuf {
 
 pub struct CapStore {
     caps: Vec<RateCap>,
+    /// quota throttles in force, by app
+    throttles: HashMap<AppId, u64>,
     backend: platform::Backend,
 }
 
@@ -34,13 +39,13 @@ impl CapStore {
                 tracing::warn!(app = cap.app.as_str(), "could not apply upload cap: {error}");
             }
         }
-        CapStore { caps, backend }
+        CapStore { caps, throttles: HashMap::new(), backend }
     }
 
     /// no caps and an idle backend, for tests that must not touch the os shaper
     #[cfg(test)]
     pub fn empty() -> CapStore {
-        CapStore { caps: Vec::new(), backend: platform::Backend::default() }
+        CapStore { caps: Vec::new(), throttles: HashMap::new(), backend: platform::Backend::default() }
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -87,11 +92,8 @@ impl CapStore {
         }
         let cap = RateCap { app: app.clone(), up_bytes_per_sec, down_bytes_per_sec };
         let capped = up_bytes_per_sec.is_some() || down_bytes_per_sec.is_some();
-        if capped {
-            self.backend.apply(&cap)?;
-        } else {
-            self.backend.remove(&app)?;
-        }
+        let limits = effective(&app, capped.then_some(&cap), self.throttles.get(&app).copied());
+        self.enforce(&app, limits)?;
         self.caps.retain(|existing| existing.app != app);
         if capped {
             self.caps.push(cap);
@@ -104,6 +106,48 @@ impl CapStore {
         std::fs::rename(&tmp, caps_path())?;
         Ok(self.backend.mark(&app))
     }
+
+    /// hold each app in `wanted` to its rate and give every app no longer in
+    /// it back its saved cap. returns the apps whose limits changed, with the
+    /// mark their flows must now carry
+    pub fn throttle(&mut self, wanted: HashMap<AppId, u64>) -> Vec<(AppId, Option<u32>)> {
+        let mut changed: Vec<AppId> = wanted
+            .iter()
+            .filter(|(app, rate)| self.throttles.get(*app) != Some(*rate))
+            .map(|(app, _)| app.clone())
+            .collect();
+        changed.extend(self.throttles.keys().filter(|app| !wanted.contains_key(*app)).cloned());
+        self.throttles = wanted;
+        changed
+            .into_iter()
+            .map(|app| {
+                let saved = self.caps.iter().find(|cap| cap.app == app);
+                let limits = effective(&app, saved, self.throttles.get(&app).copied());
+                if let Err(error) = self.enforce(&app, limits) {
+                    tracing::warn!(app = app.as_str(), "could not change a quota throttle: {error}");
+                }
+                let mark = self.backend.mark(&app);
+                (app, mark)
+            })
+            .collect()
+    }
+
+    fn enforce(&mut self, app: &AppId, limits: Option<RateCap>) -> anyhow::Result<()> {
+        match limits {
+            Some(cap) => self.backend.apply(&cap),
+            None => self.backend.remove(app),
+        }
+    }
+}
+
+/// the limits in force for an app: the lower of its saved cap and a quota
+/// throttle each way. linux shapes only uploads, so a throttle leaves its
+/// downloads alone
+fn effective(app: &AppId, saved: Option<&RateCap>, throttle: Option<u64>) -> Option<RateCap> {
+    let lower = |cap: Option<u64>, throttle: Option<u64>| cap.into_iter().chain(throttle).min();
+    let up = lower(saved.and_then(|cap| cap.up_bytes_per_sec), throttle);
+    let down = lower(saved.and_then(|cap| cap.down_bytes_per_sec), throttle.filter(|_| cfg!(windows)));
+    (up.is_some() || down.is_some()).then(|| RateCap { app: app.clone(), up_bytes_per_sec: up, down_bytes_per_sec: down })
 }
 
 /// lift every cap iris put in force without touching the saved list, for
@@ -484,8 +528,21 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
-    use super::policy_name;
-    use iris_core::AppId;
+    use super::{effective, policy_name};
+    use iris_core::{AppId, RateCap};
+
+    #[test]
+    fn a_throttle_lowers_each_way_and_lifting_it_restores_the_saved_cap() {
+        let app = AppId::from_path(r"C:\Games\game.exe");
+        let saved = RateCap { app: app.clone(), up_bytes_per_sec: Some(2048), down_bytes_per_sec: Some(100_000) };
+        let slowed = effective(&app, Some(&saved), Some(8192)).unwrap();
+        assert_eq!(slowed.up_bytes_per_sec, Some(2048));
+        assert_eq!(slowed.down_bytes_per_sec, Some(if cfg!(windows) { 8192 } else { 100_000 }));
+        let unsaved = effective(&app, None, Some(8192)).unwrap();
+        assert_eq!((unsaved.up_bytes_per_sec, unsaved.down_bytes_per_sec), (Some(8192), cfg!(windows).then_some(8192)));
+        assert_eq!(effective(&app, Some(&saved), None), Some(saved));
+        assert_eq!(effective(&app, None, None), None);
+    }
 
     #[test]
     fn policy_names_are_stable_and_distinct_per_app() {

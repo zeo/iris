@@ -8,11 +8,19 @@ import { pathKey } from "./path";
 
 export type QuotaPeriod = "day" | "week" | "month";
 
+/** what an app's quota does once spent; the engine reads a missing one as block */
+export type QuotaAction = "block" | { throttle: { bytes_per_sec: number } };
+
 export interface QuotaLimit {
   period: QuotaPeriod;
   bytes: number;
   reset_day: number;
+  action?: QuotaAction;
 }
+
+/** the speed a throttle quota slows its app to, or null for one that blocks */
+export const throttleRate = (limit: QuotaLimit): number | null =>
+  typeof limit.action === "object" ? limit.action.throttle.bytes_per_sec : null;
 
 export interface Quota {
   /** null for the machine-wide data plan */

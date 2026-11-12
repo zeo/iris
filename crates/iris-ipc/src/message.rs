@@ -28,7 +28,8 @@ use std::net::IpAddr;
 /// v18 carries the firewall mode in every tick, adds a totals-only tick
 /// subscription, removes the unused connection list and prompt suppression
 /// messages, lets a prompt answer carry a host scope and a lifetime, adds
-/// the addresses a host name resolved to, and adds the blocked-connection log.
+/// the addresses a host name resolved to, adds the blocked-connection log, and
+/// lets an app's data quota slow it instead of blocking it.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 /// conditions that quietly undermine the engine, for the UI to surface
@@ -125,8 +126,8 @@ pub enum ClientMessage {
     ListQuotas {
         req: u64,
     },
-    /// set or clear an app's data quota, which blocks the app once spent, so
-    /// it is privileged. with no app it sets the machine-wide data plan, which
+    /// set or clear an app's data quota, which blocks or slows the app once
+    /// spent, so it is privileged. with no app it sets the machine-wide data plan, which
     /// only warns
     SetQuota {
         req: u64,

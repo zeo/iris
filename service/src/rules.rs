@@ -5,7 +5,7 @@
 
 use iris_core::{
     active_profile, effective_mode, AlertKind, AppId, Direction, EngineError, FirewallMode,
-    NetworkIdentity, PortRange, Profile, ProfileState, Quota, QuotaLimit, Rule, RuleAction,
+    NetworkIdentity, PortRange, Profile, ProfileState, Quota, QuotaAction, QuotaLimit, Rule, RuleAction,
     RuleLifetime, RuleScope, StoredRule, WatchReason,
 };
 use serde::{Deserialize, Serialize};
@@ -242,7 +242,7 @@ impl RuleStore {
         }
 
         let mode = load_mode(&path);
-        let store = RuleStore {
+        let mut store = RuleStore {
             #[cfg(has_platform)]
             wfp,
             rules,
@@ -262,6 +262,7 @@ impl RuleStore {
                 wfp.set_cap_mark(app.as_str(), Some(mark));
             }
         }
+        store.sync_throttles(now);
         // persist the drops above so a session rule cannot return on a crash.
         // only then: rewriting after a corrupt file would replace the fail-safe
         // with an empty rule set
@@ -322,27 +323,47 @@ impl RuleStore {
     }
 
     /// set or clear an app's quota, or the machine's with no app, lifting any
-    /// block the old quota put in force
+    /// block or throttle the old quota put in force
     pub fn set_quota(&mut self, app: Option<AppId>, limit: Option<QuotaLimit>) -> anyhow::Result<()> {
-        for id in self.quotas.set(app, limit)? {
+        let lifted = self.quotas.set(app, limit)?;
+        self.sync_throttles(now_ms());
+        for id in lifted {
             self.remove(id)?;
         }
         Ok(())
     }
 
-    /// count quota use, block the apps that spent theirs, and return the
-    /// alerts to raise. `usage` sums bytes over `[from, to)`
+    /// count quota use, block or slow the apps that spent theirs, lift the
+    /// throttles whose period ended, and return the alerts to raise. `usage`
+    /// sums bytes over `[from, to)`
     pub fn check_quotas(&mut self, now_ms: u64, usage: impl Fn(Option<&AppId>, u64, u64) -> u64) -> Vec<AlertKind> {
         let reached = self.quotas.check(now_ms, crate::quota::utc_offset_ms, usage);
-        reached
+        let alerts = reached
             .into_iter()
             .map(|reached| {
-                if let Some(app) = reached.app.as_ref().filter(|_| reached.percent >= 100) {
+                let blocks = reached.percent >= 100 && reached.limit.action == QuotaAction::Block;
+                if let Some(app) = reached.app.as_ref().filter(|_| blocks) {
                     self.block_for_quota(app, reached.until_ms);
                 }
                 AlertKind::Watch { reason: WatchReason::Quota, app: reached.app.clone(), message: reached.message() }
             })
-            .collect()
+            .collect();
+        self.sync_throttles(now_ms);
+        alerts
+    }
+
+    /// lay the throttle of every spent throttle quota over the app's own caps,
+    /// and lift the ones whose quota changed or whose period ended
+    fn sync_throttles(&mut self, now_ms: u64) {
+        let wanted = self.quotas.throttles(now_ms, crate::quota::utc_offset_ms);
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+        let changed = self.caps.throttle(wanted);
+        #[cfg(target_os = "linux")]
+        if let Some(wfp) = self.wfp.as_ref() {
+            for (app, mark) in changed {
+                wfp.set_cap_mark(app.as_str(), mark);
+            }
+        }
     }
 
     /// block an app both ways until its quota period ends. the full port range

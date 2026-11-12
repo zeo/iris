@@ -81,7 +81,6 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_process::init())
         .manage(ipc::StatusState::default())
         .manage(ipc::TickDetailState::default())
         .manage(ipc::Commander(cmd_tx))
@@ -100,7 +99,6 @@ pub fn run() {
             ipc::rule_grant,
             rulectl::set_rule_grant,
             ipc::list_alerts,
-            ipc::list_prompt_alerts,
             prompt::resize_connection_prompts,
             prompt::set_prompt_hit_region,
             prompt::prompt_cards,

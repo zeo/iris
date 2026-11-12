@@ -271,7 +271,6 @@ pub async fn list_alerts(app: AppHandle, unacked_only: bool) -> Result<Vec<Alert
     }
 }
 
-#[tauri::command]
 pub async fn list_prompt_alerts(app: AppHandle) -> Result<Vec<Alert>, String> {
     match dispatch(&app, EngineCmd::ListPromptAlerts).await? {
         Reply::Alerts(alerts) => Ok(alerts),

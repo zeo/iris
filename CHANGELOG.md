@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## Unreleased
 
+### Changed
+- The wire protocol is now version 18. The setup updates the app and engine together.
+
 ## [0.2.2] - 2026-11-12
 
 ### Added

@@ -6,7 +6,6 @@ fn main() {
         "list_apps",
         "forget_app",
         "list_alerts",
-        "list_prompt_alerts",
         "resize_connection_prompts",
         "set_prompt_hit_region",
         "prompt_cards",

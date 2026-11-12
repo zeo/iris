@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 /// could not decode while they were skipped when empty, and adds data quotas.
 /// v16 adds download caps.
 /// v17 adds per-connection rates.
-pub const PROTOCOL_VERSION: u32 = 17;
+/// v18 carries the firewall mode in every tick.
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// conditions that quietly undermine the engine, for the UI to surface
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

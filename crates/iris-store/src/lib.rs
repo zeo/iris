@@ -1203,6 +1203,7 @@ mod tests {
             total_rate_recv: apps.iter().map(|app| app.rate_recv).sum(),
             apps,
             adapters,
+            mode: iris_core::FirewallMode::default(),
         }
     }
 

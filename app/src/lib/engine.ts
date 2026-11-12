@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type { Sample } from "../components/BandwidthGraph";
 import { upsertProposal, type RuleProposal } from "./proposals";
+import type { FirewallMode } from "./rules";
 
 // shapes mirror iris-core's serialized types. AppId is a newtype over String, so
 // it arrives as a plain path string.
@@ -53,6 +54,7 @@ export interface StatsTick {
   total_rate_recv: number;
   apps: AppSample[];
   adapters: AdapterSample[];
+  mode: FirewallMode;
 }
 
 const ADAPTER_LABELS: Record<AdapterKind, string> = {

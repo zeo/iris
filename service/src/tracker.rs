@@ -5,7 +5,7 @@
 //! that stops connecting enters a grace window (shown red) before it is dropped.
 
 use iris_core::{
-    Aggregator, AppId, AppSample, ByteCounts, Conn, Flushed, HostUsage, ProcSample, StatsTick,
+    Aggregator, AppId, AppSample, ByteCounts, Conn, FirewallMode, Flushed, HostUsage, ProcSample, StatsTick,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -269,6 +269,8 @@ impl Tracker {
             total_rate_recv: total_recv,
             apps: out,
             adapters,
+            // the monitor stamps the mode in force before publishing
+            mode: FirewallMode::default(),
         }
     }
 

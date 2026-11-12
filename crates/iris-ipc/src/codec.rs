@@ -120,6 +120,24 @@ mod tests {
     }
 
     #[test]
+    fn tick_carries_the_firewall_mode_through_a_binary_frame() {
+        use iris_core::{FirewallMode, StatsTick};
+        let msg = ServerMessage::Tick(StatsTick {
+            at_ms: 1,
+            total_rate_sent: 0,
+            total_rate_recv: 0,
+            apps: Vec::new(),
+            adapters: Vec::new(),
+            mode: FirewallMode::Lockdown,
+        });
+        let mut buffer = Vec::new();
+        write_frame(&mut buffer, &msg).unwrap();
+
+        let decoded: ServerMessage = read_frame(&mut Cursor::new(buffer)).unwrap().unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
     fn oversize_length_prefix_is_rejected() {
         let mut framed = (MAX_FRAME_LEN + 1).to_le_bytes().to_vec();
         framed.extend_from_slice(&[0u8; 8]);

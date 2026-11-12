@@ -259,7 +259,6 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&show, &modes, &pause, &separator, &quit])?;
-    sync_mode_menu(app);
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(app.default_window_icon().unwrap().clone())
@@ -301,20 +300,6 @@ fn choose_mode(app: &tauri::AppHandle, mode: FirewallMode) {
         }
         if let Err(error) = rulectl::set_firewall_mode(app.clone(), mode.as_str().into()).await {
             tracing::warn!(mode = mode.as_str(), "could not switch firewall mode: {error}");
-        }
-    });
-}
-
-/// read the engine's mode once it answers, so the tray starts out truthful
-fn sync_mode_menu(app: &tauri::AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        for _ in 0..30 {
-            if let Ok(mode) = ipc::firewall_mode(&app).await {
-                refresh_mode_menu(&app, mode);
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     });
 }

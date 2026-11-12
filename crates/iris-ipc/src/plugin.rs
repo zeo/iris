@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 /// bump when the plugin wire shape changes incompatibly. independent of the UI
 /// pipe's `PROTOCOL_VERSION`; plugins declare compatibility in their manifest.
 /// v2 added rule proposals and panels.
-pub const PLUGIN_PROTOCOL_VERSION: u32 = 2;
+/// v3 carries per-connection rates and the firewall mode in every tick.
+pub const PLUGIN_PROTOCOL_VERSION: u32 = 3;
 
 /// the env var carrying the spawn-time auth token to the child, cleared by the
 /// SDK as soon as it is read

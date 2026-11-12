@@ -1,4 +1,4 @@
-import { createSignal, For, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, onMount, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { Icon } from "../components/Icon";
 import { engine } from "../lib/engine";
@@ -73,6 +73,11 @@ export function Settings() {
       /* engine offline */
     }
   };
+
+  createEffect(() => {
+    const live = engine.tick()?.mode;
+    if (live) setMode(live);
+  });
 
   const [profileName, setProfileName] = createSignal("");
   const [profileMsg, setProfileMsg] = createSignal("");

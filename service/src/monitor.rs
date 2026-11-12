@@ -8,7 +8,7 @@ use crate::engine::Engine;
 use crate::plugins::registry::EnrichmentRegistry;
 use crate::rules::RuleStore;
 use crate::tracker::Tracker;
-use iris_core::{Aggregator, AlertKind, AppSample, EnrichTarget, Severity};
+use iris_core::{Aggregator, AlertKind, AppSample, EnrichTarget, FirewallMode, Severity};
 use iris_ipc::ServerMessage;
 use iris_store::Store;
 use std::collections::HashSet;
@@ -534,10 +534,11 @@ fn sample_forever(
     #[cfg(all(has_platform, target_os = "windows"))]
     let mut degraded_published = false;
 
+    let mut mode = rules.lock().unwrap_or_else(|e| e.into_inner()).mode();
     loop {
         std::thread::sleep(Duration::from_secs(1));
         let now = now_ms();
-        let tick = tracker.tick(now);
+        let mut tick = tracker.tick(now);
         #[cfg(target_os = "linux")]
         let recent_flows: HashMap<String, crate::platform::RecentFlow> = byte_monitor
             .as_ref()
@@ -627,7 +628,10 @@ fn sample_forever(
             enriched_seen.clear();
         }
 
-        follow_caps(&engine, &rules, &store, &tick.apps, now);
+        if let Some(current) = follow_caps(&engine, &rules, &store, &tick.apps, now) {
+            mode = current;
+        }
+        tick.mode = mode;
         engine.publish(ServerMessage::Tick(tick));
 
         // a full queue means the enrichers are behind; forget these so a
@@ -722,17 +726,21 @@ fn settle_stale_prompts(store: &Store, now: u64) {
     }
 }
 
-fn follow_caps(engine: &Engine, rules: &Mutex<RuleStore>, store: &Mutex<Store>, apps: &[AppSample], now: u64) {
+fn follow_caps(engine: &Engine, rules: &Mutex<RuleStore>, store: &Mutex<Store>, apps: &[AppSample], now: u64) -> Option<FirewallMode> {
     // a held rule store means a change is under way; the next tick catches up
-    let notice = match rules.try_lock() {
-        Ok(mut rules) => rules.follow_flows(apps),
-        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner().follow_flows(apps),
-        Err(std::sync::TryLockError::WouldBlock) => return,
+    let mut rules = match rules.try_lock() {
+        Ok(rules) => rules,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
     };
+    let notice = rules.follow_flows(apps);
+    let mode = rules.mode();
+    drop(rules);
     if let Some(kind) = notice {
         let alert = store.lock().unwrap_or_else(|e| e.into_inner()).insert_alert(&kind, now);
         engine.publish(ServerMessage::Alert(alert));
     }
+    Some(mode)
 }
 
 fn check_quotas(engine: &Engine, rules: &Mutex<RuleStore>, store: &Mutex<Store>, now: u64) {

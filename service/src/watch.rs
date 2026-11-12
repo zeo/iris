@@ -259,6 +259,7 @@ mod tests {
                 processes: Vec::new(),
             }],
             adapters: Vec::new(),
+            mode: iris_core::FirewallMode::default(),
         }
     }
 

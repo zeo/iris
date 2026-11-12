@@ -1,3 +1,4 @@
+use crate::rule::FirewallMode;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
@@ -220,6 +221,8 @@ pub struct StatsTick {
     pub apps: Vec<AppSample>,
     /// traffic split by adapter kind, for kinds seen this session
     pub adapters: Vec<AdapterSample>,
+    /// the firewall mode in force when the tick was stamped
+    pub mode: FirewallMode,
 }
 
 /// a live connection row for the activity table's drill-down

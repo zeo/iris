@@ -498,6 +498,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
 
     let mut next_id: u64 = 1;
     let mut last_tick_emit = 0;
+    let mut tray_mode = None;
     // the engine sends at least one tick per second, so a silent connection is
     // detectable; a hung transport would otherwise read as online forever
     let mut last_inbound = tokio::time::Instant::now();
@@ -529,6 +530,10 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                 match msg {
                     ServerMessage::Tick(mut tick) => {
                         crate::traygraph::push(app, tick.total_rate_recv, tick.total_rate_sent);
+                        if tray_mode != Some(tick.mode) {
+                            crate::refresh_mode_menu(app, tick.mode);
+                            tray_mode = Some(tick.mode);
+                        }
                         // only the main window draws ticks; skip the json and the
                         // webview round trip while it is closed
                         if app.get_webview_window("main").is_none() {

@@ -286,7 +286,6 @@ impl Wfp {
             *map = RuleMap { mode, marks, ..RuleMap::default() };
         }
         self.revision.fetch_add(1, Ordering::Release);
-        remove_table();
         install_table()?;
         self.hooked = true;
         Ok(())
@@ -434,7 +433,14 @@ fn ensure_modules() {
 /// priority just before the standard filter hook lets iris decide before a
 /// distro firewall.
 fn install_table() -> EngineResult<()> {
-    run_nft(&ruleset())
+    run_nft(&table_script())
+}
+
+/// declare, delete, and define the table in one nft run: nft applies a script as
+/// a single transaction, so the old table is never gone while the new one is
+/// missing, and the declaration lets the delete succeed when no table exists yet
+fn table_script() -> String {
+    format!("table inet {TABLE}\ndelete table inet {TABLE}\n{}", ruleset())
 }
 
 fn ruleset() -> String {
@@ -1010,7 +1016,7 @@ impl Resolver {
 mod packet_tests {
     use super::{
         attribution_timeout_verdict, index_by_local, parse_tuple, publish_attribution, ruleset,
-        Enforce, Outcome, Resolver, RuleMap, QUEUE_IN, QUEUE_OUT,
+        table_script, Enforce, Outcome, Resolver, RuleMap, QUEUE_IN, QUEUE_OUT,
     };
     use crate::sockets::SockInfo;
     use iris_core::{AppId, Direction, Endpoint, FirewallMode, Protocol, RuleScope};
@@ -1053,6 +1059,13 @@ mod packet_tests {
     #[test]
     fn unresolved_owner_fails_closed() {
         assert!(matches!(attribution_timeout_verdict(), nfq::Verdict::Drop));
+    }
+
+    #[test]
+    fn table_script_replaces_the_table_in_one_run() {
+        let script = table_script();
+        assert!(script.starts_with("table inet iris\ndelete table inet iris\ntable inet iris {"));
+        assert!(script.contains(&ruleset()));
     }
 
     #[test]

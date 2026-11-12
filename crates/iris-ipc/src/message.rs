@@ -1,6 +1,6 @@
 use iris_core::{
     AdapterKind, Alert, Annotation, AppId, ByteCounts, EnrichTarget, FirewallMode, HostUsage, KnownApp, Profile, ProfileState, RateCap,
-    Panel, Quota, QuotaLimit, Rule, RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket,
+    Panel, Quota, QuotaLimit, Rule, RuleAction, RuleLifetime, RuleProposal, RuleScope, StatsTick, StoredRule, UsageBucket,
     UsageQuery,
 };
 use serde::{Deserialize, Serialize};
@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 /// v16 adds download caps.
 /// v17 adds per-connection rates.
 /// v18 carries the firewall mode in every tick, adds a totals-only tick
-/// subscription, and removes the unused connection list and prompt suppression
-/// messages.
+/// subscription, removes the unused connection list and prompt suppression
+/// messages, and lets a prompt answer carry a host scope and a lifetime.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 /// conditions that quietly undermine the engine, for the UI to surface
@@ -169,10 +169,14 @@ pub enum ClientMessage {
         req: u64,
         id: i64,
     },
+    /// answer a pending prompt; the scope may only narrow to the prompt's own
+    /// remote address
     DecideAlert {
         req: u64,
         id: i64,
         action: RuleAction,
+        scope: RuleScope,
+        lifetime: RuleLifetime,
     },
     /// terminate a single TCP connection (privileged)
     KillConnection {

@@ -37,7 +37,7 @@ fn target_name(target: &EnrichTarget) -> String {
 use std::collections::HashMap;
 
 #[cfg(has_platform)]
-fn publish_pending(
+pub(crate) fn publish_pending(
     pending: Vec<crate::platform::PendingConnection>,
     store: &Arc<Mutex<Store>>,
     engine: &Engine,

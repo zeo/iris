@@ -627,8 +627,8 @@ html {
   flex: 0 0 auto;
   display: grid;
   /* the host sizes its window by card count, so an error shrinks to fit the card instead of pushing the footer out */
-  max-height: 228px;
-  grid-template-rows: 48px auto auto minmax(0, auto) 48px;
+  max-height: 256px;
+  grid-template-rows: 48px auto auto auto minmax(0, auto) 48px;
   overflow: hidden;
   border: 1px solid var(--line2);
   border-radius: var(--r-lg);
@@ -746,6 +746,31 @@ html {
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.prompt-options {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s2) var(--s4) 0;
+}
+.prompt-options .seg {
+  min-width: 0;
+}
+.prompt-options .seg:last-child {
+  flex: none;
+  margin-left: auto;
+}
+.prompt-options .seg button {
+  height: 22px;
+  padding: 0 var(--s2);
+  font-size: var(--fz-cap);
+  white-space: nowrap;
+}
+.prompt-options .prompt-host {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .connection-prompt > footer {
   grid-row: -2;

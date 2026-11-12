@@ -39,7 +39,7 @@ pub struct RuleOptions {
 }
 
 impl RuleOptions {
-    fn scope(&self) -> Result<RuleScope, String> {
+    pub(crate) fn scope(&self) -> Result<RuleScope, String> {
         fn text(value: &Option<String>) -> Option<&str> {
             value.as_deref().map(str::trim).filter(|v| !v.is_empty())
         }
@@ -59,7 +59,7 @@ impl RuleOptions {
         })
     }
 
-    fn lifetime(&self) -> RuleLifetime {
+    pub(crate) fn lifetime(&self) -> RuleLifetime {
         match self.minutes {
             None => RuleLifetime::Permanent,
             Some(0) => RuleLifetime::UntilRestart,

@@ -13,7 +13,8 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, Webvie
 
 pub(crate) const LABEL: &str = "connection-prompts";
 const CARD_WIDTH: f64 = 420.0;
-const CARD_HEIGHT: f64 = 228.0;
+// keep in sync with the .connection-prompt max-height in styles.css
+const CARD_HEIGHT: f64 = 256.0;
 const CARD_GAP: f64 = 10.0;
 const EDGE_MARGIN: i32 = 18;
 /// cards in the stack at once; keep in sync with the page
@@ -343,8 +344,8 @@ pub async fn prompt_cards(app: tauri::AppHandle) -> PromptCards {
     }
 }
 
-/// one card per app and direction, the newest: answering it decides every
-/// connection that app is waiting on, so older cards would only repeat it
+/// one card per app and direction, the newest: answering it decides what that
+/// app is waiting on, and an answer limited to one host lets the rest ask again
 fn newest_per_app(mut alerts: Vec<Alert>) -> Vec<Alert> {
     alerts.retain(crate::notify::needs_decision);
     alerts.sort_by_key(|alert| std::cmp::Reverse(alert.id));
@@ -772,10 +773,10 @@ mod tests {
 
     #[test]
     fn sizes_the_card_stack_without_exceeding_three_cards() {
-        assert_eq!(stack_height(1), 228.0);
-        assert_eq!(stack_height(2), 466.0);
-        assert_eq!(stack_height(3), 704.0);
-        assert_eq!(stack_height(4), 704.0);
+        assert_eq!(stack_height(1), 256.0);
+        assert_eq!(stack_height(2), 522.0);
+        assert_eq!(stack_height(3), 788.0);
+        assert_eq!(stack_height(4), 788.0);
     }
 
     #[test]
@@ -788,9 +789,9 @@ mod tests {
     #[test]
     fn scales_the_host_in_physical_pixels() {
         let one = host_size(1, 1.5);
-        assert_eq!((one.width, one.height), (630.0, 342.0));
+        assert_eq!((one.width, one.height), (630.0, 384.0));
         let two = host_size(2, 1.5);
-        assert_eq!((two.width, two.height), (630.0, 699.0));
+        assert_eq!((two.width, two.height), (630.0, 783.0));
     }
 
     #[cfg(windows)]

@@ -76,7 +76,7 @@ pub enum EngineCmd {
     ListAlerts(bool),
     ListPromptAlerts,
     AckAlert(i64),
-    DecideAlert(i64, RuleAction),
+    DecideAlert(i64, RuleAction, iris_core::RuleScope, iris_core::RuleLifetime),
     KillConnection(u16, String, u16),
     GetEnrichment(Vec<EnrichTarget>),
     ListPlugins,
@@ -292,13 +292,20 @@ pub async fn ack_alert(app: AppHandle, id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn decide_alert(app: AppHandle, id: i64, action: String) -> Result<(), String> {
+pub async fn decide_alert(
+    app: AppHandle,
+    id: i64,
+    action: String,
+    options: Option<crate::rulectl::RuleOptions>,
+) -> Result<(), String> {
     let action = if action == "allow" {
         RuleAction::Allow
     } else {
         RuleAction::Block
     };
-    match dispatch(&app, EngineCmd::DecideAlert(id, action)).await? {
+    let options = options.unwrap_or_default();
+    let cmd = EngineCmd::DecideAlert(id, action, options.scope()?, options.lifetime());
+    match dispatch(&app, cmd).await? {
         Reply::Ok => {
             let _ = app.emit("connection-prompts-refresh", ());
             Ok(())
@@ -658,8 +665,8 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     EngineCmd::ListAlerts(unacked_only) => ClientMessage::ListAlerts { req, unacked_only },
                     EngineCmd::ListPromptAlerts => ClientMessage::ListPromptAlerts { req },
                     EngineCmd::AckAlert(id) => ClientMessage::AckAlert { req, id },
-                    EngineCmd::DecideAlert(id, action) =>
-                        ClientMessage::DecideAlert { req, id, action },
+                    EngineCmd::DecideAlert(id, action, scope, lifetime) =>
+                        ClientMessage::DecideAlert { req, id, action, scope, lifetime },
                     EngineCmd::KillConnection(local_port, remote_addr, remote_port) =>
                         ClientMessage::KillConnection { req, local_port, remote_addr, remote_port },
                     EngineCmd::GetEnrichment(targets) => ClientMessage::GetEnrichment { req, targets },

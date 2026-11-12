@@ -2,7 +2,7 @@ use crate::engine::Engine;
 use crate::plugins::registry::EnrichmentRegistry;
 use crate::plugins::PanelHub;
 use crate::rules::RuleStore;
-use iris_core::{AlertKind, Direction, Rule, RuleAction};
+use iris_core::{Alert, AlertKind, Direction, Endpoint, Rule, RuleAction, RuleLifetime, RuleScope};
 use iris_ipc::message::{ClientMessage, Health, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
 use iris_store::Store;
@@ -496,7 +496,7 @@ async fn handle(
                         .await;
                         reply(&mut send, req, Reply::Ok).await?;
                     }
-                    ClientMessage::DecideAlert { req, id, action } => {
+                    ClientMessage::DecideAlert { req, id, action, scope, lifetime } => {
                         let store = store.clone();
                         let rules = rules.clone();
                         let result = tokio::task::spawn_blocking(move || {
@@ -505,6 +505,13 @@ async fn handle(
                                 .unwrap_or_else(|e| e.into_inner())
                                 .list_prompt_alerts();
                             let alert = pending.iter().find(|alert| alert.id == id);
+                            if let Some(AlertKind::NewApp { remote, .. }) = alert.map(|alert| &alert.kind) {
+                                if let Some(error) =
+                                    answer_error(&scope, lifetime, remote.as_ref(), now_ms())
+                                {
+                                    return Reply::Error(error.into());
+                                }
+                            }
                             match alert.map(|alert| alert.kind.clone()) {
                                 Some(AlertKind::NewApp { app, direction, .. }) => {
                                     let path = app.0.clone();
@@ -533,16 +540,16 @@ async fn handle(
                                     // allow or block; answering just settles the prompt
                                     let needs_rule = !crate::monitor::app_is_gone(&path)
                                         && (asking || matches!(action, RuleAction::Block));
+                                    let rule = Rule {
+                                        scope,
+                                        lifetime,
+                                        ..Rule::new(app, direction.unwrap_or(Direction::Outbound), action)
+                                    };
                                     let applied = if needs_rule {
-                                        let rule = Rule::new(
-                                            app,
-                                            direction.unwrap_or(Direction::Outbound),
-                                            action,
-                                        );
                                         rules
                                             .lock()
                                             .unwrap_or_else(|error| error.into_inner())
-                                            .add(rule)
+                                            .add(rule.clone())
                                             .map(|_| ())
                                     } else {
                                         Ok(())
@@ -551,15 +558,7 @@ async fn handle(
                                         Ok(()) => {
                                             let store =
                                                 store.lock().unwrap_or_else(|e| e.into_inner());
-                                            store.set_app_decision(&path, action);
-                                            // the decision covers the whole app, so its
-                                            // other pending prompts are answered with it
-                                            for sibling in pending.iter().filter(|alert| {
-                                                matches!(&alert.kind, AlertKind::NewApp { app: other, direction: d, .. }
-                                                    if other.0 == path && *d == direction)
-                                            }) {
-                                                store.ack_alert(sibling.id);
-                                            }
+                                            settle_answer(&store, &pending, id, &rule);
                                             Reply::Ok
                                         }
                                         Err(error) => Reply::Error(format!(
@@ -1151,6 +1150,48 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// why a prompt answer cannot stand: it may only narrow to the host the
+/// prompt is about, and a lifetime already over would add a rule that is
+/// dropped before it ever applies
+fn answer_error(
+    scope: &RuleScope,
+    lifetime: RuleLifetime,
+    remote: Option<&Endpoint>,
+    now_ms: u64,
+) -> Option<&'static str> {
+    let own_host = |cidr: iris_core::Cidr| {
+        remote.is_some_and(|remote| {
+            !remote.addr.is_unspecified()
+                && cidr.addr == remote.addr
+                && cidr.prefix == if remote.addr.is_ipv4() { 32 } else { 128 }
+        })
+    };
+    if scope.ports.is_some() || scope.protocol.is_some() || !scope.remote.is_none_or(own_host) {
+        Some("a prompt answer can only be limited to the connection's own host")
+    } else if lifetime.expired(now_ms) {
+        Some("that answer has already expired")
+    } else {
+        None
+    }
+}
+
+/// settle a prompt once its rule is in force. only a permanent answer for the
+/// whole app becomes the app's standing decision, and only the prompts the rule
+/// covers are acknowledged, so another host or a later connection asks again
+fn settle_answer(store: &Store, pending: &[Alert], id: i64, rule: &Rule) {
+    if rule.scope.is_whole_app() && rule.lifetime.is_permanent() {
+        store.set_app_decision(&rule.app.0, rule.action);
+    }
+    for alert in pending {
+        let covered = alert.id == id
+            || matches!(&alert.kind, AlertKind::NewApp { app, remote: Some(remote), direction: Some(d) }
+                if *app == rule.app && *d == rule.direction && rule.scope.matches(remote));
+        if covered {
+            store.ack_alert(alert.id);
+        }
+    }
+}
+
 fn kill_conn(local_port: u16, remote_addr: &str, remote_port: u16, peer_scope: u32) -> bool {
     #[cfg(has_platform)]
     {
@@ -1225,5 +1266,182 @@ mod feed_tests {
     #[test]
     fn feed_full_passes_the_tick_unchanged() {
         assert_eq!(outbound_frame(Feed::Full, tick()), Some(tick()));
+    }
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::{answer_error, settle_answer};
+    use iris_core::{
+        AlertKind, AppId, Cidr, Direction, Endpoint, PortRange, Protocol, Rule, RuleAction,
+        RuleLifetime, RuleScope,
+    };
+    use iris_store::Store;
+
+    fn endpoint(addr: &str) -> Endpoint {
+        Endpoint {
+            addr: addr.parse().unwrap(),
+            port: 443,
+            protocol: Protocol::Tcp,
+        }
+    }
+
+    fn host(cidr: &str) -> RuleScope {
+        RuleScope {
+            remote: Cidr::parse(cidr),
+            ..RuleScope::default()
+        }
+    }
+
+    #[test]
+    fn an_answer_may_narrow_to_the_prompts_own_host() {
+        let remote = endpoint("203.0.113.7");
+        let v6 = endpoint("2001:db8::7");
+        let forever = RuleLifetime::Permanent;
+        assert_eq!(answer_error(&RuleScope::default(), forever, Some(&remote), 0), None);
+        assert_eq!(answer_error(&host("203.0.113.7"), forever, Some(&remote), 0), None);
+        assert_eq!(answer_error(&host("2001:db8::7/128"), forever, Some(&v6), 0), None);
+    }
+
+    #[test]
+    fn an_answer_may_not_reach_past_the_prompts_host() {
+        let remote = endpoint("203.0.113.7");
+        let forever = RuleLifetime::Permanent;
+        let ports = RuleScope {
+            ports: PortRange::parse("443"),
+            ..RuleScope::default()
+        };
+        assert!(answer_error(&host("203.0.113.8"), forever, Some(&remote), 0).is_some());
+        assert!(answer_error(&host("203.0.113.0/24"), forever, Some(&remote), 0).is_some());
+        assert!(answer_error(&host("203.0.113.7"), forever, None, 0).is_some());
+        assert!(answer_error(&ports, forever, Some(&remote), 0).is_some());
+        let unspecified = endpoint("0.0.0.0");
+        assert!(answer_error(&host("0.0.0.0"), forever, Some(&unspecified), 0).is_some());
+    }
+
+    #[test]
+    fn an_answer_that_already_ran_out_is_refused() {
+        let remote = endpoint("203.0.113.7");
+        let scope = RuleScope::default();
+        assert!(answer_error(&scope, RuleLifetime::Until { at_ms: 1_000 }, Some(&remote), 1_000).is_some());
+        assert_eq!(answer_error(&scope, RuleLifetime::Until { at_ms: 2_000 }, Some(&remote), 1_000), None);
+        assert_eq!(answer_error(&scope, RuleLifetime::UntilRestart, Some(&remote), 1_000), None);
+    }
+
+    fn prompt(store: &Store, app: &AppId, addr: &str) -> i64 {
+        store
+            .insert_alert(
+                &AlertKind::NewApp {
+                    app: app.clone(),
+                    remote: Some(endpoint(addr)),
+                    direction: Some(Direction::Outbound),
+                },
+                1,
+            )
+            .id
+    }
+
+    #[test]
+    fn a_host_answer_leaves_other_hosts_asking_and_the_app_undecided() {
+        let store = Store::open_in_memory().unwrap();
+        let app = AppId::from_path("/usr/bin/browser");
+        store.ensure_app(&app.0, None, 1);
+        let other = prompt(&store, &app, "198.51.100.2");
+        let answered = prompt(&store, &app, "203.0.113.7");
+        let rule = Rule {
+            scope: host("203.0.113.7"),
+            ..Rule::new(app.clone(), Direction::Outbound, RuleAction::Allow)
+        };
+        settle_answer(&store, &store.list_prompt_alerts(), answered, &rule);
+        let still: Vec<i64> = store.list_prompt_alerts().iter().map(|alert| alert.id).collect();
+        assert_eq!(still, vec![other]);
+        assert!(store.trusted_apps().is_empty());
+    }
+
+    #[test]
+    fn a_timed_answer_does_not_become_the_apps_decision() {
+        let store = Store::open_in_memory().unwrap();
+        let app = AppId::from_path("/usr/bin/browser");
+        store.ensure_app(&app.0, None, 1);
+        let first = prompt(&store, &app, "203.0.113.7");
+        prompt(&store, &app, "198.51.100.2");
+        let rule = Rule {
+            lifetime: RuleLifetime::UntilRestart,
+            ..Rule::new(app.clone(), Direction::Outbound, RuleAction::Allow)
+        };
+        settle_answer(&store, &store.list_prompt_alerts(), first, &rule);
+        assert!(store.list_prompt_alerts().is_empty());
+        assert!(store.trusted_apps().is_empty());
+    }
+
+    #[test]
+    fn a_permanent_whole_app_answer_is_remembered() {
+        let store = Store::open_in_memory().unwrap();
+        let app = AppId::from_path("/usr/bin/browser");
+        store.ensure_app(&app.0, None, 1);
+        let id = prompt(&store, &app, "203.0.113.7");
+        let rule = Rule::new(app.clone(), Direction::Outbound, RuleAction::Allow);
+        settle_answer(&store, &store.list_prompt_alerts(), id, &rule);
+        assert!(store.list_prompt_alerts().is_empty());
+        assert_eq!(store.trusted_apps(), vec![app.0]);
+    }
+
+    /// the alert a denial to `next` raises once `first` was answered with `rule`
+    #[cfg(has_platform)]
+    fn prompt_after(rule: &Rule, first: &str, next: &str) -> Option<(i64, iris_core::Alert)> {
+        use iris_ipc::message::ServerMessage;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let engine = crate::engine::Engine::new();
+        let mut events = engine.subscribe();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let mut last_notified = HashMap::new();
+        let deny = |addr: &str| crate::platform::PendingConnection {
+            app: rule.app.clone(),
+            remote: endpoint(addr),
+            direction: rule.direction,
+        };
+        crate::monitor::publish_pending(vec![deny(first)], &store, &engine, &mut last_notified);
+        let Ok(ServerMessage::Alert(answered)) = events.try_recv() else {
+            panic!("expected the first prompt");
+        };
+        {
+            let store = store.lock().unwrap();
+            settle_answer(&store, &store.list_prompt_alerts(), answered.id, rule);
+        }
+        // a person answers well past the one-second per-app throttle
+        last_notified.clear();
+        crate::monitor::publish_pending(vec![deny(next)], &store, &engine, &mut last_notified);
+        match events.try_recv() {
+            Ok(ServerMessage::Alert(alert)) => Some((answered.id, alert)),
+            _ => None,
+        }
+    }
+
+    #[cfg(has_platform)]
+    #[test]
+    fn a_denial_to_another_host_after_a_host_answer_prompts_again() {
+        let rule = Rule {
+            scope: host("203.0.113.7"),
+            ..Rule::new(AppId::from_path("/usr/bin/browser"), Direction::Outbound, RuleAction::Allow)
+        };
+        let (answered, alert) = prompt_after(&rule, "203.0.113.7", "198.51.100.2").unwrap();
+        assert_ne!(alert.id, answered);
+        assert!(matches!(
+            alert.kind,
+            AlertKind::NewApp { remote: Some(remote), .. } if remote == endpoint("198.51.100.2")
+        ));
+    }
+
+    #[cfg(has_platform)]
+    #[test]
+    fn a_denial_once_a_timed_answer_ran_out_prompts_again() {
+        let rule = Rule {
+            lifetime: RuleLifetime::Until { at_ms: 1 },
+            ..Rule::new(AppId::from_path("/usr/bin/browser"), Direction::Outbound, RuleAction::Allow)
+        };
+        let (answered, alert) = prompt_after(&rule, "203.0.113.7", "203.0.113.7").unwrap();
+        assert_ne!(alert.id, answered);
     }
 }

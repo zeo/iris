@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- A connection prompt can be answered for just the host it names, and for 1 hour or until the engine restarts. Other hosts and expired answers prompt again.
+
 ### Changed
 - The wire protocol is now version 18. The setup updates the app and engine together.
 

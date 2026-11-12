@@ -1,4 +1,4 @@
-import { createEffect, createSignal, Index, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, Index, onCleanup, onMount, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -6,8 +6,10 @@ import {
   type AlertKind,
   decisionAlreadySettled,
   fileName,
+  promptHost,
   visibleDecisionPrompts,
 } from "../lib/alerts";
+import type { RuleOptions } from "../lib/rules";
 import { AppIcon } from "./AppIcon";
 import { Icon } from "./Icon";
 
@@ -15,7 +17,14 @@ import { Icon } from "./Icon";
 const MAX_CARDS = 3;
 const INFO_TIMEOUT_MS = 8_000;
 
+const DURATIONS: Array<{ label: string; minutes?: number }> = [
+  { label: "Always" },
+  { label: "1 hour", minutes: 60 },
+  { label: "Until restart", minutes: 0 },
+];
+
 type InfoCard = { id: number; title: string; body: string };
+type Answer = { host: boolean; minutes?: number };
 type PromptCards = { decisions: Alert[]; info: InfoCard[]; error: string | null };
 
 function destination(remote: Extract<AlertKind, { kind: "new_app" }>["remote"]): string {
@@ -34,6 +43,11 @@ export function ConnectionPrompt() {
   const [hidden, setHidden] = createSignal<Set<number>>(new Set());
   const [busy, setBusy] = createSignal<Set<number>>(new Set());
   const [error, setError] = createSignal<{ id: number; message: string }>();
+  // cards render by slot, so each answer's choices are kept by alert id
+  const [answers, setAnswers] = createSignal<Record<number, Answer>>({});
+  const answerFor = (id: number): Answer => answers()[id] ?? { host: false };
+  const choose = (id: number, change: Partial<Answer>) =>
+    setAnswers((current) => ({ ...current, [id]: { ...(current[id] ?? { host: false }), ...change } }));
   let refreshSequence = 0;
   let resizeQueue = Promise.resolve();
 
@@ -162,7 +176,12 @@ export function ConnectionPrompt() {
     setBusy((current) => new Set(current).add(alert.id));
     setError(undefined);
     try {
-      await invoke("decide_alert", { id: alert.id, action });
+      const answer = answerFor(alert.id);
+      const options: RuleOptions = {
+        remote: answer.host ? promptHost(alert) : undefined,
+        minutes: answer.minutes,
+      };
+      await invoke("decide_alert", { id: alert.id, action, options });
       hide(alert.id);
     } catch (reason) {
       if (decisionAlreadySettled(reason)) {
@@ -242,6 +261,33 @@ export function ConnectionPrompt() {
                 <span><small>Destination</small><b>{destination(application().remote)}</b></span>
                 <span><small>Protocol</small><b>{application().remote?.protocol.toUpperCase() ?? "Unknown"}</b></span>
                 <span><small>Direction</small><b>{application().direction ?? "outbound"}</b></span>
+              </div>
+              <div class="prompt-options">
+                <Show when={promptHost(alert())}>
+                  {(host) => (
+                    <div class="seg" role="group" aria-label="applies to">
+                      <button classList={{ on: !answerFor(alert().id).host }} aria-pressed={!answerFor(alert().id).host} onClick={() => choose(alert().id, { host: false })}>
+                        Any host
+                      </button>
+                      <button classList={{ on: answerFor(alert().id).host, "prompt-host": true }} aria-pressed={answerFor(alert().id).host} title={host()} onClick={() => choose(alert().id, { host: true })}>
+                        {host()}
+                      </button>
+                    </div>
+                  )}
+                </Show>
+                <div class="seg" role="group" aria-label="duration">
+                  <For each={DURATIONS}>
+                    {(duration) => (
+                      <button
+                        classList={{ on: answerFor(alert().id).minutes === duration.minutes }}
+                        aria-pressed={answerFor(alert().id).minutes === duration.minutes}
+                        onClick={() => choose(alert().id, { minutes: duration.minutes })}
+                      >
+                        {duration.label}
+                      </button>
+                    )}
+                  </For>
+                </div>
               </div>
               <Show when={error()?.id === alert().id}>
                 <div class="prompt-error" role="alert">{error()?.message}</div>

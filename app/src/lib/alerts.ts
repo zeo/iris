@@ -56,6 +56,13 @@ export const visibleDecisionPrompts = (
     .slice(0, limit)
     .reverse();
 
+// the one host a prompt answer may be limited to; an unspecified address
+// names no host
+export const promptHost = (alert: Alert): string | undefined => {
+  const remote = alert.kind.kind === "new_app" ? alert.kind.remote : null;
+  return remote && remote.addr !== "0.0.0.0" && remote.addr !== "::" ? remote.addr : undefined;
+};
+
 export { fileName };
 
 let started = false;

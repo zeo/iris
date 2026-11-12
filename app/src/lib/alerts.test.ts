@@ -3,6 +3,7 @@ import {
   decisionAlreadySettled,
   needsDecision,
   needsNativeNotification,
+  promptHost,
   visibleDecisionPrompts,
   type Alert,
 } from "./alerts";
@@ -55,5 +56,17 @@ describe("needsDecision", () => {
     const queued = [4, 3, 2, 1].map((id) => ({ ...pending, id }));
     expect(visibleDecisionPrompts(queued, new Set(), 2).map((alert) => alert.id)).toEqual([3, 4]);
     expect(visibleDecisionPrompts(queued, new Set([4]), 2).map((alert) => alert.id)).toEqual([2, 3]);
+  });
+});
+
+describe("promptHost", () => {
+  it("offers the prompt's own address as the host to limit an answer to", () => {
+    expect(promptHost(pending)).toBe("203.0.113.7");
+  });
+
+  it("offers no host when the prompt has no usable address", () => {
+    expect(promptHost({ ...pending, kind: { ...pending.kind, remote: null } })).toBeUndefined();
+    const anywhere = { ...pending.kind.remote, addr: "::" };
+    expect(promptHost({ ...pending, kind: { ...pending.kind, remote: anywhere } })).toBeUndefined();
   });
 });

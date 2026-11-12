@@ -627,7 +627,17 @@ fn verdict_loop(
             held_flows.clear();
             held_flows.extend(held.iter().map(|packet| packet.flow));
             notified.clear();
-            notified.extend(held.iter().map(|packet| packet.app.clone()));
+            for packet in &held {
+                // a rule for one host settles the prompt but leaves the app's other
+                // hosts held, so those ask again rather than waiting out the hold
+                if notified.insert(packet.app.clone()) && current_revision != seen_revision {
+                    let _ = pending_tx.send(PendingConnection {
+                        app: AppId(packet.app.clone()),
+                        remote: remote_of(packet.flow, dir),
+                        direction: dir,
+                    });
+                }
+            }
             seen_revision = current_revision;
             next_held_scan = now + std::time::Duration::from_millis(100);
         }

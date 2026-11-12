@@ -513,7 +513,7 @@ async fn handle(
                             let pending = store
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
-                                .list_alerts(true);
+                                .list_prompt_alerts();
                             let alert = pending.iter().find(|alert| alert.id == id);
                             match alert.map(|alert| alert.kind.clone()) {
                                 Some(AlertKind::NewApp { app, direction, .. }) => {

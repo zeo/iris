@@ -806,8 +806,13 @@ impl Store {
     }
 
     /// pending connection decisions that may be shown in the prompt surface.
+    /// the kind match runs in sql so the row limit never hides a prompt
+    /// behind unread info alerts
     pub fn list_prompt_alerts(&self) -> Vec<Alert> {
-        self.list_alerts_where("acknowledged = 0", true)
+        self.list_alerts_where(
+            "acknowledged = 0 AND kind LIKE '{\"kind\":\"new_app\",%'",
+            true,
+        )
     }
 
     fn list_alerts_where(&self, condition: &str, promptable_only: bool) -> Vec<Alert> {
@@ -1569,6 +1574,35 @@ mod tests {
         s.ack_alert(prompt.id);
         assert!(s.list_prompt_alerts().is_empty());
         assert_eq!(s.list_alerts(false).len(), 2);
+    }
+
+    #[test]
+    fn prompts_stay_listed_behind_many_unread_info_alerts() {
+        let s = Store::open_in_memory().unwrap();
+        let prompt = s.insert_alert(
+            &AlertKind::NewApp {
+                app: AppId("c:/x.exe".into()),
+                remote: Some(iris_core::Endpoint {
+                    addr: "203.0.113.7".parse().unwrap(),
+                    port: 443,
+                    protocol: iris_core::Protocol::Tcp,
+                }),
+                direction: Some(iris_core::Direction::Outbound),
+            },
+            500,
+        );
+        for index in 0..600 {
+            s.insert_alert(
+                &AlertKind::Plugin {
+                    source: "plugin".into(),
+                    message: index.to_string(),
+                },
+                501 + index,
+            );
+        }
+        let prompts = s.list_prompt_alerts();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].id, prompt.id);
     }
 
     #[test]

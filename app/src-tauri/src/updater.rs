@@ -113,33 +113,60 @@ pub fn install_installer_update(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn installer_path() -> Option<PathBuf> {
+    let current = std::env::current_exe().ok();
+    let machine_wide = current.as_deref().is_some_and(is_machine_wide);
+    installer_candidates(current.as_deref().and_then(std::path::Path::parent), machine_wide)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+/// whether the app lives where only administrators can write. a machine-wide
+/// app must not run an installer that the logged-in user could have replaced
+fn is_machine_wide(exe: &std::path::Path) -> bool {
+    let Ok(exe) = exe.canonicalize() else {
+        return false;
+    };
+    #[cfg(windows)]
+    let roots: Vec<PathBuf> = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .filter_map(|root| PathBuf::from(root).canonicalize().ok())
+        .collect();
+    #[cfg(not(windows))]
+    let roots = [PathBuf::from("/usr"), PathBuf::from("/opt")];
+    roots.iter().any(|root| exe.starts_with(root))
+}
+
+fn installer_candidates(app_dir: Option<&std::path::Path>, machine_wide: bool) -> Vec<PathBuf> {
     let name = if cfg!(windows) { "rot-installer.exe" } else { "rot-installer" };
     let mut candidates = Vec::new();
-    if let Ok(current) = std::env::current_exe() {
-        if let Some(parent) = current.parent() {
-            candidates.push(parent.join(name));
-            candidates.push(parent.join("installer").join(name));
-        }
+    if let Some(parent) = app_dir {
+        candidates.push(parent.join(name));
+        candidates.push(parent.join("installer").join(name));
     }
     #[cfg(windows)]
     {
         if let Some(root) = std::env::var_os("ProgramFiles") {
             candidates.push(PathBuf::from(root).join("rot").join("installer").join(name));
         }
-        if let Some(root) = std::env::var_os("LOCALAPPDATA") {
-            candidates.push(PathBuf::from(root).join("Programs").join("rot-installer").join(name));
+        if !machine_wide {
+            if let Some(root) = std::env::var_os("LOCALAPPDATA") {
+                candidates.push(PathBuf::from(root).join("Programs").join("rot-installer").join(name));
+            }
         }
     }
     #[cfg(target_os = "linux")]
     {
         candidates.push(PathBuf::from("/opt/rot/installer").join(name));
-        if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-            candidates.push(PathBuf::from(data).join("rot/apps/installer").join(name));
-        } else if let Some(home) = std::env::var_os("HOME") {
-            candidates.push(PathBuf::from(home).join(".local/share/rot/apps/installer").join(name));
+        if !machine_wide {
+            if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+                candidates.push(PathBuf::from(data).join("rot/apps/installer").join(name));
+            } else if let Some(home) = std::env::var_os("HOME") {
+                candidates.push(PathBuf::from(home).join(".local/share/rot/apps/installer").join(name));
+            }
         }
     }
-    candidates.into_iter().find(|path| path.is_file())
+    candidates
 }
 
 fn installer_is_bundled(installer: &std::path::Path) -> bool {
@@ -170,4 +197,41 @@ fn version_tuple(version: &str) -> Vec<u64> {
     version.trim_start_matches('v').split('.')
         .map(|part| part.split('-').next().unwrap_or("0").parse().unwrap_or(0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{installer_candidates, is_machine_wide};
+
+    // the same per-user root installer_candidates reads
+    fn user_root() -> Option<std::path::PathBuf> {
+        let var = |name| std::env::var_os(name).map(std::path::PathBuf::from);
+        if cfg!(windows) { var("LOCALAPPDATA") } else { var("XDG_DATA_HOME").or_else(|| var("HOME")) }
+    }
+
+    #[test]
+    fn a_machine_wide_app_never_looks_in_the_user_profile() {
+        let Some(root) = user_root() else { return };
+        let app = std::path::Path::new(if cfg!(windows) { "C:\\Program Files\\Iris" } else { "/usr/bin" });
+        assert!(installer_candidates(Some(app), true).iter().all(|path| !path.starts_with(&root)));
+    }
+
+    #[test]
+    fn a_per_user_app_keeps_the_per_user_installer() {
+        let Some(root) = user_root() else { return };
+        let app = root.join("iris");
+        let candidates = installer_candidates(Some(&app), false);
+        assert!(candidates.iter().any(|path| path.starts_with(&root) && !path.starts_with(&app)));
+    }
+
+    #[test]
+    fn the_bundled_location_comes_first() {
+        let app = std::path::Path::new("/somewhere/iris");
+        assert!(installer_candidates(Some(app), true)[0].starts_with(app));
+    }
+
+    #[test]
+    fn a_build_tree_binary_is_not_machine_wide() {
+        assert!(!is_machine_wide(&std::env::current_exe().unwrap()));
+    }
 }

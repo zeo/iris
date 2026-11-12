@@ -4,7 +4,7 @@ import { Titlebar } from "./components/Titlebar";
 import { Icon } from "./components/Icon";
 import { createTheme } from "./lib/theme";
 import { persisted } from "./lib/persist";
-import { engine, initEngine, setTickCadence } from "./lib/engine";
+import { engine, initEngine, serviceOffer, setTickCadence } from "./lib/engine";
 import { initAlerts, refreshAlerts, unackedCount } from "./lib/alerts";
 import { initQuota } from "./lib/quota";
 import { Protect } from "./tabs/Protect";
@@ -98,14 +98,14 @@ export function App() {
   const [offerInstall, setOfferInstall] = createSignal(false);
   const [installing, setInstalling] = createSignal(false);
   const [installError, setInstallError] = createSignal<string>();
+  const offer = () => serviceOffer(engine.online(), engine.version(), engine.mismatch(), __APP_VERSION__);
   createEffect(() => {
-    const current = engine.online() && engine.version() === __APP_VERSION__;
-    if (current) {
+    const next = offer();
+    if (!next) {
       setOfferInstall(false);
       return;
     }
-    const delay = engine.online() ? 0 : 8000;
-    const t = setTimeout(() => setOfferInstall(true), delay);
+    const t = setTimeout(() => setOfferInstall(true), next.delayMs);
     onCleanup(() => clearTimeout(t));
   });
   // a dismissed notice stays hidden until what it reports changes
@@ -177,10 +177,7 @@ export function App() {
         <div class="install-banner">
           <Icon name="shield" />
           <span>
-            {installError() ??
-              (engine.online()
-                ? "The Iris engine needs to be updated to match this version of Iris."
-                : "The Iris engine service isn't running. Install it to start monitoring in the background.")}
+            {installError() ?? offer()?.message}
           </span>
           <span class="grow" />
           <button class="btn" onClick={installService} disabled={installing()}>

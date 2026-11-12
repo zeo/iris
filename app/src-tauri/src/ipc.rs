@@ -23,6 +23,8 @@ use tokio::sync::{mpsc, oneshot};
 pub struct Status {
     pub online: bool,
     pub version: Option<String>,
+    /// the engine answered on another protocol version, so it needs updating
+    pub mismatch: bool,
 }
 
 /// forwarded to the webview when the engine resolves annotations for a target
@@ -462,14 +464,30 @@ pub async fn get_enrichment(
 pub fn spawn(app: AppHandle, mut rx: mpsc::Receiver<Command>) {
     tauri::async_runtime::spawn(async move {
         loop {
-            if let Err(e) = session(&app, &mut rx).await {
-                tracing::debug!("engine session ended: {e}");
-            }
-            set_status(&app, false, None);
+            let mismatch = match session(&app, &mut rx).await {
+                Ok(()) => false,
+                Err(e) => {
+                    tracing::debug!("engine session ended: {e}");
+                    e.is::<ProtocolMismatch>()
+                }
+            };
+            set_status(&app, false, None, mismatch);
             tokio::time::sleep(Duration::from_millis(1200)).await;
         }
     });
 }
+
+/// the engine answered on another protocol version
+#[derive(Debug)]
+struct ProtocolMismatch(u32);
+
+impl std::fmt::Display for ProtocolMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "protocol mismatch: engine {}, ui {PROTOCOL_VERSION}", self.0)
+    }
+}
+
+impl std::error::Error for ProtocolMismatch {}
 
 async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::Result<()> {
     let stream = transport::connect().await?;
@@ -488,10 +506,10 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
             engine_version,
         }) => {
             if protocol != PROTOCOL_VERSION {
-                anyhow::bail!("protocol mismatch: engine {protocol}, ui {PROTOCOL_VERSION}");
+                return Err(ProtocolMismatch(protocol).into());
             }
             reconcile_alerts(app, &mut recv, &mut send).await?;
-            set_status(app, true, Some(engine_version));
+            set_status(app, true, Some(engine_version), false);
         }
         other => anyhow::bail!("expected Welcome, got {other:?}"),
     }
@@ -756,8 +774,8 @@ fn finish_alert_reconcile(app: &AppHandle, backlog: &[Alert], prompts: &[Alert])
     crate::prompt::restore(app, prompts);
 }
 
-fn set_status(app: &AppHandle, online: bool, version: Option<String>) {
-    let status = Status { online, version };
+fn set_status(app: &AppHandle, online: bool, version: Option<String>, mismatch: bool) {
+    let status = Status { online, version, mismatch };
     if let Some(state) = app.try_state::<StatusState>() {
         if let Ok(mut s) = state.0.lock() {
             *s = status.clone();

@@ -70,6 +70,7 @@ export function adapterLabel(kind: AdapterKind): string {
 interface Status {
   online: boolean;
   version: string | null;
+  mismatch: boolean;
 }
 
 // mirrors iris-core's enrichment types (externally-tagged enums over the wire)
@@ -99,6 +100,7 @@ const RING = 300;
 
 const [online, setOnline] = createSignal(false);
 const [version, setVersion] = createSignal<string | null>(null);
+const [mismatch, setMismatch] = createSignal(false);
 const [tick, setTick] = createSignal<StatsTick | null>(null);
 const [ring, setRing] = createSignal<Sample[]>([]);
 // annotations resolved by the engine, keyed by endpoint ip
@@ -144,6 +146,7 @@ export function initEngine() {
   listen<Status>("engine-status", (e) => {
     setOnline(e.payload.online);
     setVersion(e.payload.version);
+    setMismatch(e.payload.mismatch);
     if (e.payload.online) refreshHealth();
     if (!e.payload.online) {
       setHealth(null);
@@ -186,9 +189,28 @@ export function initEngine() {
     .then((s) => {
       setOnline(s.online);
       setVersion(s.version);
+      setMismatch(s.mismatch);
       if (s.online) refreshHealth();
     })
     .catch(() => {});
+}
+
+// what the install banner says, and how long to wait before showing it;
+// null while the engine is the one this app shipped with
+export function serviceOffer(
+  online: boolean,
+  version: string | null,
+  mismatch: boolean,
+  appVersion: string,
+): { delayMs: number; message: string } | null {
+  if (online && version === appVersion) return null;
+  if (online || mismatch) {
+    return { delayMs: 0, message: "The Iris engine needs to be updated to match this version of Iris." };
+  }
+  return {
+    delayMs: 8000,
+    message: "The Iris engine service isn't running. Install it to start monitoring in the background.",
+  };
 }
 
 // fetch any cached annotations for these ips now; live pushes keep them current
@@ -204,6 +226,7 @@ export async function fetchEnrichment(ips: string[]) {
 export const engine = {
   online,
   version,
+  mismatch,
   tick,
   ring,
   enrichment,

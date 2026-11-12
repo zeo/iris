@@ -212,7 +212,15 @@ impl RuleStore {
                             );
                             Vec::new()
                         }
-                        Err(error) => return Err(error.into()),
+                        // the reset above already lifted every filter, so one
+                        // refused rule must not stop the engine enforcing the rest
+                        Err(error) => {
+                            tracing::warn!(
+                                app = %p.rule.app.0,
+                                "rule deferred after it failed to apply: {error}"
+                            );
+                            Vec::new()
+                        }
                     }
                 }
                 #[cfg(not(has_platform))]
@@ -501,7 +509,9 @@ impl RuleStore {
         self.rules.clone()
     }
 
-    #[cfg(windows)]
+    /// apply enabled rules that have no filters yet; returns how many took, or
+    /// the first error after trying them all
+    #[cfg(has_platform)]
     pub fn retry_deferred(&mut self) -> anyhow::Result<usize> {
         let pending: Vec<(usize, Rule)> = self
             .rules
@@ -515,6 +525,7 @@ impl RuleStore {
             .map(|(index, stored)| (index, stored.rule.clone()))
             .collect();
         let mut restored = 0;
+        let mut failure = None;
         for (index, rule) in pending {
             match apply(self.wfp.as_mut(), &rule) {
                 Ok(ids) => {
@@ -522,10 +533,16 @@ impl RuleStore {
                     restored += 1;
                 }
                 Err(EngineError::NotFound(_)) => {}
-                Err(error) => return Err(error.into()),
+                // keep going so one rule that cannot apply does not hold back the rest
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
             }
         }
-        Ok(restored)
+        match failure {
+            Some(error) => Err(error.into()),
+            None => Ok(restored),
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -743,8 +760,9 @@ mod fake {
     use std::collections::BTreeSet;
 
     /// the platform firewall as the rule store sees it, kept in memory: it
-    /// hands out filter ids, tracks which are live, and treats an app path
-    /// containing "missing" as gone from disk
+    /// hands out filter ids, tracks which are live, treats an app path
+    /// containing "missing" as gone from disk, and always refuses one
+    /// containing "broken"
     #[derive(Default)]
     pub struct Wfp {
         next: u64,
@@ -774,6 +792,9 @@ mod fake {
         ) -> EngineResult<Vec<u64>> {
             if path.contains("missing") {
                 return Err(EngineError::NotFound(path.to_string()));
+            }
+            if path.contains("broken") {
+                return Err(EngineError::Os(format!("refused {path}")));
             }
             self.next += 1;
             self.live.insert(self.next);
@@ -965,6 +986,34 @@ mod tests {
         assert!(rules[0].filter_ids.is_empty());
         assert!(live(&store).is_empty());
         drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_rule_that_fails_to_apply_at_startup_is_deferred() {
+        let dir = scratch("startup-broken");
+        write_rules(&dir, &[(1, rule(r"C:\apps\broken.exe")), (2, rule(r"C:\apps\editor.exe"))]);
+        let store = open(&dir);
+        let rules = store.list();
+        assert_eq!(rules.len(), 2);
+        assert!(rules[0].enabled);
+        assert!(rules[0].filter_ids.is_empty());
+        assert!(!rules[1].filter_ids.is_empty());
+        assert_eq!(live(&store), rules[1].filter_ids);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn retrying_deferred_rules_goes_past_one_that_keeps_failing() {
+        let dir = scratch("retry-broken");
+        write_rules(&dir, &[(1, rule(r"C:\apps\broken.exe")), (2, rule(r"C:\apps\editor.exe"))]);
+        let mut store = open(&dir);
+        // as if the editor's filters had never gone in
+        store.rules[1].filter_ids.clear();
+        assert!(store.retry_deferred().is_err());
+        let rules = store.list();
+        assert!(rules[0].filter_ids.is_empty());
+        assert!(!rules[1].filter_ids.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -275,7 +275,6 @@ pub(crate) async fn watch_rules(rules: Arc<Mutex<RuleStore>>) -> anyhow::Result<
                 Ok(count) => tracing::info!(count, "removed expired firewall rules"),
                 Err(error) => tracing::warn!("could not remove expired firewall rules: {error}"),
             }
-            #[cfg(windows)]
             match rules.retry_deferred() {
                 Ok(0) => {}
                 Ok(count) => tracing::info!(count, "restored deferred firewall rules"),

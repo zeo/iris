@@ -191,7 +191,7 @@ async fn handle(
         return Ok(());
     }
 
-    let mut subscribed = false;
+    let mut feed = Feed::Off;
     let mut events = engine.subscribe();
     let (incoming_tx, mut incoming_rx) = mpsc::channel(16);
     tokio::spawn(async move {
@@ -224,8 +224,9 @@ async fn handle(
                 let msg = incoming?;
                 match msg {
                     ClientMessage::Hello { .. } => {}
-                    ClientMessage::Subscribe => subscribed = true,
-                    ClientMessage::Unsubscribe => subscribed = false,
+                    ClientMessage::Subscribe => feed = Feed::Full,
+                    ClientMessage::SubscribeTotals => feed = Feed::Totals,
+                    ClientMessage::Unsubscribe => feed = Feed::Off,
                     ClientMessage::Ping { req } => {
                         reply(&mut send, req, Reply::Pong).await?;
                     }
@@ -755,9 +756,8 @@ async fn handle(
                 match outbound {
                     // ticks only go to subscribers; alerts always go out
                     Ok(msg) => {
-                        let deliver = subscribed || matches!(msg, ServerMessage::Alert(_));
-                        if deliver {
-                            transport::write_frame(&mut send, &msg).await?;
+                        if let Some(frame) = outbound_frame(feed, msg) {
+                            transport::write_frame(&mut send, &frame).await?;
                         }
                     }
                     Err(RecvError::Lagged(n)) => {
@@ -1134,7 +1134,33 @@ fn req_of(m: &ClientMessage) -> Option<u64> {
         | ClientMessage::ResolveProposal { req, .. }
         | ClientMessage::GetPluginPanel { req, .. }
         | ClientMessage::Ping { req } => Some(*req),
-        ClientMessage::Hello { .. } | ClientMessage::Subscribe | ClientMessage::Unsubscribe => None,
+        ClientMessage::Hello { .. }
+        | ClientMessage::Subscribe
+        | ClientMessage::SubscribeTotals
+        | ClientMessage::Unsubscribe => None,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Feed {
+    Off,
+    Totals,
+    Full,
+}
+
+/// the frame a client on `feed` gets for a broadcast message, if any.
+/// alerts always go out so a decision is never lost
+fn outbound_frame(feed: Feed, msg: ServerMessage) -> Option<ServerMessage> {
+    match (feed, msg) {
+        (_, msg @ ServerMessage::Alert(_)) => Some(msg),
+        (Feed::Off, _) => None,
+        (Feed::Totals, ServerMessage::Tick(tick)) => Some(ServerMessage::Totals {
+            at_ms: tick.at_ms,
+            total_rate_sent: tick.total_rate_sent,
+            total_rate_recv: tick.total_rate_recv,
+            mode: tick.mode,
+        }),
+        (_, msg) => Some(msg),
     }
 }
 
@@ -1157,5 +1183,67 @@ fn kill_conn(local_port: u16, remote_addr: &str, remote_port: u16, peer_scope: u
     {
         let _ = (local_port, remote_addr, remote_port, peer_scope);
         false
+    }
+}
+
+#[cfg(test)]
+mod feed_tests {
+    use super::{outbound_frame, Feed};
+    use iris_core::{Alert, AlertKind, AppId, Direction, Endpoint, FirewallMode, Protocol, StatsTick};
+    use iris_ipc::message::ServerMessage;
+
+    fn tick() -> ServerMessage {
+        ServerMessage::Tick(StatsTick {
+            at_ms: 5,
+            total_rate_sent: 10,
+            total_rate_recv: 20,
+            apps: Vec::new(),
+            adapters: Vec::new(),
+            mode: FirewallMode::Notify,
+        })
+    }
+
+    #[test]
+    fn feed_off_drops_ticks_but_keeps_alerts() {
+        let alert = ServerMessage::Alert(Alert {
+            id: 9,
+            at_ms: 42,
+            kind: AlertKind::NewApp {
+                app: AppId::from_path("/usr/bin/browser"),
+                remote: Some(Endpoint {
+                    addr: "203.0.113.7".parse().unwrap(),
+                    port: 443,
+                    protocol: Protocol::Tcp,
+                }),
+                direction: Some(Direction::Outbound),
+            },
+            acknowledged: false,
+        });
+        assert_eq!(outbound_frame(Feed::Off, tick()), None);
+        assert_eq!(outbound_frame(Feed::Off, alert.clone()), Some(alert));
+    }
+
+    #[test]
+    fn feed_totals_reduces_a_tick_to_its_rates() {
+        assert_eq!(
+            outbound_frame(Feed::Totals, tick()),
+            Some(ServerMessage::Totals {
+                at_ms: 5,
+                total_rate_sent: 10,
+                total_rate_recv: 20,
+                mode: FirewallMode::Notify,
+            })
+        );
+    }
+
+    #[test]
+    fn feed_totals_keeps_other_pushes() {
+        let degraded = ServerMessage::CaptureDegraded { degraded: true };
+        assert_eq!(outbound_frame(Feed::Totals, degraded.clone()), Some(degraded));
+    }
+
+    #[test]
+    fn feed_full_passes_the_tick_unchanged() {
+        assert_eq!(outbound_frame(Feed::Full, tick()), Some(tick()));
     }
 }

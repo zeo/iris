@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 /// could not decode while they were skipped when empty, and adds data quotas.
 /// v16 adds download caps.
 /// v17 adds per-connection rates.
-/// v18 carries the firewall mode in every tick.
+/// v18 carries the firewall mode in every tick and adds a totals-only tick
+/// subscription.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 /// conditions that quietly undermine the engine, for the UI to surface
@@ -67,6 +68,9 @@ pub enum ClientMessage {
     Subscribe,
     /// stop receiving ticks
     Unsubscribe,
+    /// receive [`ServerMessage::Totals`] in place of full ticks, for a client
+    /// that shows only aggregate throughput
+    SubscribeTotals,
     ListConnections {
         req: u64,
     },
@@ -253,6 +257,13 @@ pub enum ServerMessage {
     },
     /// live sample push
     Tick(StatsTick),
+    /// the aggregate rates of a tick, sent in its place to a totals subscriber
+    Totals {
+        at_ms: u64,
+        total_rate_sent: u64,
+        total_rate_recv: u64,
+        mode: FirewallMode,
+    },
     /// durable alert push (also delivered on next connect if unacked)
     Alert(Alert),
     /// annotations resolved for a target, pushed as enrichers finish off the

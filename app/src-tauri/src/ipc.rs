@@ -7,7 +7,7 @@
 
 use iris_core::{
     AdapterKind, Alert, Annotation, ByteCounts, EnrichTarget, Granularity, KnownApp, Panel,
-    RuleAction, RuleProposal, StoredRule, UsageBucket, UsageQuery,
+    RuleAction, RuleProposal, StatsTick, StoredRule, UsageBucket, UsageQuery,
 };
 use iris_ipc::message::{ClientMessage, PluginInfo, Reply, ServerMessage, PROTOCOL_VERSION};
 use iris_ipc::transport;
@@ -499,6 +499,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
     let mut next_id: u64 = 1;
     let mut last_tick_emit = 0;
     let mut tray_mode = None;
+    let mut full_feed = true;
     // the engine sends at least one tick per second, so a silent connection is
     // detectable; a hung transport would otherwise read as online forever
     let mut last_inbound = tokio::time::Instant::now();
@@ -527,13 +528,25 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                 let Some(incoming) = incoming else { break };
                 last_inbound = tokio::time::Instant::now();
                 let msg = incoming?;
+                if let ServerMessage::Tick(StatsTick { total_rate_recv, total_rate_sent, mode, .. })
+                | ServerMessage::Totals { total_rate_recv, total_rate_sent, mode, .. } = &msg
+                {
+                    crate::traygraph::push(app, *total_rate_recv, *total_rate_sent);
+                    if tray_mode != Some(*mode) {
+                        crate::refresh_mode_menu(app, *mode);
+                        tray_mode = Some(*mode);
+                    }
+                    // full ticks only while the main window exists to draw them; the
+                    // switch lands within a frame or two of the window opening or closing
+                    let want_full = app.get_webview_window("main").is_some();
+                    if want_full != full_feed {
+                        full_feed = want_full;
+                        let level = if want_full { ClientMessage::Subscribe } else { ClientMessage::SubscribeTotals };
+                        transport::write_frame(&mut send, &level).await?;
+                    }
+                }
                 match msg {
                     ServerMessage::Tick(mut tick) => {
-                        crate::traygraph::push(app, tick.total_rate_recv, tick.total_rate_sent);
-                        if tray_mode != Some(tick.mode) {
-                            crate::refresh_mode_menu(app, tick.mode);
-                            tray_mode = Some(tick.mode);
-                        }
                         // only the main window draws ticks; skip the json and the
                         // webview round trip while it is closed
                         if app.get_webview_window("main").is_none() {
@@ -579,6 +592,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                             let _ = resp.send(result);
                         }
                     }
+                    ServerMessage::Totals { .. } => {}
                     ServerMessage::Welcome { .. } => {}
                 }
             }
@@ -728,7 +742,7 @@ async fn reconcile_alerts(
                 let _ = app.emit("engine-proposal", proposal);
             }
             Some(ServerMessage::CaptureDegraded { .. }) => {}
-            Some(ServerMessage::Tick(_) | ServerMessage::Welcome { .. }) => {}
+            Some(ServerMessage::Tick(_) | ServerMessage::Totals { .. } | ServerMessage::Welcome { .. }) => {}
             Some(ServerMessage::Reply { req, .. }) => {
                 anyhow::bail!("unexpected reply (req {req}) during alert restore")
             }

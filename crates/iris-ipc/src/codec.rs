@@ -97,6 +97,26 @@ mod tests {
     }
 
     #[test]
+    fn totals_subscription_and_frame_read_back_in_order() {
+        let a = ClientMessage::SubscribeTotals;
+        let b = ServerMessage::Totals {
+            at_ms: 42,
+            total_rate_sent: 7,
+            total_rate_recv: 9,
+            mode: iris_core::FirewallMode::Notify,
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &a).unwrap();
+        write_frame(&mut buf, &b).unwrap();
+
+        let mut cur = Cursor::new(buf);
+        let ra = read_frame::<_, ClientMessage>(&mut cur).unwrap().unwrap();
+        let rb = read_frame::<_, ServerMessage>(&mut cur).unwrap().unwrap();
+        assert_eq!(ra, a);
+        assert_eq!(rb, b);
+    }
+
+    #[test]
     fn alert_roundtrips_through_a_binary_frame() {
         let msg = ServerMessage::Alert(Alert {
             id: 9,

@@ -11,10 +11,21 @@ import {
   setRateUnits,
   setShowNotifications,
   showNotifications,
+  infoCards,
+  setInfoCard,
   setTrayGraph,
   trayGraph,
+  type InfoKind,
   type RateUnits,
 } from "../lib/settings";
+
+const CARD_KINDS: { id: InfoKind; name: string; desc: string }[] = [
+  { id: "new_app", name: "First-seen apps", desc: "An app reaches the network for the first time." },
+  { id: "watch", name: "Watcher alerts", desc: "An app changed on disk, a traffic spike, a new destination, or a new gateway." },
+  { id: "quota", name: "Data quotas", desc: "An app spent its quota and is blocked until the period resets." },
+  { id: "caps", name: "Download limits paused", desc: "An anti-cheat started, so download limits stepped aside." },
+  { id: "plugin", name: "Plugin alerts", desc: "Messages raised by installed plugins." },
+];
 
 const MODE_OPTS: { id: FirewallMode; label: string }[] = [
   { id: "ask", label: "ask" },
@@ -204,19 +215,40 @@ export function Settings() {
         <div class="set-section">Notifications</div>
         <div class="set-row">
           <div class="set-meta">
-            <span class="set-name">Desktop notifications</span>
-            <span class="set-desc">Raise a tray notification for a new app or a blocked connection.</span>
+            <span class="set-name">Info cards</span>
+            <span class="set-desc">Raise a passing card for alerts that need no answer. Allow and Block prompts always show.</span>
           </div>
           <button
             class="rocker"
             role="switch"
             aria-checked={showNotifications()}
-            aria-label="Desktop notifications"
+            aria-label="Info cards"
             onClick={() => setShowNotifications(!showNotifications())}
           >
             <span class="knob" />
           </button>
         </div>
+        <Show when={showNotifications()}>
+          <For each={CARD_KINDS}>
+            {(kind) => (
+              <div class="set-row sub">
+                <div class="set-meta">
+                  <span class="set-name">{kind.name}</span>
+                  <span class="set-desc">{kind.desc}</span>
+                </div>
+                <button
+                  class="rocker"
+                  role="switch"
+                  aria-checked={infoCards()[kind.id]}
+                  aria-label={kind.name}
+                  onClick={() => setInfoCard(kind.id, !infoCards()[kind.id])}
+                >
+                  <span class="knob" />
+                </button>
+              </div>
+            )}
+          </For>
+        </Show>
         <div class="set-row">
           <div class="set-meta">
             <span class="set-name">Live graph in the tray</span>

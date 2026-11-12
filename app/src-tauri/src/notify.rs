@@ -34,6 +34,11 @@ pub fn set_notifications_enabled(app: tauri::AppHandle, enabled: bool) {
     crate::prefs::update(&app, |prefs| prefs.notifications = enabled);
 }
 
+#[tauri::command]
+pub fn set_info_cards(app: tauri::AppHandle, cards: crate::prefs::InfoCards) {
+    crate::prefs::update(&app, |prefs| prefs.info_cards = cards);
+}
+
 pub fn apply_enabled(app: &tauri::AppHandle, enabled: bool) {
     app.state::<NotifyState>().enabled.store(enabled, Ordering::Release);
 }
@@ -50,6 +55,19 @@ pub fn needs_decision(alert: &Alert) -> bool {
                 ..
             }
         )
+}
+
+/// whether the user wants a passing card for this kind of alert
+fn wanted(cards: &crate::prefs::InfoCards, alert: &Alert) -> bool {
+    use iris_core::WatchReason;
+    match &alert.kind {
+        AlertKind::NewApp { .. } => cards.new_app,
+        AlertKind::Blocked { .. } => true,
+        AlertKind::Plugin { .. } => cards.plugin,
+        AlertKind::Watch { reason: WatchReason::Quota, .. } => cards.quota,
+        AlertKind::Watch { reason: WatchReason::CapsPaused, .. } => cards.caps,
+        AlertKind::Watch { .. } => cards.watch,
+    }
 }
 
 fn enabled(app: &tauri::AppHandle) -> bool {
@@ -74,7 +92,11 @@ fn first_sighting(app: &tauri::AppHandle, id: i64) -> bool {
 
 /// toast a live alert as it arrives from the engine.
 pub fn alert_toast(app: &tauri::AppHandle, alert: &Alert) {
-    if !enabled(app) || needs_decision(alert) || !first_sighting(app, alert.id) {
+    if !enabled(app)
+        || needs_decision(alert)
+        || !wanted(&crate::prefs::current(app).info_cards, alert)
+        || !first_sighting(app, alert.id)
+    {
         return;
     }
     let (title, body) = match &alert.kind {
@@ -130,13 +152,14 @@ pub fn announce_backlog(app: &tauri::AppHandle, alerts: &[Alert]) {
     if !enabled(app) {
         return;
     }
+    let cards = crate::prefs::current(app).info_cards;
     let mut toasted = state
         .toasted
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let count = alerts
         .iter()
-        .filter(|alert| !alert.acknowledged && !needs_decision(alert))
+        .filter(|alert| !alert.acknowledged && !needs_decision(alert) && wanted(&cards, alert))
         .filter(|alert| toasted.insert(alert.id))
         .count();
     drop(toasted);

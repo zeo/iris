@@ -31,6 +31,26 @@ const setShowNotifications = (enabled: boolean): boolean => {
 };
 syncNotifications(showNotifications());
 
+// which kinds of passing card show; decision prompts always do
+export type InfoKind = "new_app" | "watch" | "quota" | "caps" | "plugin";
+type InfoCards = Record<InfoKind, boolean>;
+const ALL_CARDS: InfoCards = { new_app: true, watch: true, quota: true, caps: true, plugin: true };
+const [savedCards, setSavedCards] = persisted<Partial<InfoCards>>("settings.infoCards", ALL_CARDS);
+const infoCards = (): InfoCards => ({ ...ALL_CARDS, ...savedCards() });
+const syncInfoCards = (cards: InfoCards) => {
+  try {
+    void invoke("set_info_cards", { cards }).catch(() => {});
+  } catch {
+    /* host command unavailable (tests, plain browser) */
+  }
+};
+const setInfoCard = (kind: InfoKind, enabled: boolean) => {
+  const cards = { ...infoCards(), [kind]: enabled };
+  setSavedCards(cards);
+  syncInfoCards(cards);
+};
+syncInfoCards(infoCards());
+
 // the live throughput graph in the tray icon, drawn by the Rust host
 const [trayGraph, setTrayGraphSignal] = persisted<boolean>("settings.trayGraph", true);
 const syncTrayGraph = (enabled: boolean) => {
@@ -53,6 +73,8 @@ export {
   setRateUnits,
   showNotifications,
   setShowNotifications,
+  infoCards,
+  setInfoCard,
   trayGraph,
   setTrayGraph,
 };

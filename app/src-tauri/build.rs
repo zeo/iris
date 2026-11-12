@@ -22,6 +22,7 @@ fn main() {
         "set_quota",
         "set_profiles",
         "set_tray_graph",
+        "set_info_cards",
         "forget_apps",
         "rule_grant",
         "set_rule_grant",

@@ -11,11 +11,29 @@ use tauri::Manager;
 pub struct HostPrefs {
     pub notifications: bool,
     pub tray_graph: bool,
+    pub info_cards: InfoCards,
 }
 
 impl Default for HostPrefs {
     fn default() -> Self {
-        HostPrefs { notifications: true, tray_graph: true }
+        HostPrefs { notifications: true, tray_graph: true, info_cards: InfoCards::default() }
+    }
+}
+
+/// which kinds of alert raise a passing card; decisions always get theirs
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InfoCards {
+    pub new_app: bool,
+    pub watch: bool,
+    pub quota: bool,
+    pub caps: bool,
+    pub plugin: bool,
+}
+
+impl Default for InfoCards {
+    fn default() -> Self {
+        InfoCards { new_app: true, watch: true, quota: true, caps: true, plugin: true }
     }
 }
 
@@ -34,6 +52,12 @@ pub fn load(app: &tauri::AppHandle) -> HostPrefs {
         .unwrap_or_default();
     *app.state::<PrefsState>().0.lock().unwrap_or_else(|error| error.into_inner()) = prefs;
     prefs
+}
+
+pub fn current(app: &tauri::AppHandle) -> HostPrefs {
+    app.try_state::<PrefsState>()
+        .map(|state| *state.0.lock().unwrap_or_else(|error| error.into_inner()))
+        .unwrap_or_default()
 }
 
 /// change and save the prefs; a failed write only costs the change at next boot
@@ -59,11 +83,13 @@ pub fn update(app: &tauri::AppHandle, change: impl FnOnce(&mut HostPrefs)) {
 
 #[cfg(test)]
 mod tests {
-    use super::HostPrefs;
+    use super::{HostPrefs, InfoCards};
 
     #[test]
     fn missing_fields_keep_their_defaults() {
-        let prefs: HostPrefs = serde_json::from_str(r#"{"tray_graph":false}"#).unwrap();
-        assert_eq!(prefs, HostPrefs { notifications: true, tray_graph: false });
+        let prefs: HostPrefs =
+            serde_json::from_str(r#"{"tray_graph":false,"info_cards":{"new_app":false}}"#).unwrap();
+        let info_cards = InfoCards { new_app: false, ..InfoCards::default() };
+        assert_eq!(prefs, HostPrefs { notifications: true, tray_graph: false, info_cards });
     }
 }

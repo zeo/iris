@@ -2495,6 +2495,9 @@ html {
 .set-row + .set-row {
   border-top: 1px solid var(--line);
 }
+.set-row.sub {
+  padding-left: var(--s4);
+}
 .set-meta {
   display: flex;
   flex-direction: column;

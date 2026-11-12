@@ -43,6 +43,7 @@
     "allow-rule-grant",
     "allow-set-rule-grant",
     "allow-set-notifications-enabled",
+    "allow-set-info-cards",
     "allow-set-firewall-mode",
     "allow-resize-connection-prompts",
     "allow-report-display-scale",

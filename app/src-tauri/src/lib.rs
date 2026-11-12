@@ -118,6 +118,7 @@ pub fn run() {
             traygraph::set_tray_graph,
             rulectl::set_firewall_mode,
             notify::set_notifications_enabled,
+            notify::set_info_cards,
             report_display_scale,
             ipc::ack_alert,
             ipc::decide_alert,

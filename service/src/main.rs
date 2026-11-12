@@ -70,10 +70,7 @@ fn main() -> anyhow::Result<()> {
 
     // elevated one-shot rule mutations (launched by the UI with an elevation
     // prompt: a UAC dialog on Windows, a polkit prompt via pkexec on Linux)
-    if let Some(idx) = args
-        .iter()
-        .position(|a| a.starts_with("--rule-") || a == "--proposal-accept" || a == "--grant-rules")
-    {
+    if let Some(idx) = args.iter().position(|a| adminclient::FLAGS.contains(&a.as_str())) {
         return adminclient::run(&args[idx..]);
     }
 

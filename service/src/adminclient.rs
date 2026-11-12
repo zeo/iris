@@ -22,6 +22,21 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     rt.block_on(exec(op))
 }
 
+/// every flag `build_op` understands, so `main` routes all of them here
+pub const FLAGS: &[&str] = &[
+    "--rule-add",
+    "--rule-add-json",
+    "--cap",
+    "--quota",
+    "--profiles-json",
+    "--firewall-mode",
+    "--rule-remove",
+    "--rule-enable",
+    "--rule-import",
+    "--grant-rules",
+    "--proposal-accept",
+];
+
 fn build_op(args: &[String]) -> anyhow::Result<Op> {
     match args.first().map(String::as_str) {
         Some("--rule-add") => {
@@ -232,5 +247,33 @@ async fn request(
     match tokio::time::timeout(std::time::Duration::from_secs(30), work).await {
         Ok(result) => result,
         Err(_) => bail!("the engine did not answer in time"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_op, FLAGS};
+
+    #[test]
+    fn every_routed_flag_is_one_build_op_knows() {
+        for flag in FLAGS {
+            if let Err(error) = build_op(&[flag.to_string()]) {
+                assert_ne!(error.to_string(), "unknown rule command", "{flag}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unlisted_flag_is_refused() {
+        assert!(!FLAGS.contains(&"--console"));
+        let error = build_op(&["--nope".to_string()]).err().unwrap();
+        assert_eq!(error.to_string(), "unknown rule command");
+    }
+
+    #[test]
+    fn a_json_quota_reaches_the_parser() {
+        let args = ["--quota", "C:\\a b\\app.exe", r#"{"period":"day","bytes":1,"reset_day":1}"#]
+            .map(String::from);
+        assert!(build_op(&args).is_ok());
     }
 }

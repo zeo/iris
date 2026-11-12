@@ -96,26 +96,42 @@ fn elevate_and_wait(exe: &std::path::Path, args: &[String]) -> Result<(), String
     }
 }
 
-/// join argv into a single command-line string for ShellExecute, quoting args
-/// that need it. a double quote inside an argument is rejected rather than
-/// escaped, since none of iris's arguments legitimately contain one.
+/// join argv into a single command-line string for ShellExecute, quoting each
+/// argument and escaping quotes and backslashes per the CommandLineToArgvW
+/// rules so the engine's argv parser reads it back unchanged
 #[cfg(windows)]
 fn join_windows(args: &[String]) -> Result<String, String> {
     let mut out = String::new();
     for (i, arg) in args.iter().enumerate() {
-        if arg.contains('"') {
+        if arg.contains('\0') {
             return Err("invalid argument".into());
         }
         if i > 0 {
             out.push(' ');
         }
-        if arg.is_empty() || arg.contains(|c: char| c.is_whitespace()) {
-            out.push('"');
+        if !arg.is_empty() && !arg.contains(|c: char| c.is_whitespace() || c == '"') {
             out.push_str(arg);
-            out.push('"');
-        } else {
-            out.push_str(arg);
+            continue;
         }
+        out.push('"');
+        let mut slashes = 0;
+        for c in arg.chars() {
+            match c {
+                '\\' => slashes += 1,
+                '"' => {
+                    out.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
+                    out.push('"');
+                    slashes = 0;
+                }
+                _ => {
+                    out.extend(std::iter::repeat_n('\\', slashes));
+                    out.push(c);
+                    slashes = 0;
+                }
+            }
+        }
+        out.extend(std::iter::repeat_n('\\', slashes * 2));
+        out.push('"');
     }
     Ok(out)
 }
@@ -123,4 +139,47 @@ fn join_windows(args: &[String]) -> Result<String, String> {
 #[cfg(windows)]
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::join_windows;
+
+    fn parse(line: &str) -> Vec<String> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        use windows::Win32::UI::Shell::CommandLineToArgvW;
+        let wide: Vec<u16> = line.encode_utf16().chain(Some(0)).collect();
+        let mut count = 0;
+        unsafe {
+            let argv = CommandLineToArgvW(PCWSTR(wide.as_ptr()), &mut count);
+            let out = (0..count as usize)
+                .map(|i| (*argv.add(i)).to_string().unwrap())
+                .collect();
+            let _ = LocalFree(Some(HLOCAL(argv as _)));
+            out
+        }
+    }
+
+    #[test]
+    fn arguments_survive_the_command_line() {
+        let args: Vec<String> = [
+            "--rule-add-json",
+            r#"{"app":"C:\\Program Files\\x.exe","scope":{"remote":null}}"#,
+            "C:\\My Apps\\",
+            "",
+            "plain",
+            r#"ends with quote""#,
+            r#"a\\"b"#,
+        ]
+        .map(String::from)
+        .to_vec();
+        let line = format!("iris-engine.exe {}", join_windows(&args).unwrap());
+        assert_eq!(parse(&line)[1..], args[..]);
+    }
+
+    #[test]
+    fn a_nul_is_refused() {
+        assert!(join_windows(&["a\0b".to_string()]).is_err());
+    }
 }

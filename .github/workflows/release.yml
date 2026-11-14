@@ -49,7 +49,7 @@ jobs:
         run: |
           $cargoHome = Join-Path $env:RUNNER_TEMP 'iris-cargo-home'
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "CARGO_HOME=$cargoHome" -Encoding utf8
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@f4371d1ec7179bfbd04a82a81e3b3af7f720750f # v2
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -161,7 +161,7 @@ jobs:
         run: |
           echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
           dirname "$(rustup which cargo)" | tee -a "$GITHUB_PATH"
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@f4371d1ec7179bfbd04a82a81e3b3af7f720750f # v2
       - name: system deps
         run: |
           sudo apt-get update -qq

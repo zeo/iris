@@ -16,10 +16,11 @@ mod svcctl;
 mod traygraph;
 mod updater;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use iris_core::FirewallMode;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
 /// the webview's measured device-pixel-ratio (physical px per CSS px). the
@@ -277,16 +278,26 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                ..
-            } = event
-            {
+            if is_tray_reveal_event(&event) {
                 reveal(tray.app_handle());
             }
         })
         .build(app)?;
     Ok(())
+}
+
+fn is_tray_reveal_event(event: &TrayIconEvent) -> bool {
+    matches!(
+        event,
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } | TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        }
+    )
 }
 
 /// a check item flips itself on click; put the ticks back to the engine's truth
@@ -305,6 +316,8 @@ fn choose_mode(app: &tauri::AppHandle, mode: FirewallMode) {
     });
 }
 
+static OPENING_MAIN: AtomicBool = AtomicBool::new(false);
+
 fn reveal(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
@@ -312,10 +325,23 @@ fn reveal(app: &tauri::AppHandle) {
         let _ = win.set_focus();
         return;
     }
+    if OPENING_MAIN
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
     // webview2 creation deadlocks inside the tray and single-instance handlers
     // that call this, so build from a worker, which routes through the event loop
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                OPENING_MAIN.store(false, Ordering::Release);
+            }
+        }
+        let _guard = Guard;
         if let Some(win) = open_main(&app) {
             let _ = win.set_focus();
         }
@@ -324,6 +350,12 @@ fn reveal(app: &tauri::AppHandle) {
 
 /// build the main window from its config entry and fit it to its monitor
 fn open_main(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        return Some(win);
+    }
     let config = app.config().app.windows.iter().find(|window| window.label == "main")?;
     let window = match tauri::WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build()) {
         Ok(window) => window,
@@ -356,7 +388,10 @@ fn open_main(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
 
 #[cfg(test)]
 mod tests {
-    use super::main_dimension;
+    use super::{is_tray_reveal_event, main_dimension, OPENING_MAIN};
+    use std::sync::atomic::Ordering;
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent, TrayIconId};
+    use tauri::{PhysicalPosition, Rect};
 
     #[test]
     fn expands_main_host_for_fractional_webview_scale() {
@@ -368,5 +403,51 @@ mod tests {
     fn caps_main_host_to_the_monitor_work_area() {
         assert_eq!(main_dimension(1180.0, 820.0, 1500.0, 1.5), (1500.0, 1230.0));
         assert_eq!(main_dimension(820.0, 600.0, 1000.0, 1.5), (1000.0, 900.0));
+    }
+
+    #[test]
+    fn tray_event_ignores_mouse_down_to_avoid_duplicate_opens() {
+        let down = TrayIconEvent::Click {
+            id: TrayIconId::new("test"),
+            position: PhysicalPosition::new(0.0, 0.0),
+            rect: Rect::default(),
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Down,
+        };
+        assert!(!is_tray_reveal_event(&down));
+
+        let up = TrayIconEvent::Click {
+            id: TrayIconId::new("test"),
+            position: PhysicalPosition::new(0.0, 0.0),
+            rect: Rect::default(),
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+        };
+        assert!(is_tray_reveal_event(&up));
+
+        let dbl = TrayIconEvent::DoubleClick {
+            id: TrayIconId::new("test"),
+            position: PhysicalPosition::new(0.0, 0.0),
+            rect: Rect::default(),
+            button: MouseButton::Left,
+        };
+        assert!(is_tray_reveal_event(&dbl));
+
+        let right = TrayIconEvent::Click {
+            id: TrayIconId::new("test"),
+            position: PhysicalPosition::new(0.0, 0.0),
+            rect: Rect::default(),
+            button: MouseButton::Right,
+            button_state: MouseButtonState::Up,
+        };
+        assert!(!is_tray_reveal_event(&right));
+    }
+
+    #[test]
+    fn opening_guard_prevents_reentrant_opens() {
+        assert!(!OPENING_MAIN.load(Ordering::Acquire));
+        assert!(OPENING_MAIN.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok());
+        assert!(OPENING_MAIN.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err());
+        OPENING_MAIN.store(false, Ordering::Release);
     }
 }

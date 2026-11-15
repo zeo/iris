@@ -16,6 +16,9 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 - The wire protocol is now version 18. The setup updates the app and engine together.
 
+### Fixed
+- Clicking the tray icon opens a single main window and ignores mouse button press events so single and double clicks create only one window.
+
 ## [0.2.2] - 2026-11-12
 
 ### Added

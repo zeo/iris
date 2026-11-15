@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-15
+
 ### Added
 - A connection prompt can be answered for just the host it names, and for 1 hour or until the engine restarts. Other hosts and expired answers prompt again.
 - Usage can block an app from one host in its history. A host name is blocked at each address it resolved to since the engine started, and the row shows it as blocked.
@@ -219,7 +221,8 @@ First public release.
 
 Initial tagged build.
 
-[Unreleased]: https://github.com/zeo/iris/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/zeo/iris/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/zeo/iris/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/zeo/iris/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/zeo/iris/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/zeo/iris/compare/v0.1.14...v0.2.0

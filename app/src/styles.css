@@ -628,7 +628,7 @@ html {
   display: grid;
   /* the host sizes its window by card count, so an error shrinks to fit the card instead of pushing the footer out */
   max-height: 256px;
-  grid-template-rows: 48px auto auto auto minmax(0, auto) 48px;
+  grid-template-rows: 48px auto auto auto minmax(0, auto) auto;
   overflow: hidden;
   border: 1px solid var(--line2);
   border-radius: var(--r-lg);
@@ -752,7 +752,7 @@ html {
   justify-content: space-between;
   gap: var(--s2);
   min-width: 0;
-  padding: var(--s2) var(--s4) 0;
+  padding: var(--s2) var(--s4) var(--s3);
 }
 .prompt-options .seg {
   min-width: 0;
@@ -778,8 +778,8 @@ html {
   grid-template-columns: 1fr 1fr;
   align-items: center;
   gap: var(--s2);
-  padding: var(--s2) var(--s3);
-  border-top: 1px solid var(--line);
+  padding: var(--s3) var(--s4);
+  border-top: 1px solid var(--line2);
   background: var(--surf);
 }
 .prompt-btn {

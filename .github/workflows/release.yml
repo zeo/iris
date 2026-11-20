@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ vars.ROT_INSTALLER_REPOSITORY }}
-          ref: 9754092939b50eeac507a5ebfd4b1478a7167374
+          ref: 0ffd1763ca36159d13c43afb28a65e0387b7e9b7
           path: .rot-installer
           ssh-key: ${{ secrets.ROT_INSTALLER_DEPLOY_KEY }}
           persist-credentials: false
@@ -150,7 +150,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ vars.ROT_INSTALLER_REPOSITORY }}
-          ref: 9754092939b50eeac507a5ebfd4b1478a7167374
+          ref: 0ffd1763ca36159d13c43afb28a65e0387b7e9b7
           path: .rot-installer
           ssh-key: ${{ secrets.ROT_INSTALLER_DEPLOY_KEY }}
           persist-credentials: false

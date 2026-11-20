@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-20
+
+### Fixed
+- Offline setups offer the package they carry as an update when an older Iris is installed, instead of reporting the old version as current and installing the new one only through Repair.
+
 ## [0.2.4] - 2026-11-20
 
 ### Fixed
@@ -226,7 +231,8 @@ First public release.
 
 Initial tagged build.
 
-[Unreleased]: https://github.com/zeo/iris/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/zeo/iris/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/zeo/iris/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/zeo/iris/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/zeo/iris/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/zeo/iris/compare/v0.2.1...v0.2.2

@@ -1873,7 +1873,7 @@ checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
 
 [[package]]
 name = "iris-app"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "iris-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1907,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "iris-ipc"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bincode",
  "interprocess",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "iris-platform-linux"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "iris-core",
@@ -1931,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "iris-platform-win"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "ferrisetw",
@@ -1942,7 +1942,7 @@ dependencies = [
 
 [[package]]
 name = "iris-plugin"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "iris-core",
@@ -1953,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "iris-service"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "iris-core",
@@ -1974,7 +1974,7 @@ dependencies = [
 
 [[package]]
 name = "iris-store"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "iris-core",
  "rusqlite",

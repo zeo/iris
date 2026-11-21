@@ -1,4 +1,4 @@
-//! the Iris desktop shell. this crate is the thin Tauri host: it opens the
+//! the Iris desktop shell. this crate is the thin ceri host: it opens the
 //! window, exposes the command surface the UI needs, runs a tray icon, and
 //! bridges the UI to the privileged engine service over the named-pipe IPC.
 
@@ -16,24 +16,35 @@ mod svcctl;
 mod traygraph;
 mod updater;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use ceri::{MenuItem, Monitor, TrayConfig, TrayEvent, WindowAction, WindowConfig};
 use iris_core::FirewallMode;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
+use std::sync::{LazyLock, Mutex, OnceLock};
 
-/// the webview's measured device-pixel-ratio (physical px per CSS px). the
+/// the page's measured device-pixel-ratio (physical px per CSS px). the
 /// frontend reports it after load so window sizing can multiply CSS sizes by it
-/// and the layout always gets its intended logical width, whatever GTK, XWayland,
-/// or the compositor does to the surface. seeded with a startup guess.
+/// and the layout always gets its intended logical width, whatever the
+/// compositor does to the surface. seeded with a startup guess.
 pub struct DisplayScale(pub Mutex<f64>);
 
-pub(crate) const TRAY_ID: &str = "iris-tray";
+static DISPLAY_SCALE: DisplayScale = DisplayScale(Mutex::new(1.0));
 
-/// the tray's firewall mode entries, kept so a change made anywhere ticks the
-/// right one
-struct ModeMenu(Vec<(FirewallMode, CheckMenuItem<tauri::Wry>)>);
+const IDENTIFIER: &str = "lt.rot.iris";
+const ICON: &[u8] = include_bytes!("../icons/icon.png");
+
+static APP: OnceLock<ceri::AppHandle> = OnceLock::new();
+
+/// the running app, for the commands a page calls
+fn handle() -> ceri::AppHandle {
+    APP.get().expect("commands run after the app is built").clone()
+}
+
+static RUNTIME: LazyLock<tokio::runtime::Runtime> =
+    LazyLock::new(|| tokio::runtime::Runtime::new().expect("could not start the async runtime"));
+
+/// where the pipe client and every async command run
+pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
+    &RUNTIME
+}
 
 const MODES: [(FirewallMode, &str, &str); 3] = [
     (FirewallMode::Ask, "mode-ask", "Ask before new apps connect"),
@@ -42,10 +53,10 @@ const MODES: [(FirewallMode, &str, &str); 3] = [
 ];
 
 /// tick the tray entry for `mode` and untick the others
-pub(crate) fn refresh_mode_menu(app: &tauri::AppHandle, mode: FirewallMode) {
-    if let Some(menu) = app.try_state::<ModeMenu>() {
-        for (item_mode, item) in &menu.0 {
-            let _ = item.set_checked(*item_mode == mode);
+pub(crate) fn refresh_mode_menu(app: &ceri::AppHandle, mode: FirewallMode) {
+    if let Some(tray) = app.tray() {
+        for (item_mode, id, _) in &MODES {
+            tray.set_checked(id, *item_mode == mode);
         }
     }
 }
@@ -54,7 +65,88 @@ fn valid_scale(scale: f64) -> Option<f64> {
     (scale.is_finite() && (0.5..=4.0).contains(&scale)).then_some(scale)
 }
 
-/// build and run the Tauri application
+/// what the Iris window is allowed to call, and through the opener to open
+const MAIN_COMMANDS: &[&str] = &[
+    "opener:open-url",
+    "opener:reveal",
+    "engine_status",
+    "engine_health",
+    "set_tick_details",
+    "list_rules",
+    "list_apps",
+    "forget_app",
+    "list_alerts",
+    "list_blocked",
+    "firewall_mode",
+    "get_host_usage",
+    "host_addresses",
+    "get_profiles",
+    "list_caps",
+    "set_cap",
+    "list_quotas",
+    "set_quota",
+    "set_profiles",
+    "set_tray_graph",
+    "forget_apps",
+    "rule_grant",
+    "set_rule_grant",
+    "set_notifications_enabled",
+    "set_info_cards",
+    "host_prefs",
+    "set_firewall_mode",
+    "resize_connection_prompts",
+    "report_display_scale",
+    "ack_alert",
+    "decide_alert",
+    "get_usage",
+    "get_adapter_usage",
+    "kill_connection",
+    "get_enrichment",
+    "list_plugins",
+    "grant_plugin",
+    "set_plugin_enabled",
+    "list_proposals",
+    "reject_proposal",
+    "get_plugin_panel",
+    "reverse_dns",
+    "install_service",
+    "uninstall_service",
+    "reset_outbound",
+    "rule_add",
+    "rule_remove",
+    "rule_set_enabled",
+    "rule_import",
+    "proposal_accept",
+    "get_launch_at_login",
+    "set_launch_at_login",
+    "save_download",
+    "app_icon",
+    "check_installer_update",
+    "install_installer_update",
+];
+
+/// network decision prompt access
+const PROMPT_COMMANDS: &[&str] = &[
+    "prompt_cards",
+    "set_prompt_aside",
+    "dismiss_info_card",
+    "resize_connection_prompts",
+    "set_prompt_hit_region",
+    "report_display_scale",
+    "decide_alert",
+    "app_icon",
+];
+
+fn capabilities() -> ceri::Capabilities {
+    let grant = |window: &str, commands: &[&str]| ceri::Grant {
+        windows: vec![window.into()],
+        origins: vec![ceri::APP_ORIGIN.into()],
+        commands: commands.iter().map(|command| command.to_string()).collect(),
+    };
+    ceri::Capabilities::new(vec![grant("main", MAIN_COMMANDS), grant(prompt::LABEL, PROMPT_COMMANDS)])
+}
+
+/// build and run the ceri application
 pub fn run() {
     #[cfg(windows)]
     {
@@ -73,127 +165,259 @@ pub fn run() {
         .init();
 
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
+    let _ = ipc::COMMANDER.set(ipc::Commander(cmd_tx));
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+    let app = ceri::App::new()
+        .identifier(IDENTIFIER)
+        .name("Iris")
+        .version(env!("CARGO_PKG_VERSION"))
+        .icon(ICON)
+        .assets(ceri::embedded_assets!())
+        .content_security_policy(
+            "default-src 'self'; base-uri 'none'; object-src 'none'; img-src 'self' data: blob:; \
+             style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'",
+        )
+        .capabilities(capabilities())
+        // closing the main window drops its page; the tray, the card host
+        // and the pipe client keep running until the tray's "Quit"
+        .keep_running()
+        .single_instance(|app, args, _| {
             if !args.iter().any(|arg| arg == "--tray") {
                 reveal(app);
             }
-        }))
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
-        .manage(ipc::StatusState::default())
-        .manage(ipc::TickDetailState::default())
-        .manage(ipc::Commander(cmd_tx))
-        .manage(DisplayScale(Mutex::new(1.0)))
-        .manage(prompt::PromptState::default())
-        .manage(traygraph::TrayGraphState::default())
-        .manage(notify::NotifyState::default())
-        .manage(prefs::PrefsState::default())
-        .invoke_handler(tauri::generate_handler![
-            ipc::engine_status,
-            ipc::set_tick_details,
-            ipc::list_rules,
-            ipc::list_apps,
-            ipc::forget_app,
-            ipc::forget_apps,
-            ipc::rule_grant,
-            rulectl::set_rule_grant,
-            ipc::list_alerts,
-            ipc::list_blocked,
-            prompt::resize_connection_prompts,
-            prompt::set_prompt_hit_region,
-            prompt::prompt_cards,
-            prompt::set_prompt_aside,
-            prompt::dismiss_info_card,
-            rulectl::firewall_mode,
-            ipc::get_host_usage,
-            ipc::host_addresses,
-            ipc::get_profiles,
-            ipc::list_caps,
-            ipc::list_quotas,
-            ipc::engine_health,
-            rulectl::set_cap,
-            rulectl::set_quota,
-            rulectl::set_profiles,
-            traygraph::set_tray_graph,
-            rulectl::set_firewall_mode,
-            notify::set_notifications_enabled,
-            notify::set_info_cards,
-            prefs::host_prefs,
-            report_display_scale,
-            ipc::ack_alert,
-            ipc::decide_alert,
-            ipc::get_usage,
-            ipc::get_adapter_usage,
-            ipc::kill_connection,
-            ipc::get_enrichment,
-            ipc::list_plugins,
-            ipc::grant_plugin,
-            ipc::set_plugin_enabled,
-            ipc::list_proposals,
-            ipc::reject_proposal,
-            ipc::get_plugin_panel,
-            net::reverse_dns,
-            svcctl::install_service,
-            svcctl::uninstall_service,
-            svcctl::reset_outbound,
-            rulectl::rule_add,
-            rulectl::rule_remove,
-            rulectl::rule_set_enabled,
-            rulectl::rule_import,
-            rulectl::proposal_accept,
-            startup::get_launch_at_login,
-            startup::set_launch_at_login,
-            report::save_download,
-            icon::app_icon,
-            updater::check_installer_update,
-            updater::install_installer_update
-        ])
-        .setup(move |app| {
-            ipc::spawn(app.handle().clone(), cmd_rx);
-            build_tray(app.handle())?;
-            let prefs = prefs::load(app.handle());
-            notify::apply_enabled(app.handle(), prefs.notifications);
-            traygraph::apply_enabled(app.handle(), prefs.tray_graph);
+        })
+        .tray(TrayConfig { tooltip: "Iris".into(), menu: tray_menu(), ..TrayConfig::default() }, tray_event)
+        .on_window_opened(|app, label| {
+            if label == prompt::LABEL {
+                prompt::host_opened(app);
+            }
+        })
+        .on_start(move |app| {
+            ipc::spawn(app.clone(), cmd_rx);
+            let prefs = prefs::load();
+            notify::apply_enabled(prefs.notifications);
+            traygraph::apply_enabled(app, prefs.tray_graph);
             if let Err(error) = startup::repair_launch_at_login() {
                 tracing::warn!("could not refresh launch at login: {error}");
             }
             // a login launch passes --tray so it comes up quietly in the tray,
-            // with no webview until the window is first opened
+            // with no page until the window is first opened
             if !std::env::args().any(|a| a == "--tray") {
-                open_main(app.handle());
+                reveal(app);
             }
-            updater::schedule(app.handle());
-            Ok(())
-        })
-        .build(tauri::generate_context!())
-        .expect("error while building Iris")
-        // closing the main window destroys its webview; the tray, the card host
-        // and the pipe client keep running until the tray's "Quit"
-        .run(|_app, event| {
-            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
-                api.prevent_exit();
-            }
+            updater::schedule(app);
         });
+    // a debug build loads the pages from `pnpm dev` so edits show up live
+    #[cfg(debug_assertions)]
+    let app = app.dev_url("http://localhost:1423");
+    // the tauri build kept the page's settings in webview2's storage, under the same identifier
+    #[cfg(windows)]
+    let app = match ceri::dirs::local_data() {
+        Some(data) => app.import_local_storage(
+            data.join(IDENTIFIER).join("EBWebView/Default/Local Storage/leveldb"),
+            "http://tauri.localhost",
+        ),
+        None => app,
+    };
+    let _ = APP.set(app.handle());
+    commands(app).run().expect("error while running Iris");
 }
 
-/// the webview reports its real device-pixel-ratio once the page loads; re-fit
-/// the reporting window to that truth. sizing in physical pixels (css * ratio)
-/// lands the CSS viewport at the intended logical width whether the surface is
-/// scaled by GTK, XWayland, native wayland, or not at all.
-#[tauri::command]
-fn report_display_scale(
-    app: tauri::AppHandle,
-    window: tauri::Window,
-    scale: f64,
-) -> Result<(), String> {
+/// the command surface the pages call. every command answers from a thread of
+/// its own, where an async one waits on the runtime
+fn commands(app: ceri::App) -> ceri::App {
+    fn wait<T>(command: impl std::future::Future<Output = T>) -> T {
+        runtime().block_on(command)
+    }
+    app.blocking_json_command("engine_status", ceri::command!(|| ipc::engine_status()))
+        .blocking_json_command(
+            "set_tick_details",
+            ceri::command!(|enabled: bool, cadence_ms: u64| ipc::set_tick_details(enabled, cadence_ms)),
+        )
+        .blocking_json_command("list_rules", ceri::command!(|| wait(ipc::list_rules())))
+        .blocking_json_command("list_apps", ceri::command!(|| wait(ipc::list_apps())))
+        .blocking_json_command("forget_app", ceri::command!(|path: String| wait(ipc::forget_app(path))))
+        .blocking_json_command(
+            "forget_apps",
+            ceri::command!(|paths: Vec<String>| wait(ipc::forget_apps(paths))),
+        )
+        .blocking_json_command("rule_grant", ceri::command!(|| wait(ipc::rule_grant())))
+        .blocking_json_command(
+            "set_rule_grant",
+            ceri::command!(|granted: bool| wait(rulectl::set_rule_grant(granted))),
+        )
+        .blocking_json_command(
+            "list_alerts",
+            ceri::command!(|unacked_only: bool| wait(ipc::list_alerts(unacked_only))),
+        )
+        .blocking_json_command("list_blocked", ceri::command!(|limit: u32| wait(ipc::list_blocked(limit))))
+        .blocking_json_command(
+            "resize_connection_prompts",
+            ceri::command!(|count: usize| prompt::resize_connection_prompts(handle(), count)),
+        )
+        .blocking_json_command(
+            "set_prompt_hit_region",
+            ceri::command!(|rects: Vec<prompt::HitRect>| prompt::set_prompt_hit_region(handle(), rects)),
+        )
+        .blocking_json_command("prompt_cards", ceri::command!(|| wait(prompt::prompt_cards())))
+        .blocking_json_command("set_prompt_aside", ceri::command!(|id: i64| prompt::set_prompt_aside(id)))
+        .blocking_json_command("dismiss_info_card", ceri::command!(|id: u64| prompt::dismiss_info_card(id)))
+        .blocking_json_command("firewall_mode", ceri::command!(|| wait(rulectl::firewall_mode())))
+        .blocking_json_command(
+            "get_host_usage",
+            ceri::command!(|path: Option<String>, from_ms: u64, to_ms: u64| wait(ipc::get_host_usage(path,
+                from_ms,
+                to_ms
+            ))),
+        )
+        .blocking_json_command(
+            "host_addresses",
+            ceri::command!(|host: String| wait(ipc::host_addresses(host))),
+        )
+        .blocking_json_command("get_profiles", ceri::command!(|| wait(ipc::get_profiles())))
+        .blocking_json_command("list_caps", ceri::command!(|| wait(ipc::list_caps())))
+        .blocking_json_command("list_quotas", ceri::command!(|| wait(ipc::list_quotas())))
+        .blocking_json_command("engine_health", ceri::command!(|| wait(ipc::engine_health())))
+        .blocking_json_command(
+            "set_cap",
+            ceri::command!(
+                |path: String, up_bytes_per_sec: Option<u64>, down_bytes_per_sec: Option<u64>| wait(
+                    rulectl::set_cap(path, up_bytes_per_sec, down_bytes_per_sec)
+                )
+            ),
+        )
+        .blocking_json_command(
+            "set_quota",
+            ceri::command!(|path: Option<String>, limit: Option<iris_core::QuotaLimit>| wait(rulectl::set_quota(path,
+                limit
+            ))),
+        )
+        .blocking_json_command(
+            "set_profiles",
+            ceri::command!(|profiles: Vec<iris_core::Profile>, manual: Option<String>| wait(
+                rulectl::set_profiles(handle(), profiles, manual)
+            )),
+        )
+        .blocking_json_command(
+            "set_tray_graph",
+            ceri::command!(|enabled: bool| traygraph::set_tray_graph(handle(), enabled)),
+        )
+        .blocking_json_command(
+            "set_firewall_mode",
+            ceri::command!(|mode: String| wait(rulectl::set_firewall_mode(handle(), mode))),
+        )
+        .blocking_json_command(
+            "set_notifications_enabled",
+            ceri::command!(|enabled: bool| notify::set_notifications_enabled(enabled)),
+        )
+        .blocking_json_command(
+            "set_info_cards",
+            ceri::command!(|cards: prefs::InfoCards| notify::set_info_cards(cards)),
+        )
+        .blocking_json_command("host_prefs", ceri::command!(|| prefs::host_prefs()))
+        .blocking_json_command(
+            "report_display_scale",
+            ceri::command!(|call, scale: f64| report_display_scale(handle(), &call.window, scale)),
+        )
+        .blocking_json_command("ack_alert", ceri::command!(|id: i64| wait(ipc::ack_alert(handle(), id))))
+        .blocking_json_command(
+            "decide_alert",
+            ceri::command!(|id: i64, action: String, options: Option<rulectl::RuleOptions>| wait(
+                ipc::decide_alert(handle(), id, action, options)
+            )),
+        )
+        .blocking_json_command(
+            "get_usage",
+            ceri::command!(|from_ms: f64, to_ms: f64, granularity: String| wait(ipc::get_usage(from_ms,
+                to_ms,
+                granularity
+            ))),
+        )
+        .blocking_json_command(
+            "get_adapter_usage",
+            ceri::command!(|from_ms: f64, to_ms: f64| wait(ipc::get_adapter_usage(from_ms, to_ms))),
+        )
+        .blocking_json_command(
+            "kill_connection",
+            ceri::command!(|local_port: u16, remote_addr: String, remote_port: u16| wait(ipc::kill_connection(local_port,
+                remote_addr,
+                remote_port
+            ))),
+        )
+        .blocking_json_command(
+            "get_enrichment",
+            ceri::command!(|ips: Vec<String>| wait(ipc::get_enrichment(ips))),
+        )
+        .blocking_json_command("list_plugins", ceri::command!(|| wait(ipc::list_plugins())))
+        .blocking_json_command(
+            "grant_plugin",
+            ceri::command!(|id: String, caps: Vec<String>, egress: Vec<String>| wait(ipc::grant_plugin(id,
+                caps,
+                egress
+            ))),
+        )
+        .blocking_json_command(
+            "set_plugin_enabled",
+            ceri::command!(|id: String, enabled: bool| wait(ipc::set_plugin_enabled(id, enabled))),
+        )
+        .blocking_json_command("list_proposals", ceri::command!(|| wait(ipc::list_proposals())))
+        .blocking_json_command("reject_proposal", ceri::command!(|id: i64| wait(ipc::reject_proposal(id))))
+        .blocking_json_command(
+            "get_plugin_panel",
+            ceri::command!(|id: String| wait(ipc::get_plugin_panel(id))),
+        )
+        .blocking_json_command("reverse_dns", ceri::command!(|ip: String| wait(net::reverse_dns(ip))))
+        .blocking_json_command("install_service", ceri::command!(|| wait(svcctl::install_service())))
+        .blocking_json_command("uninstall_service", ceri::command!(|| wait(svcctl::uninstall_service())))
+        .blocking_json_command("reset_outbound", ceri::command!(|| wait(svcctl::reset_outbound())))
+        .blocking_json_command(
+            "rule_add",
+            ceri::command!(
+                |path: String, direction: String, action: String, options: Option<rulectl::RuleOptions>| wait(
+                    rulectl::rule_add(path, direction, action, options)
+                )
+            ),
+        )
+        .blocking_json_command("rule_remove", ceri::command!(|id: i64| wait(rulectl::rule_remove(id))))
+        .blocking_json_command(
+            "rule_set_enabled",
+            ceri::command!(|id: i64, enabled: bool| wait(rulectl::rule_set_enabled(id, enabled))),
+        )
+        .blocking_json_command("rule_import", ceri::command!(|| wait(rulectl::rule_import())))
+        .blocking_json_command(
+            "proposal_accept",
+            ceri::command!(|id: i64| wait(rulectl::proposal_accept(id))),
+        )
+        .blocking_json_command("get_launch_at_login", ceri::command!(|| startup::get_launch_at_login()))
+        .blocking_json_command(
+            "set_launch_at_login",
+            ceri::command!(|enabled: bool| startup::set_launch_at_login(enabled)),
+        )
+        .blocking_json_command(
+            "save_download",
+            ceri::command!(|name: String, contents: String| report::save_download(name, contents)),
+        )
+        .blocking_json_command("app_icon", ceri::command!(|path: String| icon::app_icon(path)))
+        .blocking_json_command(
+            "check_installer_update",
+            ceri::command!(|| wait(updater::check_installer_update())),
+        )
+        .blocking_json_command(
+            "install_installer_update",
+            ceri::command!(|| updater::install_installer_update(handle())),
+        )
+}
+
+/// the page reports its real device-pixel-ratio once it loads; re-fit the
+/// reporting window to that truth. sizing in physical pixels (css * ratio)
+/// lands the CSS viewport at the intended logical width whatever scales the
+/// surface.
+fn report_display_scale(app: ceri::AppHandle, window: &str, scale: f64) -> Result<(), String> {
     let Some(scale) = valid_scale(scale) else {
         return Ok(());
     };
     {
-        let state = app.state::<DisplayScale>();
-        let mut current = state.0.lock().unwrap_or_else(|error| error.into_inner());
+        let mut current = DISPLAY_SCALE.0.lock().unwrap_or_else(|error| error.into_inner());
         // only react to a genuine change: re-fitting on every duplicate report
         // would fight a window the user has since resized
         if (*current - scale).abs() < 0.005 {
@@ -201,7 +425,7 @@ fn report_display_scale(
         }
         *current = scale;
     }
-    match window.label() {
+    match window {
         "main" => fit_main_window(&app, scale),
         prompt::LABEL => prompt::apply_scale(&app, scale),
         _ => {}
@@ -209,26 +433,55 @@ fn report_display_scale(
     Ok(())
 }
 
-fn fit_main_window(app: &tauri::AppHandle, scale: f64) {
-    let Some(window) = app.get_webview_window("main") else {
+/// the monitor's own scale, which turns its physical pixels into the logical
+/// ones ceri sizes and places windows in
+pub(crate) fn monitor_scale(monitor: &Monitor) -> f64 {
+    if monitor.scale.is_finite() && monitor.scale > 0.0 {
+        monitor.scale
+    } else {
+        1.0
+    }
+}
+
+pub(crate) fn primary_monitor(app: &ceri::AppHandle) -> Option<Monitor> {
+    let monitors = app.windows()?.monitors();
+    monitors.iter().find(|monitor| monitor.primary).or(monitors.first()).cloned()
+}
+
+fn fit_main_window(app: &ceri::AppHandle, scale: f64) {
+    let Some(windows) = app.windows() else {
         return;
     };
-    let Ok(Some(monitor)) = window.current_monitor() else {
+    let Some(state) = windows.state("main") else {
         return;
     };
-    // work_area is physical pixels; so are the sizes we set below (css * scale)
-    let work = monitor.work_area().size;
+    let centre = (state.position.0 + state.size.0 as i32 / 2, state.position.1 + state.size.1 as i32 / 2);
+    let holds_centre = |monitor: &&Monitor| {
+        let ((left, top), (width, height)) = (monitor.position, monitor.size);
+        (left..left + width as i32).contains(&centre.0) && (top..top + height as i32).contains(&centre.1)
+    };
+    let Some(monitor) = windows.monitors().iter().find(holds_centre).cloned().or_else(|| primary_monitor(app)) else {
+        return;
+    };
+    // the minimum stays as the window opened with it: ceri changes a size
+    // after that, not a minimum
+    let ((width, height), _) = main_fit(&monitor, scale);
+    windows.act("main", WindowAction::Size(width, height));
+}
+
+/// the main window's size and minimum size on `monitor`, in logical pixels
+fn main_fit(monitor: &Monitor, scale: f64) -> ((u32, u32), (u32, u32)) {
+    // work_area is physical pixels; so are the sizes worked out below (css * scale)
+    let (_, work) = monitor.work_area;
     let margin = 32.0 * scale;
-    let available_width = (f64::from(work.width) - margin).max(640.0 * scale);
-    let available_height = (f64::from(work.height) - margin).max(480.0 * scale);
+    let available_width = (f64::from(work.0) - margin).max(640.0 * scale);
+    let available_height = (f64::from(work.1) - margin).max(480.0 * scale);
     // the widest tab (Protect's console + rule matrix) needs ~1080 logical px
     // before its fixed columns overflow and clip, so hold the window minimum there
     let (width, min_width) = main_dimension(1180.0, 1080.0, available_width, scale);
     let (height, min_height) = main_dimension(820.0, 600.0, available_height, scale);
-    let _ = window.set_min_size(Some(tauri::PhysicalSize::new(min_width, min_height)));
-    let _ = window.set_size(tauri::PhysicalSize::new(width, height));
-    let _ = window.set_resizable(true);
-    let _ = window.set_maximizable(true);
+    let logical = |physical: f64| (physical / monitor_scale(monitor)).round() as u32;
+    ((logical(width), logical(height)), (logical(min_width), logical(min_height)))
 }
 
 fn main_dimension(preferred: f64, minimum: f64, available: f64, webview_scale: f64) -> (f64, f64) {
@@ -236,76 +489,44 @@ fn main_dimension(preferred: f64, minimum: f64, available: f64, webview_scale: f
     (size, (minimum * webview_scale).min(size))
 }
 
-/// a tray icon that restores the window on click and offers show / quit
-fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show Iris", true, None::<&str>)?;
-    let pause = CheckMenuItem::with_id(
-        app,
-        "pause-prompts",
-        "Pause connection prompts",
-        true,
-        prompt::snoozed(app),
-        None::<&str>,
-    )?;
-    let mode_items = MODES
+fn tray_menu() -> Vec<MenuItem> {
+    let modes = MODES
         .iter()
-        .map(|(mode, id, label)| {
-            CheckMenuItem::with_id(app, *id, *label, true, *mode == FirewallMode::Ask, None::<&str>)
-                .map(|item| (*mode, item))
-        })
-        .collect::<tauri::Result<Vec<_>>>()?;
-    let mode_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
-        mode_items.iter().map(|(_, item)| item as _).collect();
-    let modes = Submenu::with_items(app, "Firewall mode", true, &mode_refs)?;
-    app.manage(ModeMenu(mode_items));
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&show, &modes, &pause, &separator, &quit])?;
-
-    TrayIconBuilder::with_id(TRAY_ID)
-        .icon(app.default_window_icon().unwrap().clone())
-        .tooltip("Iris")
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .on_menu_event(move |app, event| match event.id.as_ref() {
-            "show" => reveal(app),
-            "pause-prompts" => prompt::set_snoozed(app, pause.is_checked().unwrap_or(false)),
-            "quit" => app.exit(0),
-            id => {
-                if let Some((mode, _, _)) = MODES.iter().find(|(_, mode_id, _)| *mode_id == id) {
-                    choose_mode(app, *mode);
-                }
-            }
-        })
-        .on_tray_icon_event(|tray, event| {
-            if is_tray_reveal_event(&event) {
-                reveal(tray.app_handle());
-            }
-        })
-        .build(app)?;
-    Ok(())
+        .map(|(mode, id, label)| MenuItem::check(*id, *label, *mode == FirewallMode::Ask))
+        .collect();
+    vec![
+        MenuItem::new("show", "Show Iris"),
+        MenuItem::submenu("Firewall mode", modes),
+        MenuItem::check("pause-prompts", "Pause connection prompts", prompt::snoozed()),
+        MenuItem::Separator,
+        MenuItem::new("quit", "Quit"),
+    ]
 }
 
-fn is_tray_reveal_event(event: &TrayIconEvent) -> bool {
-    matches!(
-        event,
-        TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-            ..
-        } | TrayIconEvent::DoubleClick {
-            button: MouseButton::Left,
-            ..
+/// a tray icon that restores the window on click and offers show / quit
+fn tray_event(app: &ceri::AppHandle, event: TrayEvent) {
+    let TrayEvent::Menu(id) = event else {
+        return reveal(app);
+    };
+    match id.as_str() {
+        "show" => reveal(app),
+        // the check item has flipped itself by now, as the pause it stands for does here
+        "pause-prompts" => prompt::set_snoozed(app, !prompt::snoozed()),
+        "quit" => app.exit(),
+        id => {
+            if let Some((mode, _, _)) = MODES.iter().find(|(_, mode_id, _)| *mode_id == id) {
+                choose_mode(app, *mode);
+            }
         }
-    )
+    }
 }
 
 /// a check item flips itself on click; put the ticks back to the engine's truth
 /// until the change lands, so a refused elevation never leaves a false tick
-fn choose_mode(app: &tauri::AppHandle, mode: FirewallMode) {
+fn choose_mode(app: &ceri::AppHandle, mode: FirewallMode) {
     let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let current = ipc::firewall_mode(&app).await.unwrap_or_default();
+    runtime().spawn(async move {
+        let current = ipc::firewall_mode().await.unwrap_or_default();
         refresh_mode_menu(&app, current);
         if current == mode {
             return;
@@ -316,82 +537,43 @@ fn choose_mode(app: &tauri::AppHandle, mode: FirewallMode) {
     });
 }
 
-static OPENING_MAIN: AtomicBool = AtomicBool::new(false);
-
-fn reveal(app: &tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.unminimize();
-        let _ = win.set_focus();
-        return;
-    }
-    if OPENING_MAIN
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-    // webview2 creation deadlocks inside the tray and single-instance handlers
-    // that call this, so build from a worker, which routes through the event loop
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        struct Guard;
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                OPENING_MAIN.store(false, Ordering::Release);
-            }
-        }
-        let _guard = Guard;
-        if let Some(win) = open_main(&app) {
-            let _ = win.set_focus();
-        }
-    });
+/// whether the main window is open to draw what the engine sends
+pub(crate) fn main_open(app: &ceri::AppHandle) -> bool {
+    app.windows().is_some_and(|windows| windows.state("main").is_some())
 }
 
-/// build the main window from its config entry and fit it to its monitor
-fn open_main(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.unminimize();
-        let _ = win.set_focus();
-        return Some(win);
-    }
-    let config = app.config().app.windows.iter().find(|window| window.label == "main")?;
-    let window = match tauri::WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build()) {
-        Ok(window) => window,
-        Err(error) => {
-            tracing::warn!("could not open the main window: {error}");
-            return None;
+/// open the main window fitted to the primary monitor, where ceri centres it,
+/// or bring the open one to the front
+fn reveal(app: &ceri::AppHandle) {
+    let Some(windows) = app.windows() else {
+        return;
+    };
+    let mut config = WindowConfig {
+        label: "main".into(),
+        title: "Iris".into(),
+        width: 1180,
+        height: 820,
+        minimum_width: 820,
+        minimum_height: 600,
+        decorations: false,
+        background: [0x0b, 0x0c, 0x0e],
+        ..WindowConfig::default()
+    };
+    if let Some(monitor) = primary_monitor(app) {
+        // best guess before the page reports its real ratio: the monitor's own
+        // scale. keeps the first paint from flashing under-sized
+        let scale = monitor_scale(&monitor);
+        if !main_open(app) {
+            *DISPLAY_SCALE.0.lock().unwrap_or_else(|error| error.into_inner()) = scale;
         }
-    };
-    // best guess before the webview reports its real ratio: the
-    // fractional-scaling env hint if we set one, else the window's own scale
-    // factor. keeps the first paint from flashing under-sized
-    let hint = prompt::webview_scale();
-    let scale = if (hint - 1.0).abs() > f64::EPSILON {
-        hint
-    } else {
-        window
-            .scale_factor()
-            .ok()
-            .filter(|s| s.is_finite() && *s > 0.0)
-            .unwrap_or(1.0)
-    };
-    *app.state::<DisplayScale>()
-        .0
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = scale;
-    fit_main_window(app, scale);
-    let _ = window.center();
-    Some(window)
+        ((config.width, config.height), (config.minimum_width, config.minimum_height)) = main_fit(&monitor, scale);
+    }
+    windows.open(config);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_tray_reveal_event, main_dimension, OPENING_MAIN};
-    use std::sync::atomic::Ordering;
-    use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent, TrayIconId};
-    use tauri::{PhysicalPosition, Rect};
+    use super::{main_dimension, main_fit};
 
     #[test]
     fn expands_main_host_for_fractional_webview_scale() {
@@ -406,48 +588,15 @@ mod tests {
     }
 
     #[test]
-    fn tray_event_ignores_mouse_down_to_avoid_duplicate_opens() {
-        let down = TrayIconEvent::Click {
-            id: TrayIconId::new("test"),
-            position: PhysicalPosition::new(0.0, 0.0),
-            rect: Rect::default(),
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Down,
+    fn fits_the_main_window_in_logical_pixels() {
+        let monitor = |width, height, scale| ceri::Monitor {
+            size: (width, height),
+            scale,
+            work_area: ((0, 0), (width, height - 60)),
+            ..ceri::Monitor::default()
         };
-        assert!(!is_tray_reveal_event(&down));
-
-        let up = TrayIconEvent::Click {
-            id: TrayIconId::new("test"),
-            position: PhysicalPosition::new(0.0, 0.0),
-            rect: Rect::default(),
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-        };
-        assert!(is_tray_reveal_event(&up));
-
-        let dbl = TrayIconEvent::DoubleClick {
-            id: TrayIconId::new("test"),
-            position: PhysicalPosition::new(0.0, 0.0),
-            rect: Rect::default(),
-            button: MouseButton::Left,
-        };
-        assert!(is_tray_reveal_event(&dbl));
-
-        let right = TrayIconEvent::Click {
-            id: TrayIconId::new("test"),
-            position: PhysicalPosition::new(0.0, 0.0),
-            rect: Rect::default(),
-            button: MouseButton::Right,
-            button_state: MouseButtonState::Up,
-        };
-        assert!(!is_tray_reveal_event(&right));
-    }
-
-    #[test]
-    fn opening_guard_prevents_reentrant_opens() {
-        assert!(!OPENING_MAIN.load(Ordering::Acquire));
-        assert!(OPENING_MAIN.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok());
-        assert!(OPENING_MAIN.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err());
-        OPENING_MAIN.store(false, Ordering::Release);
+        assert_eq!(main_fit(&monitor(3840, 2160, 1.5), 1.5), ((1180, 820), (1080, 600)));
+        // a small display caps the window at its work area less the margin
+        assert_eq!(main_fit(&monitor(1280, 720, 1.0), 1.0), ((1180, 628), (1080, 600)));
     }
 }

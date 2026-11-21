@@ -3,8 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Mutex;
-use tauri::Manager;
+use std::sync::{LazyLock, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -40,42 +39,40 @@ impl Default for InfoCards {
 #[derive(Default)]
 pub struct PrefsState(Mutex<HostPrefs>);
 
-fn path(app: &tauri::AppHandle) -> Option<PathBuf> {
-    Some(app.path().app_config_dir().ok()?.join("host-prefs.json"))
+static STATE: LazyLock<PrefsState> = LazyLock::new(PrefsState::default);
+
+fn path() -> Option<PathBuf> {
+    Some(ceri::dirs::config()?.join(crate::IDENTIFIER).join("host-prefs.json"))
 }
 
 /// the saved prefs, or the defaults when none are saved or the file is unreadable
-pub fn load(app: &tauri::AppHandle) -> HostPrefs {
-    let prefs = path(app)
+pub fn load() -> HostPrefs {
+    let prefs = path()
         .and_then(|path| std::fs::read(path).ok())
         .and_then(|json| serde_json::from_slice(&json).ok())
         .unwrap_or_default();
-    *app.state::<PrefsState>().0.lock().unwrap_or_else(|error| error.into_inner()) = prefs;
+    *STATE.0.lock().unwrap_or_else(|error| error.into_inner()) = prefs;
     prefs
 }
 
-pub fn current(app: &tauri::AppHandle) -> HostPrefs {
-    app.try_state::<PrefsState>()
-        .map(|state| *state.0.lock().unwrap_or_else(|error| error.into_inner()))
-        .unwrap_or_default()
+pub fn current() -> HostPrefs {
+    *STATE.0.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 /// the saved prefs for the settings page, or none before the host first saved any
-#[tauri::command]
-pub fn host_prefs(app: tauri::AppHandle) -> Option<HostPrefs> {
-    path(&app).is_some_and(|path| path.exists()).then(|| current(&app))
+pub fn host_prefs() -> Option<HostPrefs> {
+    path().is_some_and(|path| path.exists()).then(current)
 }
 
 /// change and save the prefs; a failed write only costs the change at next boot
-pub fn update(app: &tauri::AppHandle, change: impl FnOnce(&mut HostPrefs)) {
-    let state = app.state::<PrefsState>();
-    let mut prefs = state.0.lock().unwrap_or_else(|error| error.into_inner());
+pub fn update(change: impl FnOnce(&mut HostPrefs)) {
+    let mut prefs = STATE.0.lock().unwrap_or_else(|error| error.into_inner());
     let before = *prefs;
     change(&mut prefs);
     if *prefs == before {
         return;
     }
-    let Some(path) = path(app) else {
+    let Some(path) = path() else {
         return;
     };
     let saved = path

@@ -13,12 +13,11 @@ pub struct Update {
     version: String,
 }
 
-#[tauri::command]
 pub async fn check_installer_update() -> Result<Option<Update>, String> {
     // a hung installer subprocess (network stall, antivirus scan) must not pin
     // a blocking-pool thread and leave the settings check spinning forever;
     // the frontend treats this like any other unreachable feed
-    let job = tauri::async_runtime::spawn_blocking(check_installer_update_blocking);
+    let job = crate::runtime().spawn_blocking(check_installer_update_blocking);
     match tokio::time::timeout(std::time::Duration::from_secs(30), job).await {
         Ok(result) => result.map_err(|error| format!("updater task failed: {error}"))?,
         Err(_) => Err("the updater did not respond in time".into()),
@@ -65,12 +64,12 @@ fn check_installer_update_blocking() -> Result<Option<Update>, String> {
 /// pulled down and installed, restarting into it, but only while nothing
 /// fullscreen or busy owns the display. every failure here is expected in
 /// normal use (offline, no release yet, a dev build), so none is surfaced
-pub fn schedule(app: &tauri::AppHandle) {
+pub fn schedule(app: &ceri::AppHandle) {
     if cfg!(debug_assertions) {
         return;
     }
     let app = app.clone();
-    tauri::async_runtime::spawn(async move {
+    crate::runtime().spawn(async move {
         const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
         const RETRY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
         loop {
@@ -101,14 +100,13 @@ fn display_busy() -> bool {
     false
 }
 
-#[tauri::command]
-pub fn install_installer_update(app: tauri::AppHandle) -> Result<(), String> {
+pub fn install_installer_update(app: ceri::AppHandle) -> Result<(), String> {
     let installer = installer_path().ok_or_else(|| "shared updater is not installed".to_string())?;
     Command::new(installer)
         .args(["update", "iris", "--quiet", "--wait-pid", &std::process::id().to_string()])
         .spawn()
         .map_err(|error| format!("start updater: {error}"))?;
-    app.exit(0);
+    app.exit();
     Ok(())
 }
 

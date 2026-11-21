@@ -13,7 +13,6 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 #[cfg(windows)]
-#[tauri::command]
 pub fn get_launch_at_login() -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
@@ -36,7 +35,6 @@ pub fn get_launch_at_login() -> bool {
 }
 
 #[cfg(windows)]
-#[tauri::command]
 pub fn set_launch_at_login(enabled: bool) -> Result<(), String> {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
@@ -85,13 +83,11 @@ fn autostart_file() -> Option<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-#[tauri::command]
 pub fn get_launch_at_login() -> bool {
     autostart_file().map(|p| p.exists()).unwrap_or(false)
 }
 
 #[cfg(target_os = "linux")]
-#[tauri::command]
 pub fn set_launch_at_login(enabled: bool) -> Result<(), String> {
     let path = autostart_file().ok_or("no config directory")?;
     if enabled {
@@ -119,13 +115,11 @@ pub fn set_launch_at_login(enabled: bool) -> Result<(), String> {
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-#[tauri::command]
 pub fn get_launch_at_login() -> bool {
     false
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-#[tauri::command]
 pub fn set_launch_at_login(_enabled: bool) -> Result<(), String> {
     Err("launch at login is not supported on this platform".into())
 }

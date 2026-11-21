@@ -6,9 +6,7 @@
 //! pkexec. reporting success only after the elevated run actually exits zero
 //! keeps the UI honest when the prompt is declined or the operation fails.
 
-use tauri::Manager;
-
-/// the bundled engine binary's resource-relative path, per OS
+/// the bundled engine binary's path beside the app's own, per OS
 #[cfg(windows)]
 const ENGINE_RESOURCE: &str = "engine/iris-engine.exe";
 #[cfg(not(windows))]
@@ -16,13 +14,12 @@ const ENGINE_RESOURCE: &str = "engine/iris-engine";
 
 /// resolve the bundled engine, then run it elevated with `args`, blocking until
 /// it exits
-pub(crate) async fn run_engine(app: tauri::AppHandle, args: Vec<String>) -> Result<(), String> {
-    let exe = app
-        .path()
-        .resolve(ENGINE_RESOURCE, tauri::path::BaseDirectory::Resource)
-        .map_err(|e| format!("engine binary not found: {e}"))?;
+pub(crate) async fn run_engine(args: Vec<String>) -> Result<(), String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("engine binary not found: {e}"))?
+        .with_file_name(ENGINE_RESOURCE);
 
-    tauri::async_runtime::spawn_blocking(move || elevate_and_wait(&exe, &args))
+    crate::runtime().spawn_blocking(move || elevate_and_wait(&exe, &args))
         .await
         .map_err(|e| format!("elevation task failed: {e}"))?
 }

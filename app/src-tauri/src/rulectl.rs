@@ -14,15 +14,11 @@ use iris_core::{AppId, Cidr, Direction, FirewallMode, PortRange, Protocol, Rule,
 
 /// run `cmd` over the telemetry channel, falling back to one elevated run of
 /// the engine with `args` if the grant is not in force
-pub(crate) async fn mutate(
-    app: tauri::AppHandle,
-    cmd: EngineCmd,
-    args: Vec<String>,
-) -> Result<(), String> {
-    if try_unelevated(&app, cmd).await? {
+pub(crate) async fn mutate(cmd: EngineCmd, args: Vec<String>) -> Result<(), String> {
+    if try_unelevated(cmd).await? {
         return Ok(());
     }
-    crate::elevate::run_engine(app, args).await
+    crate::elevate::run_engine(args).await
 }
 
 /// the optional narrowing and lifetime the Protect tab's rule editor sends
@@ -74,9 +70,7 @@ impl RuleOptions {
     }
 }
 
-#[tauri::command]
 pub async fn rule_add(
-    app: tauri::AppHandle,
     path: String,
     direction: String,
     action: String,
@@ -106,121 +100,103 @@ pub async fn rule_add(
         let json = serde_json::to_string(&rule).map_err(|error| error.to_string())?;
         vec!["--rule-add-json".into(), json]
     };
-    mutate(app, EngineCmd::AddRule(rule), args).await
+    mutate(EngineCmd::AddRule(rule), args).await
 }
 
-#[tauri::command]
 pub async fn set_cap(
-    app: tauri::AppHandle,
     path: String,
     up_bytes_per_sec: Option<u64>,
     down_bytes_per_sec: Option<u64>,
 ) -> Result<(), String> {
     let rate = |rate: Option<u64>| rate.map_or_else(|| "off".to_string(), |rate| rate.to_string());
     let args = vec!["--cap".into(), path.clone(), rate(up_bytes_per_sec), rate(down_bytes_per_sec)];
-    mutate(app, EngineCmd::SetCap(path, up_bytes_per_sec, down_bytes_per_sec), args).await
+    mutate(EngineCmd::SetCap(path, up_bytes_per_sec, down_bytes_per_sec), args).await
 }
 
-#[tauri::command]
 pub async fn set_quota(
-    app: tauri::AppHandle,
     path: Option<String>,
     limit: Option<iris_core::QuotaLimit>,
 ) -> Result<(), String> {
     let cmd = EngineCmd::SetQuota(path.clone(), limit);
     // the machine-wide quota only warns, so the engine takes it without elevation
     let Some(path) = path else {
-        return try_unelevated(&app, cmd).await.map(drop);
+        return try_unelevated(cmd).await.map(drop);
     };
     let limit = match limit {
         Some(limit) => serde_json::to_string(&limit).map_err(|error| error.to_string())?,
         None => "off".into(),
     };
-    mutate(app, cmd, vec!["--quota".into(), path, limit]).await
+    mutate(cmd, vec!["--quota".into(), path, limit]).await
 }
 
-#[tauri::command]
 pub async fn set_profiles(
-    app: tauri::AppHandle,
+    app: ceri::AppHandle,
     profiles: Vec<iris_core::Profile>,
     manual: Option<String>,
 ) -> Result<(), String> {
     let json = serde_json::json!({ "profiles": profiles, "manual": manual }).to_string();
     let args = vec!["--profiles-json".into(), json];
-    mutate(app.clone(), EngineCmd::SetProfiles(profiles, manual), args).await?;
-    if let Ok(mode) = crate::ipc::firewall_mode(&app).await {
+    mutate(EngineCmd::SetProfiles(profiles, manual), args).await?;
+    if let Ok(mode) = crate::ipc::firewall_mode().await {
         crate::refresh_mode_menu(&app, mode);
     }
     Ok(())
 }
 
-#[tauri::command]
-pub async fn firewall_mode(app: tauri::AppHandle) -> Result<FirewallMode, String> {
-    crate::ipc::firewall_mode(&app).await
+pub async fn firewall_mode() -> Result<FirewallMode, String> {
+    crate::ipc::firewall_mode().await
 }
 
-#[tauri::command]
-pub async fn set_firewall_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
+pub async fn set_firewall_mode(app: ceri::AppHandle, mode: String) -> Result<(), String> {
     let mode = FirewallMode::parse(&mode).ok_or("unknown firewall mode")?;
     let args = vec!["--firewall-mode".into(), mode.as_str().into()];
-    mutate(app.clone(), EngineCmd::SetFirewallMode(mode), args).await?;
+    mutate(EngineCmd::SetFirewallMode(mode), args).await?;
     crate::refresh_mode_menu(&app, mode);
     Ok(())
 }
 
-#[tauri::command]
-pub async fn rule_remove(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+pub async fn rule_remove(id: i64) -> Result<(), String> {
     let args = vec!["--rule-remove".into(), id.to_string()];
-    mutate(app, EngineCmd::RemoveRule(id), args).await
+    mutate(EngineCmd::RemoveRule(id), args).await
 }
 
-#[tauri::command]
-pub async fn rule_set_enabled(app: tauri::AppHandle, id: i64, enabled: bool) -> Result<(), String> {
+pub async fn rule_set_enabled(id: i64, enabled: bool) -> Result<(), String> {
     let args = vec!["--rule-enable".into(), id.to_string(), enabled.to_string()];
-    mutate(app, EngineCmd::SetRuleEnabled(id, enabled), args).await
+    mutate(EngineCmd::SetRuleEnabled(id, enabled), args).await
 }
 
 /// the one elevated step that buys the user out of every later prompt, and the
 /// same call in reverse to hand the authority back
-#[tauri::command]
-pub async fn set_rule_grant(app: tauri::AppHandle, granted: bool) -> Result<(), String> {
+pub async fn set_rule_grant(granted: bool) -> Result<(), String> {
     let args = vec!["--grant-rules".into(), granted.to_string()];
-    crate::elevate::run_engine(app, args).await
+    crate::elevate::run_engine(args).await
 }
 
 /// accept a plugin's rule proposal: the enforcement half runs elevated over the
 /// admin endpoint, exactly like adding the rule by hand
-#[tauri::command]
-pub async fn proposal_accept(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+pub async fn proposal_accept(id: i64) -> Result<(), String> {
     let args = vec!["--proposal-accept".into(), id.to_string()];
-    mutate(app, EngineCmd::ResolveProposal(id, true), args).await
+    mutate(EngineCmd::ResolveProposal(id, true), args).await
 }
 
 /// pick a rules backup file and restore it in one elevated run (a single prompt
 /// for the whole file). returns the rule count, or None if the picker was
 /// cancelled.
-#[tauri::command]
-pub async fn rule_import(app: tauri::AppHandle) -> Result<Option<usize>, String> {
-    use tauri::Manager;
-    use tauri_plugin_dialog::DialogExt;
+pub async fn rule_import() -> Result<Option<usize>, String> {
+    let picked = crate::runtime()
+        .spawn_blocking(|| {
+            ceri::FileDialog {
+                filters: vec![ceri::FileFilter { name: "rules backup".into(), extensions: vec!["json".into()] }],
+                // the export drops its file in Downloads, so start the picker there
+                default_path: ceri::dirs::downloads(),
+                ..ceri::FileDialog::default()
+            }
+            .open_files()
+        })
+        .await
+        .map_err(|e| format!("file picker failed: {e}"))??;
 
-    let handle = app.clone();
-    let picked = tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = handle.dialog().file().add_filter("rules backup", &["json"]);
-        // the export drops its file in Downloads, so start the picker there
-        if let Ok(dir) = handle.path().download_dir() {
-            dialog = dialog.set_directory(dir);
-        }
-        dialog.blocking_pick_file()
-    })
-    .await
-    .map_err(|e| format!("file picker failed: {e}"))?;
-
-    let Some(file) = picked else { return Ok(None) };
-    let path = file
-        .simplified()
-        .into_path()
-        .map_err(|e| format!("unusable file path: {e}"))?;
+    let Some(path) = picked.and_then(|files| files.into_iter().next()) else { return Ok(None) };
 
     // parse before elevating so a malformed file fails with a precise error here
     // instead of a prompt followed by a bare exit code
@@ -232,6 +208,6 @@ pub async fn rule_import(app: tauri::AppHandle) -> Result<Option<usize>, String>
     let count = iris_core::parse_backup(&json)?.len();
 
     let args = vec!["--rule-import".into(), path.to_string_lossy().into_owned()];
-    crate::elevate::run_engine(app, args).await?;
+    crate::elevate::run_engine(args).await?;
     Ok(Some(count))
 }

@@ -1,6 +1,6 @@
 //! the UI's client to the engine's telemetry pipe. a background task keeps a
 //! connection open, negotiates the protocol, subscribes to the live stream, and
-//! forwards pushes to the webview as Tauri events. it also carries the
+//! forwards pushes to the pages as ceri events. it also carries the
 //! unprivileged request/response commands (reads, kills, enrichment) correlated
 //! by id. privileged rule mutations do not go here; they run elevated over the
 //! admin pipe (see `rulectl`). it reconnects on its own.
@@ -14,9 +14,9 @@ use iris_ipc::transport;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+use ceri::AppHandle;
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -37,6 +37,8 @@ pub struct EnrichmentEvent {
 #[derive(Default)]
 pub struct StatusState(pub Mutex<Status>);
 
+static STATUS: LazyLock<StatusState> = LazyLock::new(StatusState::default);
+
 pub struct TickDetailState {
     detailed: AtomicBool,
     cadence_ms: AtomicU64,
@@ -50,6 +52,8 @@ impl Default for TickDetailState {
         }
     }
 }
+
+static TICK_DETAILS: LazyLock<TickDetailState> = LazyLock::new(TickDetailState::default);
 
 /// what the UI asks the engine to do; the session task assigns the wire id
 pub enum EngineCmd {
@@ -96,40 +100,34 @@ pub struct Command {
     resp: oneshot::Sender<Reply>,
 }
 
-/// managed handle the commands use to reach the session task
+/// the handle the commands use to reach the session task
 pub struct Commander(pub mpsc::Sender<Command>);
 
-#[tauri::command]
-pub fn engine_status(state: tauri::State<'_, StatusState>) -> Status {
-    state
-        .inner()
+pub(crate) static COMMANDER: OnceLock<Commander> = OnceLock::new();
+
+pub fn engine_status() -> Status {
+    STATUS
         .0
         .lock()
         .map(|s| s.clone())
         .unwrap_or_default()
 }
 
-#[tauri::command]
-pub fn set_tick_details(state: tauri::State<'_, TickDetailState>, enabled: bool, cadence_ms: u64) {
+pub fn set_tick_details(enabled: bool, cadence_ms: u64) {
+    let state = &*TICK_DETAILS;
     state.detailed.store(enabled, Ordering::Release);
     state
         .cadence_ms
         .store(cadence_ms.max(1_000), Ordering::Release);
 }
 
-async fn dispatch(app: &AppHandle, cmd: EngineCmd) -> Result<Reply, String> {
+async fn dispatch(cmd: EngineCmd) -> Result<Reply, String> {
     // fail fast when the engine is known to be offline, so a UI action during an
     // outage returns at once instead of buffering on a queue nobody is draining
-    if let Some(state) = app.try_state::<StatusState>() {
-        let online = state.0.lock().map(|s| s.online).unwrap_or(false);
-        if !online {
-            return Err("engine offline".into());
-        }
+    if !STATUS.0.lock().map(|s| s.online).unwrap_or(false) {
+        return Err("engine offline".into());
     }
-    let tx = {
-        let state = app.try_state::<Commander>().ok_or("ipc not ready")?;
-        state.0.clone()
-    };
+    let tx = COMMANDER.get().ok_or("ipc not ready")?.0.clone();
     let (resp, rx) = oneshot::channel();
     tx.send(Command { cmd, resp })
         .await
@@ -143,36 +141,32 @@ async fn dispatch(app: &AppHandle, cmd: EngineCmd) -> Result<Reply, String> {
     }
 }
 
-#[tauri::command]
-pub async fn list_rules(app: AppHandle) -> Result<Vec<StoredRule>, String> {
-    match dispatch(&app, EngineCmd::ListRules).await? {
+pub async fn list_rules() -> Result<Vec<StoredRule>, String> {
+    match dispatch(EngineCmd::ListRules).await? {
         Reply::Rules(r) => Ok(r),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn list_apps(app: AppHandle) -> Result<Vec<KnownApp>, String> {
-    match dispatch(&app, EngineCmd::ListApps).await? {
+pub async fn list_apps() -> Result<Vec<KnownApp>, String> {
+    match dispatch(EngineCmd::ListApps).await? {
         Reply::Apps(apps) => Ok(apps),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn forget_app(app: AppHandle, path: String) -> Result<(), String> {
-    match dispatch(&app, EngineCmd::ForgetApp(path)).await? {
+pub async fn forget_app(path: String) -> Result<(), String> {
+    match dispatch(EngineCmd::ForgetApp(path)).await? {
         Reply::Ok => Ok(()),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn forget_apps(app: AppHandle, paths: Vec<String>) -> Result<usize, String> {
-    match dispatch(&app, EngineCmd::ForgetApps(paths)).await? {
+pub async fn forget_apps(paths: Vec<String>) -> Result<usize, String> {
+    match dispatch(EngineCmd::ForgetApps(paths)).await? {
         Reply::Forgotten(count) => Ok(count),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
@@ -180,53 +174,48 @@ pub async fn forget_apps(app: AppHandle, paths: Vec<String>) -> Result<usize, St
 }
 
 /// whether this account may change rules without an elevation prompt
-#[tauri::command]
-pub async fn rule_grant(app: AppHandle) -> Result<bool, String> {
-    match dispatch(&app, EngineCmd::GetRuleGrant).await? {
+pub async fn rule_grant() -> Result<bool, String> {
+    match dispatch(EngineCmd::GetRuleGrant).await? {
         Reply::RuleGrant(granted) => Ok(granted),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn list_caps(app: AppHandle) -> Result<Vec<iris_core::RateCap>, String> {
-    match dispatch(&app, EngineCmd::ListCaps).await? {
+pub async fn list_caps() -> Result<Vec<iris_core::RateCap>, String> {
+    match dispatch(EngineCmd::ListCaps).await? {
         Reply::Caps(caps) => Ok(caps),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn list_quotas(app: AppHandle) -> Result<Vec<iris_core::Quota>, String> {
-    match dispatch(&app, EngineCmd::ListQuotas).await? {
+pub async fn list_quotas() -> Result<Vec<iris_core::Quota>, String> {
+    match dispatch(EngineCmd::ListQuotas).await? {
         Reply::Quotas(quotas) => Ok(quotas),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn engine_health(app: AppHandle) -> Result<iris_ipc::message::Health, String> {
-    match dispatch(&app, EngineCmd::GetHealth).await? {
+pub async fn engine_health() -> Result<iris_ipc::message::Health, String> {
+    match dispatch(EngineCmd::GetHealth).await? {
         Reply::Health(health) => Ok(health),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn get_profiles(app: AppHandle) -> Result<iris_core::ProfileState, String> {
-    match dispatch(&app, EngineCmd::GetProfiles).await? {
+pub async fn get_profiles() -> Result<iris_core::ProfileState, String> {
+    match dispatch(EngineCmd::GetProfiles).await? {
         Reply::Profiles(state) => Ok(state),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
 
-pub(crate) async fn firewall_mode(app: &AppHandle) -> Result<iris_core::FirewallMode, String> {
-    match dispatch(app, EngineCmd::GetFirewallMode).await? {
+pub(crate) async fn firewall_mode() -> Result<iris_core::FirewallMode, String> {
+    match dispatch(EngineCmd::GetFirewallMode).await? {
         Reply::FirewallMode(mode) => Ok(mode),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
@@ -236,8 +225,8 @@ pub(crate) async fn firewall_mode(app: &AppHandle) -> Result<iris_core::Firewall
 /// try a rule mutation over the telemetry channel, which the engine accepts only
 /// when the one-time grant is in force. `Ok(false)` means the engine wants
 /// elevation, so the caller falls back to the elevated one-shot.
-pub(crate) async fn try_unelevated(app: &AppHandle, cmd: EngineCmd) -> Result<bool, String> {
-    match dispatch(app, cmd).await {
+pub(crate) async fn try_unelevated(cmd: EngineCmd) -> Result<bool, String> {
+    match dispatch(cmd).await {
         Ok(Reply::Ok) | Ok(Reply::RuleAdded(_)) | Ok(Reply::Profiles(_)) => Ok(true),
         Ok(Reply::Error(error)) if error == NEEDS_ELEVATION => Ok(false),
         Ok(Reply::Error(error)) => Err(error),
@@ -250,60 +239,54 @@ pub(crate) async fn try_unelevated(app: &AppHandle, cmd: EngineCmd) -> Result<bo
 /// mirrors the engine's own wording for a rule change that needs elevation
 const NEEDS_ELEVATION: &str = "rule changes require elevation";
 
-#[tauri::command]
 pub async fn get_host_usage(
-    app: AppHandle,
     path: Option<String>,
     from_ms: u64,
     to_ms: u64,
 ) -> Result<Vec<iris_core::HostUsage>, String> {
-    match dispatch(&app, EngineCmd::GetHostUsage(path, from_ms, to_ms)).await? {
+    match dispatch(EngineCmd::GetHostUsage(path, from_ms, to_ms)).await? {
         Reply::HostUsage(rows) => Ok(rows),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn host_addresses(app: AppHandle, host: String) -> Result<Vec<String>, String> {
-    match dispatch(&app, EngineCmd::HostAddresses(host)).await? {
+pub async fn host_addresses(host: String) -> Result<Vec<String>, String> {
+    match dispatch(EngineCmd::HostAddresses(host)).await? {
         Reply::HostAddresses(addresses) => Ok(addresses.iter().map(ToString::to_string).collect()),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn list_alerts(app: AppHandle, unacked_only: bool) -> Result<Vec<Alert>, String> {
-    match dispatch(&app, EngineCmd::ListAlerts(unacked_only)).await? {
+pub async fn list_alerts(unacked_only: bool) -> Result<Vec<Alert>, String> {
+    match dispatch(EngineCmd::ListAlerts(unacked_only)).await? {
         Reply::Alerts(a) => Ok(a),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn list_blocked(app: AppHandle, limit: u32) -> Result<Vec<BlockedConnection>, String> {
-    match dispatch(&app, EngineCmd::ListBlocked(limit)).await? {
+pub async fn list_blocked(limit: u32) -> Result<Vec<BlockedConnection>, String> {
+    match dispatch(EngineCmd::ListBlocked(limit)).await? {
         Reply::Blocked(rows) => Ok(rows),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
     }
 }
 
-pub async fn list_prompt_alerts(app: AppHandle) -> Result<Vec<Alert>, String> {
-    match dispatch(&app, EngineCmd::ListPromptAlerts).await? {
+pub async fn list_prompt_alerts() -> Result<Vec<Alert>, String> {
+    match dispatch(EngineCmd::ListPromptAlerts).await? {
         Reply::Alerts(alerts) => Ok(alerts),
         Reply::Error(error) => Err(error),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
 pub async fn ack_alert(app: AppHandle, id: i64) -> Result<(), String> {
-    match dispatch(&app, EngineCmd::AckAlert(id)).await? {
+    match dispatch(EngineCmd::AckAlert(id)).await? {
         Reply::Ok => {
-            let _ = app.emit("connection-prompts-refresh", ());
+            app.emit("connection-prompts-refresh", ());
             Ok(())
         }
         Reply::Error(e) => Err(e),
@@ -311,7 +294,6 @@ pub async fn ack_alert(app: AppHandle, id: i64) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
 pub async fn decide_alert(
     app: AppHandle,
     id: i64,
@@ -325,9 +307,9 @@ pub async fn decide_alert(
     };
     let options = options.unwrap_or_default();
     let cmd = EngineCmd::DecideAlert(id, action, options.scope()?, options.lifetime());
-    match dispatch(&app, cmd).await? {
+    match dispatch(cmd).await? {
         Reply::Ok => {
-            let _ = app.emit("connection-prompts-refresh", ());
+            app.emit("connection-prompts-refresh", ());
             Ok(())
         }
         Reply::Error(error) => Err(error),
@@ -335,15 +317,12 @@ pub async fn decide_alert(
     }
 }
 
-#[tauri::command]
 pub async fn kill_connection(
-    app: AppHandle,
     local_port: u16,
     remote_addr: String,
     remote_port: u16,
 ) -> Result<(), String> {
     match dispatch(
-        &app,
         EngineCmd::KillConnection(local_port, remote_addr, remote_port),
     )
     .await?
@@ -354,9 +333,7 @@ pub async fn kill_connection(
     }
 }
 
-#[tauri::command]
 pub async fn get_usage(
-    app: AppHandle,
     from_ms: f64,
     to_ms: f64,
     granularity: String,
@@ -371,7 +348,7 @@ pub async fn get_usage(
             _ => Granularity::Minute,
         },
     };
-    match dispatch(&app, EngineCmd::GetUsage(query)).await? {
+    match dispatch(EngineCmd::GetUsage(query)).await? {
         Reply::Usage(u) => Ok(u),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
@@ -385,14 +362,11 @@ pub struct AdapterUsageRow {
     pub bytes: ByteCounts,
 }
 
-#[tauri::command]
 pub async fn get_adapter_usage(
-    app: AppHandle,
     from_ms: f64,
     to_ms: f64,
 ) -> Result<Vec<AdapterUsageRow>, String> {
     match dispatch(
-        &app,
         EngineCmd::GetAdapterUsage(from_ms as u64, to_ms as u64),
     )
     .await?
@@ -406,62 +380,53 @@ pub async fn get_adapter_usage(
     }
 }
 
-#[tauri::command]
-pub async fn list_plugins(app: AppHandle) -> Result<Vec<PluginInfo>, String> {
-    match dispatch(&app, EngineCmd::ListPlugins).await? {
+pub async fn list_plugins() -> Result<Vec<PluginInfo>, String> {
+    match dispatch(EngineCmd::ListPlugins).await? {
         Reply::Plugins(p) => Ok(p),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
 pub async fn grant_plugin(
-    app: AppHandle,
     id: String,
     caps: Vec<String>,
     egress: Vec<String>,
 ) -> Result<(), String> {
     let args = vec!["--plugin-grant".into(), id.clone(), caps.join(","), egress.join(",")];
-    crate::rulectl::mutate(app, EngineCmd::GrantPlugin(id, caps, egress), args).await
+    crate::rulectl::mutate(EngineCmd::GrantPlugin(id, caps, egress), args).await
 }
 
-#[tauri::command]
-pub async fn set_plugin_enabled(app: AppHandle, id: String, enabled: bool) -> Result<(), String> {
+pub async fn set_plugin_enabled(id: String, enabled: bool) -> Result<(), String> {
     let args = vec!["--plugin-enable".into(), id.clone(), enabled.to_string()];
-    crate::rulectl::mutate(app, EngineCmd::SetPluginEnabled(id, enabled), args).await
+    crate::rulectl::mutate(EngineCmd::SetPluginEnabled(id, enabled), args).await
 }
 
-#[tauri::command]
-pub async fn list_proposals(app: AppHandle) -> Result<Vec<RuleProposal>, String> {
-    match dispatch(&app, EngineCmd::ListProposals).await? {
+pub async fn list_proposals() -> Result<Vec<RuleProposal>, String> {
+    match dispatch(EngineCmd::ListProposals).await? {
         Reply::Proposals(p) => Ok(p),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn reject_proposal(app: AppHandle, id: i64) -> Result<(), String> {
-    match dispatch(&app, EngineCmd::RejectProposal(id)).await? {
+pub async fn reject_proposal(id: i64) -> Result<(), String> {
+    match dispatch(EngineCmd::RejectProposal(id)).await? {
         Reply::Ok => Ok(()),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
-pub async fn get_plugin_panel(app: AppHandle, id: String) -> Result<Panel, String> {
-    match dispatch(&app, EngineCmd::GetPluginPanel(id)).await? {
+pub async fn get_plugin_panel(id: String) -> Result<Panel, String> {
+    match dispatch(EngineCmd::GetPluginPanel(id)).await? {
         Reply::Panel(p) => Ok(p),
         Reply::Error(e) => Err(e),
         _ => Err("unexpected reply".into()),
     }
 }
 
-#[tauri::command]
 pub async fn get_enrichment(
-    app: AppHandle,
     ips: Vec<String>,
 ) -> Result<Vec<EnrichmentEvent>, String> {
     let targets: Vec<EnrichTarget> = ips
@@ -472,7 +437,7 @@ pub async fn get_enrichment(
                 .map(EnrichTarget::Endpoint)
         })
         .collect();
-    match dispatch(&app, EngineCmd::GetEnrichment(targets)).await? {
+    match dispatch(EngineCmd::GetEnrichment(targets)).await? {
         Reply::Enrichment(list) => Ok(list
             .into_iter()
             .map(|(target, annotations)| EnrichmentEvent {
@@ -488,7 +453,7 @@ pub async fn get_enrichment(
 /// start the reconnecting client loop. `rx` carries UI commands across the loop's
 /// lifetime; each connection drains it.
 pub fn spawn(app: AppHandle, mut rx: mpsc::Receiver<Command>) {
-    tauri::async_runtime::spawn(async move {
+    crate::runtime().spawn(async move {
         loop {
             let mismatch = match session(&app, &mut rx).await {
                 Ok(()) => false,
@@ -582,7 +547,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     }
                     // full ticks only while the main window exists to draw them; the
                     // switch lands within a frame or two of the window opening or closing
-                    let want_full = app.get_webview_window("main").is_some();
+                    let want_full = crate::main_open(app);
                     if want_full != full_feed {
                         full_feed = want_full;
                         let level = if want_full { ClientMessage::Subscribe } else { ClientMessage::SubscribeTotals };
@@ -592,13 +557,11 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                 match msg {
                     ServerMessage::Tick(mut tick) => {
                         // only the main window draws ticks; skip the json and the
-                        // webview round trip while it is closed
-                        if app.get_webview_window("main").is_none() {
+                        // page round trip while it is closed
+                        if !crate::main_open(app) {
                             continue;
                         }
-                        let Some(state) = app.try_state::<TickDetailState>() else {
-                            continue;
-                        };
+                        let state = &*TICK_DETAILS;
                         let cadence_ms = state.cadence_ms.load(Ordering::Acquire);
                         // a tick stamped before the last one (wall clock stepped
                         // back after sleep) would otherwise stall the cadence
@@ -615,21 +578,21 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                                 sample.processes.clear();
                             }
                         }
-                        let _ = app.emit("engine-tick", tick);
+                        app.emit("engine-tick", tick);
                     }
                     ServerMessage::Alert(alert) => {
                         crate::prompt::show(app, &alert);
                         crate::notify::alert_toast(app, &alert);
-                        let _ = app.emit("engine-alert", alert);
+                        app.emit("engine-alert", alert);
                     }
                     ServerMessage::Enrichment { target, annotations } => {
-                        let _ = app.emit("engine-enrichment", EnrichmentEvent { target, annotations });
+                        app.emit("engine-enrichment", EnrichmentEvent { target, annotations });
                     }
                     ServerMessage::Proposal(proposal) => {
-                        let _ = app.emit("engine-proposal", proposal);
+                        app.emit("engine-proposal", proposal);
                     }
                     ServerMessage::CaptureDegraded { degraded } => {
-                        let _ = app.emit("engine-capture-degraded", degraded);
+                        app.emit("engine-capture-degraded", degraded);
                     }
                     ServerMessage::Reply { req, result } => {
                         if let Some(resp) = pending.remove(&req) {
@@ -770,13 +733,13 @@ async fn reconcile_alerts(
             Some(ServerMessage::Alert(alert)) => {
                 crate::prompt::show(app, &alert);
                 crate::notify::alert_toast(app, &alert);
-                let _ = app.emit("engine-alert", alert);
+                app.emit("engine-alert", alert);
             }
             Some(ServerMessage::Enrichment {
                 target,
                 annotations,
             }) => {
-                let _ = app.emit(
+                app.emit(
                     "engine-enrichment",
                     EnrichmentEvent {
                         target,
@@ -785,7 +748,7 @@ async fn reconcile_alerts(
                 );
             }
             Some(ServerMessage::Proposal(proposal)) => {
-                let _ = app.emit("engine-proposal", proposal);
+                app.emit("engine-proposal", proposal);
             }
             Some(ServerMessage::CaptureDegraded { .. }) => {}
             Some(ServerMessage::Tick(_) | ServerMessage::Totals { .. } | ServerMessage::Welcome { .. }) => {}
@@ -804,10 +767,8 @@ fn finish_alert_reconcile(app: &AppHandle, backlog: &[Alert], prompts: &[Alert])
 
 fn set_status(app: &AppHandle, online: bool, version: Option<String>, mismatch: bool) {
     let status = Status { online, version, mismatch };
-    if let Some(state) = app.try_state::<StatusState>() {
-        if let Ok(mut s) = state.0.lock() {
-            *s = status.clone();
-        }
+    if let Ok(mut s) = STATUS.0.lock() {
+        *s = status.clone();
     }
-    let _ = app.emit("engine-status", status);
+    app.emit("engine-status", status);
 }

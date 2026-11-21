@@ -4,8 +4,7 @@
 //! the busiest moment still on screen.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
-use tauri::Manager;
+use std::sync::{LazyLock, Mutex};
 
 const SIZE: usize = 32;
 const COLUMNS: usize = 15;
@@ -48,48 +47,45 @@ impl Default for TrayGraphState {
     }
 }
 
+static STATE: LazyLock<TrayGraphState> = LazyLock::new(TrayGraphState::default);
+
 /// add one tick's totals and redraw the tray
-pub fn push(app: &tauri::AppHandle, down: u64, up: u64) {
-    let Some(state) = app.try_state::<TrayGraphState>() else {
-        return;
-    };
-    let mut graph = state.0.lock().unwrap_or_else(|error| error.into_inner());
+pub fn push(app: &ceri::AppHandle, down: u64, up: u64) {
+    let mut graph = STATE.0.lock().unwrap_or_else(|error| error.into_inner());
     if graph.history.len() == COLUMNS {
         graph.history.pop_front();
     }
     graph.history.push_back((down, up));
-    let Some(tray) = app.tray_by_id(crate::TRAY_ID) else {
+    let Some(tray) = app.tray() else {
         return;
     };
     let tooltip = format!("Iris\n↓ {}/s   ↑ {}/s", human(down), human(up));
     if tooltip != graph.shown_tooltip {
-        let _ = tray.set_tooltip(Some(&tooltip));
+        tray.set_tooltip(&tooltip);
         graph.shown_tooltip = tooltip;
     }
     if graph.enabled {
         let pixels = render(&graph.history);
         if !graph.showing_graph || pixels != graph.shown_pixels {
-            let _ = tray.set_icon(Some(tauri::image::Image::new(&pixels, SIZE as u32, SIZE as u32)));
+            tray.set_icon(ceri::png_from_rgba(SIZE as u32, SIZE as u32, &pixels));
             graph.shown_pixels = pixels;
             graph.showing_graph = true;
         }
     }
 }
 
-#[tauri::command]
-pub fn set_tray_graph(app: tauri::AppHandle, enabled: bool) {
+pub fn set_tray_graph(app: ceri::AppHandle, enabled: bool) {
     apply_enabled(&app, enabled);
-    crate::prefs::update(&app, |prefs| prefs.tray_graph = enabled);
+    crate::prefs::update(|prefs| prefs.tray_graph = enabled);
 }
 
-pub fn apply_enabled(app: &tauri::AppHandle, enabled: bool) {
-    let state = app.state::<TrayGraphState>();
-    let mut graph = state.0.lock().unwrap_or_else(|error| error.into_inner());
+pub fn apply_enabled(app: &ceri::AppHandle, enabled: bool) {
+    let mut graph = STATE.0.lock().unwrap_or_else(|error| error.into_inner());
     graph.enabled = enabled;
     if !enabled && graph.showing_graph {
         graph.showing_graph = false;
-        if let (Some(tray), Some(icon)) = (app.tray_by_id(crate::TRAY_ID), app.default_window_icon()) {
-            let _ = tray.set_icon(Some(icon.clone()));
+        if let Some(tray) = app.tray() {
+            tray.set_icon(crate::ICON.to_vec());
         }
     }
 }

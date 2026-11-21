@@ -3,7 +3,6 @@
 //! so this is called at most once per distinct app path.
 
 /// return a `data:image/png;base64,...` URI for the exe's icon, or None.
-#[tauri::command]
 pub fn app_icon(path: String) -> Option<String> {
     #[cfg(windows)]
     {

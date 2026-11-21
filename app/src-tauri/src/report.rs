@@ -2,18 +2,8 @@
 //! user's Downloads folder and returns the path, so the UI can then reveal it in
 //! the file manager. the UI builds the contents; this only decides where it lands.
 
-use tauri::Manager;
-
-#[tauri::command]
-pub fn save_download(
-    app: tauri::AppHandle,
-    name: String,
-    contents: String,
-) -> Result<String, String> {
-    let dir = app
-        .path()
-        .download_dir()
-        .map_err(|_| "could not locate the Downloads folder".to_string())?;
+pub fn save_download(name: String, contents: String) -> Result<String, String> {
+    let dir = ceri::dirs::downloads().ok_or_else(|| "could not locate the Downloads folder".to_string())?;
     // the caller controls `name`; keep the write inside Downloads and reject
     // anything that could escape it, target an NTFS alternate data stream, or drop
     // a hidden control file. only the two export formats the UI produces are let

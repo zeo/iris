@@ -4,9 +4,8 @@
 //! so a freshly-installed app can bring its own background engine up with one
 //! click.
 
-#[tauri::command]
-pub async fn install_service(app: tauri::AppHandle) -> Result<(), String> {
-    crate::elevate::run_engine(app, vec!["--install".into()]).await?;
+pub async fn install_service() -> Result<(), String> {
+    crate::elevate::run_engine(vec!["--install".into()]).await?;
     // once the engine is on boot, bring the app up at login too (quietly, into the
     // tray) so connection prompts and alerts can always surface even when the
     // window was never opened this session. best-effort: a failure here must not
@@ -19,12 +18,10 @@ pub async fn install_service(app: tauri::AppHandle) -> Result<(), String> {
 
 /// hand outbound decisions back to iris on the windows firewall profiles that
 /// block by default and are not held by group policy
-#[tauri::command]
-pub async fn reset_outbound(app: tauri::AppHandle) -> Result<(), String> {
-    crate::elevate::run_engine(app, vec!["--reset-outbound".into()]).await
+pub async fn reset_outbound() -> Result<(), String> {
+    crate::elevate::run_engine(vec!["--reset-outbound".into()]).await
 }
 
-#[tauri::command]
-pub async fn uninstall_service(app: tauri::AppHandle) -> Result<(), String> {
-    crate::elevate::run_engine(app, vec!["--uninstall".into()]).await
+pub async fn uninstall_service() -> Result<(), String> {
+    crate::elevate::run_engine(vec!["--uninstall".into()]).await
 }

@@ -6,8 +6,7 @@
 use iris_core::{Alert, AlertKind};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
-use tauri::Manager;
+use std::sync::{LazyLock, Mutex};
 
 /// host-side notification preferences and per-session dedupe
 pub struct NotifyState {
@@ -28,19 +27,19 @@ impl Default for NotifyState {
     }
 }
 
-#[tauri::command]
-pub fn set_notifications_enabled(app: tauri::AppHandle, enabled: bool) {
-    apply_enabled(&app, enabled);
-    crate::prefs::update(&app, |prefs| prefs.notifications = enabled);
+static STATE: LazyLock<NotifyState> = LazyLock::new(NotifyState::default);
+
+pub fn set_notifications_enabled(enabled: bool) {
+    apply_enabled(enabled);
+    crate::prefs::update(|prefs| prefs.notifications = enabled);
 }
 
-#[tauri::command]
-pub fn set_info_cards(app: tauri::AppHandle, cards: crate::prefs::InfoCards) {
-    crate::prefs::update(&app, |prefs| prefs.info_cards = cards);
+pub fn set_info_cards(cards: crate::prefs::InfoCards) {
+    crate::prefs::update(|prefs| prefs.info_cards = cards);
 }
 
-pub fn apply_enabled(app: &tauri::AppHandle, enabled: bool) {
-    app.state::<NotifyState>().enabled.store(enabled, Ordering::Release);
+pub fn apply_enabled(enabled: bool) {
+    STATE.enabled.store(enabled, Ordering::Release);
 }
 
 /// whether this alert is handled by the actionable connection-prompt window
@@ -70,18 +69,13 @@ fn wanted(cards: &crate::prefs::InfoCards, alert: &Alert) -> bool {
     }
 }
 
-fn enabled(app: &tauri::AppHandle) -> bool {
-    app.try_state::<NotifyState>()
-        .map(|s| s.enabled.load(Ordering::Acquire))
-        .unwrap_or(true)
+fn enabled() -> bool {
+    STATE.enabled.load(Ordering::Acquire)
 }
 
 /// record the id; returns false when this alert was already toasted
-fn first_sighting(app: &tauri::AppHandle, id: i64) -> bool {
-    let Some(state) = app.try_state::<NotifyState>() else {
-        return true;
-    };
-    let mut toasted = state.toasted.lock().unwrap_or_else(|e| e.into_inner());
+fn first_sighting(id: i64) -> bool {
+    let mut toasted = STATE.toasted.lock().unwrap_or_else(|e| e.into_inner());
     // bound the set over a very long session; ids are monotonic so a clear can
     // only re-admit old ids, and a duplicate toast is harmless next to the leak
     if toasted.len() > 4096 {
@@ -91,11 +85,11 @@ fn first_sighting(app: &tauri::AppHandle, id: i64) -> bool {
 }
 
 /// toast a live alert as it arrives from the engine.
-pub fn alert_toast(app: &tauri::AppHandle, alert: &Alert) {
-    if !enabled(app)
+pub fn alert_toast(app: &ceri::AppHandle, alert: &Alert) {
+    if !enabled()
         || needs_decision(alert)
-        || !wanted(&crate::prefs::current(app).info_cards, alert)
-        || !first_sighting(app, alert.id)
+        || !wanted(&crate::prefs::current().info_cards, alert)
+        || !first_sighting(alert.id)
     {
         return;
     }
@@ -145,15 +139,12 @@ pub fn alert_toast(app: &tauri::AppHandle, alert: &Alert) {
 
 /// summarize unacknowledged alerts missed during startup or an
 /// engine reconnect. ids already surfaced live stay suppressed.
-pub fn announce_backlog(app: &tauri::AppHandle, alerts: &[Alert]) {
-    let Some(state) = app.try_state::<NotifyState>() else {
-        return;
-    };
-    if !enabled(app) {
+pub fn announce_backlog(app: &ceri::AppHandle, alerts: &[Alert]) {
+    if !enabled() {
         return;
     }
-    let cards = crate::prefs::current(app).info_cards;
-    let mut toasted = state
+    let cards = crate::prefs::current().info_cards;
+    let mut toasted = STATE
         .toasted
         .lock()
         .unwrap_or_else(|error| error.into_inner());

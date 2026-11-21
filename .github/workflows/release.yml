@@ -67,8 +67,12 @@ jobs:
           cargo build --release --locked --manifest-path .rot-installer\Cargo.toml --bin rot-installer --bin rot-pack
           if ($LASTEXITCODE -ne 0) { throw "shared installer build failed" }
       - name: build app and engine
-        working-directory: app
-        run: pnpm exec tauri build --no-bundle --ci
+        shell: powershell
+        run: |
+          pnpm --dir app build
+          if ($LASTEXITCODE -ne 0) { throw "frontend build failed" }
+          cargo build --release --locked -p iris-service -p iris-app
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
       - name: pack shared installer release
         shell: powershell

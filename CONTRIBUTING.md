@@ -5,29 +5,32 @@ welcome.
 
 ## Repository shape
 
-Iris is a Cargo workspace plus a Tauri frontend:
+Iris is a Cargo workspace plus a ceri frontend:
 
 - `crates/` holds the platform-neutral core, the IPC protocol, the Windows and
   Linux backends, the plugin SDK, and the SQLite store.
 - `service/` is the privileged engine host (Windows service / systemd unit).
-- `app/` is the Tauri v2 + SolidJS desktop UI. `app/src-tauri/` is its Rust side.
+- `app/` is the ceri + SolidJS desktop UI. `app/src-tauri/` is its Rust side.
 
-The desktop bundle builds the release engine and embeds it as a Tauri resource,
-so `pnpm tauri build` runs `cargo build --release -p iris-service` first.
-`pnpm desktop:dev` does not, so run that cargo command once before it.
+The host compiles the built pages in, so `pnpm build` runs before any cargo
+command that builds `iris-app`. It looks for the engine at `engine/iris-engine`
+beside its own executable, where a release package puts it.
 
 ## Building and running
 
-You need a recent stable Rust toolchain, Node 22, and pnpm 9. On Linux you also
-need the usual Tauri system dependencies (GTK, WebKitGTK, and the AppImage
-tooling); see the Tauri prerequisites for your distribution.
+You need a recent stable Rust toolchain, Node 22, pnpm 9, and a ceri checkout
+at `../../hAugust/ceri`.
 
 ```
 cd app
 pnpm install
-pnpm desktop:dev    # run the UI with hot reload
-pnpm tauri build    # release build; on Linux also .deb, .rpm, and AppImage
+pnpm build          # the pages the host compiles in
+cargo build --release -p iris-service -p iris-app
 ```
+
+A debug build loads the pages from the Vite dev server instead, so run
+`pnpm dev` next to `cargo run -p iris-app` and page edits apply without a
+rebuild.
 
 ## Checks to run before a PR
 

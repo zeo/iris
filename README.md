@@ -14,7 +14,7 @@ talking to, and a running history of how much each one uses.
 
 Built native: a small privileged engine (a Windows service, or a systemd unit on
 Linux) does the real work with the OS filtering layer and kernel network events,
-and an unprivileged Tauri UI drives it over a local, access-controlled socket.
+and an unprivileged ceri UI drives it over a local, access-controlled socket.
 Monitoring and rules keep running with the window closed. A rule change goes
 through a separate admin-only channel with an elevation prompt (UAC on Windows,
 polkit on Linux). A desktop account can be authorized once, under Settings,
@@ -114,7 +114,7 @@ crates/iris-platform-linux Linux backend: sock_diag, NFQUEUE, nftables, systemd
 crates/iris-plugin        the SDK plugin authors build against
 crates/iris-store         SQLite history, usage rollups, and alerts
 service                   the privileged Windows/systemd engine host
-app                       the Tauri v2 + SolidJS desktop UI
+app                       the ceri + SolidJS desktop UI
 ```
 
 The engine is written against traits in `iris-core`; Windows and Linux provide
@@ -129,14 +129,19 @@ offline setup. If the engine is not running, the app offers to install it.
 
 ## Building
 
-Requires a recent stable Rust toolchain, Node 22, and pnpm 9.
+Requires a recent stable Rust toolchain, Node 22, pnpm 9, and a ceri checkout
+at `../../hAugust/ceri`.
 
 ```
 cd app
 pnpm install
-pnpm desktop:dev    # run the UI with hot reload
-pnpm tauri build    # release build; on Linux also .deb, .rpm, and AppImage
+pnpm build          # the pages the host compiles in
+cargo build --release -p iris-service -p iris-app
 ```
+
+A debug build loads the pages from the Vite dev server instead, so run
+`pnpm dev` next to `cargo run -p iris-app` and page edits apply without a
+rebuild.
 
 ## Contributing
 

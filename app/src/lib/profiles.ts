@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import type { FirewallMode } from "./rules";
 
 export interface NetworkIdentity {

@@ -1,5 +1,5 @@
 import { createStore } from "solid-js/store";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 
 // per-app-path icon cache. the backend extracts an exe's icon once; results are
 // kept here so a row re-rendering every tick never re-fetches. an empty string

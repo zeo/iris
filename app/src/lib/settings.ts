@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import { createSignal } from "solid-js";
 import { persisted } from "./persist";
 

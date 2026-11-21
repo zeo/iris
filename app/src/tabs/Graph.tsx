@@ -1,5 +1,5 @@
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../lib/host";
 import { BandwidthGraph, type Sample } from "../components/BandwidthGraph";
 import { AppIcon } from "../components/AppIcon";
 import { adapterLabel, engine } from "../lib/engine";

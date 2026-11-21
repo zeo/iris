@@ -1,6 +1,5 @@
 import { createEffect, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { invoke, openUrl } from "../lib/host";
 import { Icon } from "./Icon";
 import { engine, fetchEnrichment, type Annotation, type Conn } from "../lib/engine";
 

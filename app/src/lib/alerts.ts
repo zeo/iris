@@ -1,6 +1,5 @@
 import { createSignal } from "solid-js";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen } from "./host";
 import { fileName } from "./path";
 
 export type AlertKind =

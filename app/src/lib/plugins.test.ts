@@ -2,7 +2,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("./host", () => ({ invoke }));
 
 import { panelPlugins, refreshPlugins, type PluginInfo } from "./plugins";
 

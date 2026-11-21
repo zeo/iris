@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 
 // tell the native side the webview's real device-pixel-ratio so it can size the
 // window to land the CSS viewport at its intended width. webkit's content scale

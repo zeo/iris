@@ -1,6 +1,5 @@
 import { createEffect, createMemo, createResource, createSignal, For, Show } from "solid-js";
-import { invoke } from "@tauri-apps/api/core";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { invoke, revealItemInDir } from "../lib/host";
 import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import { adapterLabel, engine, type AdapterKind } from "../lib/engine";

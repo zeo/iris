@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("./host", () => ({ invoke }));
 
 import { blockHosts, blocksHosts, coversWholeApp, describeLifetime, describeScope, isBlocked, refreshRules } from "./rules";
 

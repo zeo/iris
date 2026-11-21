@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import { refreshRules, type Rule } from "./rules";
 
 // a rule a plugin suggested. nothing is enforced until the user accepts, which

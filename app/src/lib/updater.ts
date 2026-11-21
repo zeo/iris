@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { invoke, openUrl } from "./host";
 
 interface Update {
   version: string;

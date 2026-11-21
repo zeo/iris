@@ -1,5 +1,5 @@
 import { createEffect, createSignal, For, onMount, Show } from "solid-js";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../lib/host";
 import { Icon } from "../components/Icon";
 import { engine } from "../lib/engine";
 import { checkNow } from "../lib/updater";

@@ -1,7 +1,6 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { Key } from "@solid-primitives/keyed";
-import { invoke } from "@tauri-apps/api/core";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { invoke, revealItemInDir } from "../lib/host";
 import { AppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
 import { forgetKnownApp, forgetKnownApps, knownApps, refreshKnownApps } from "../lib/apps";

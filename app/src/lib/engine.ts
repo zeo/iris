@@ -1,6 +1,5 @@
 import { createSignal } from "solid-js";
-import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, listen } from "./host";
 import type { Sample } from "../components/BandwidthGraph";
 import { upsertProposal, type RuleProposal } from "./proposals";
 import type { FirewallMode } from "./rules";
@@ -137,7 +136,7 @@ function mergeEnrichment(target: EnrichTarget, annotations: Annotation[]) {
   });
 }
 
-// register the Tauri event listeners once. safe to call from any component's
+// register the host event listeners once. safe to call from any component's
 // onMount; subsequent calls are no-ops.
 export function initEngine() {
   if (started) return;

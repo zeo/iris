@@ -1,4 +1,4 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { appWindow } from "../lib/host";
 import { Icon } from "./Icon";
 import { Sparkline } from "./Sparkline";
 import { rate } from "../lib/format";
@@ -15,22 +15,15 @@ export function Titlebar(props: {
   down: number;
   up: number;
 }) {
-  const win = () => {
-    try {
-      return getCurrentWindow();
-    } catch {
-      return null;
-    }
-  };
   const themeIcon = () => (props.theme === "system" ? "monitor" : props.theme === "dark" ? "moon" : "sun");
 
   return (
     <header class="tb">
-      <div class="brand" data-tauri-drag-region>
+      <div class="brand">
         <img src={eye} alt="" />
         <span class="word">iris</span>
       </div>
-      <div class="drag" data-tauri-drag-region />
+      <div class="drag" />
       <div class="tb-readout" title="live throughput">
         <span class="rd">
           <span class="arrow">↓</span>
@@ -53,13 +46,13 @@ export function Titlebar(props: {
         >
           <Icon name={themeIcon()} />
         </button>
-        <button class="w-min" onClick={() => win()?.minimize()} aria-label="minimize">
+        <button class="w-min" onClick={() => appWindow.minimize()} aria-label="minimize">
           <Icon name="minimize" />
         </button>
-        <button class="w-max" onClick={() => win()?.toggleMaximize()} aria-label="maximize">
+        <button class="w-max" onClick={() => appWindow.toggleMaximize()} aria-label="maximize">
           <Icon name="maximize" />
         </button>
-        <button class="close" onClick={() => win()?.close()} aria-label="close">
+        <button class="close" onClick={() => appWindow.close()} aria-label="close">
           <Icon name="close" />
         </button>
       </div>

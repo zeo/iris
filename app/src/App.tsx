@@ -1,5 +1,5 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./lib/host";
 import { Titlebar } from "./components/Titlebar";
 import { Icon } from "./components/Icon";
 import { createTheme } from "./lib/theme";
@@ -16,7 +16,6 @@ import { Plugins } from "./tabs/Plugins";
 import { Settings } from "./tabs/Settings";
 import { PanelView } from "./components/PanelView";
 import { panelPlugins, refreshPlugins } from "./lib/plugins";
-import { ResizeEdges } from "./components/ResizeEdges";
 
 interface Tab {
   id: string;
@@ -165,7 +164,6 @@ export function App() {
 
   return (
     <div class="app">
-      <ResizeEdges />
       <Titlebar
         theme={theme.pref()}
         onCycleTheme={theme.cycle}

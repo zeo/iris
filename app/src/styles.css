@@ -279,37 +279,6 @@ html {
   position: relative;
   z-index: 1;
 }
-.resize-edge {
-  position: fixed;
-  z-index: 20;
-}
-.resize-edge.north,
-.resize-edge.south {
-  right: 8px;
-  left: 8px;
-  height: 5px;
-}
-.resize-edge.east,
-.resize-edge.west {
-  top: 8px;
-  bottom: 8px;
-  width: 5px;
-}
-.resize-edge.north { top: 0; cursor: n-resize; }
-.resize-edge.south { bottom: 0; cursor: s-resize; }
-.resize-edge.east { right: 0; cursor: e-resize; }
-.resize-edge.west { left: 0; cursor: w-resize; }
-.resize-edge.northeast,
-.resize-edge.northwest,
-.resize-edge.southeast,
-.resize-edge.southwest {
-  width: 10px;
-  height: 10px;
-}
-.resize-edge.northeast { top: 0; right: 0; cursor: ne-resize; }
-.resize-edge.northwest { top: 0; left: 0; cursor: nw-resize; }
-.resize-edge.southeast { right: 0; bottom: 0; cursor: se-resize; }
-.resize-edge.southwest { bottom: 0; left: 0; cursor: sw-resize; }
 
 /* titlebar */
 .tb {
@@ -327,6 +296,7 @@ html {
   gap: var(--s2);
   height: 100%;
   padding-right: var(--s3);
+  app-region: drag;
 }
 .brand img {
   width: 20px;
@@ -357,6 +327,7 @@ html {
 .tb .drag {
   flex: 1;
   height: 100%;
+  app-region: drag;
 }
 .tb .tools {
   display: flex;

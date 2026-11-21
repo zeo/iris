@@ -1,6 +1,5 @@
 import { createEffect, createSignal, For, Index, onCleanup, onMount, Show } from "solid-js";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen } from "../lib/host";
 import {
   type Alert,
   type AlertKind,
@@ -246,7 +245,7 @@ export function ConnectionPrompt() {
               aria-modal="true"
               aria-label={`New network connection from ${fileName(application().app)}`}
             >
-              <header data-tauri-drag-region>
+              <header>
                 <span class="prompt-mark"><Icon name="shield" /></span>
                 <span><b>New network connection</b><small>Choose how Iris should handle this application</small></span>
                 <button class="iconbtn" aria-label="dismiss" onClick={() => setDecisionAside(alert().id)}>

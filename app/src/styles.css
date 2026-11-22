@@ -623,6 +623,10 @@ html {
   padding: 0 var(--s3);
   border-bottom: 1px solid var(--line);
   background: var(--chrome);
+  app-region: drag;
+}
+.connection-prompt > header button {
+  app-region: no-drag;
 }
 .connection-prompt header > span:nth-child(2),
 .prompt-app > span {

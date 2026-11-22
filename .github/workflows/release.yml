@@ -136,6 +136,9 @@ jobs:
       - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           name: iris ${{ github.ref_name }}
+          # a tag such as v0.2.6-ceri.1 is a prerelease, so the installer's latest feed keeps the last stable
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
             dist/iris-*.rpack
             dist/iris-*.rpack.minisig
@@ -146,7 +149,8 @@ jobs:
           fail_on_unmatched_files: true
 
   build-linux:
-    if: github.actor == 'zeo'
+    # prereleases are windows only until the linux desktop is checked in a real session
+    if: github.actor == 'zeo' && !contains(github.ref_name, '-')
     needs: build-windows
     runs-on: ubuntu-latest
     steps:

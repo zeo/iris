@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@ceri/app':
-        specifier: file:../../../hAugust/ceri/sdk
-        version: file:../../../hAugust/ceri/sdk
+        specifier: https://github.com/zeo/ceri/releases/download/v0.1.1/ceri-app-0.1.1.tgz
+        version: https://github.com/zeo/ceri/releases/download/v0.1.1/ceri-app-0.1.1.tgz
       '@fontsource/geist-mono':
         specifier: ^5.3.0
         version: 5.3.0
@@ -142,8 +142,9 @@ packages:
     resolution: {integrity: sha512-ctxtJ/eA+t+6q2++vj5j7FYX3nRu311q1wfYH3xjlLOsczhlhxAg2FWNUXhpGvAw3BWo1xBcvOV6/YLc2r5FJw==}
     hasBin: true
 
-  '@ceri/app@file:../../../hAugust/ceri/sdk':
-    resolution: {directory: ../../../hAugust/ceri/sdk, type: directory}
+  '@ceri/app@https://github.com/zeo/ceri/releases/download/v0.1.1/ceri-app-0.1.1.tgz':
+    resolution: {integrity: sha512-ROTqtNhEtV2lu79VPxUHMWf3qzzeRGi7yeT5t+zNoA38pc9vKyGC6rkKF/80EkglV4YDs7pQ0Y5H6whQv/2yGA==, tarball: https://github.com/zeo/ceri/releases/download/v0.1.1/ceri-app-0.1.1.tgz}
+    version: 0.1.1
 
   '@csstools/color-helpers@6.1.0':
     resolution: {integrity: sha512-064IFJdjTfUqnjpCVpMOdbr8FLQBhinbZj6yRv2An2E41O/pLEXqfFRWqGq/SxlE5PEUYTlvWsG2r8MswAVvkg==}
@@ -1011,7 +1012,7 @@ snapshots:
       css-tree: 3.2.1
     optional: true
 
-  '@ceri/app@file:../../../hAugust/ceri/sdk': {}
+  '@ceri/app@https://github.com/zeo/ceri/releases/download/v0.1.1/ceri-app-0.1.1.tgz': {}
 
   '@csstools/color-helpers@6.1.0':
     optional: true

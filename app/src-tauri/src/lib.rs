@@ -466,13 +466,20 @@ fn fit_main_window(app: &ceri::AppHandle, scale: f64) {
         return;
     };
     // the minimum stays as the window opened with it: ceri changes a size
-    // after that, not a minimum
-    let ((width, height), _) = main_fit(&monitor, scale);
-    windows.act("main", WindowAction::Size(width, height));
+    // after that, not a minimum. the size goes in physical pixels, as measured
+    let ((width, height), _) = main_physical(&monitor, scale);
+    windows.act("main", WindowAction::PhysicalSize(width.round() as u32, height.round() as u32));
 }
 
 /// the main window's size and minimum size on `monitor`, in logical pixels
 fn main_fit(monitor: &Monitor, scale: f64) -> ((u32, u32), (u32, u32)) {
+    let ((width, height), (min_width, min_height)) = main_physical(monitor, scale);
+    let logical = |physical: f64| (physical / monitor_scale(monitor)).round() as u32;
+    ((logical(width), logical(height)), (logical(min_width), logical(min_height)))
+}
+
+/// the main window's size and minimum size on `monitor`, in physical pixels
+fn main_physical(monitor: &Monitor, scale: f64) -> ((f64, f64), (f64, f64)) {
     // work_area is physical pixels; so are the sizes worked out below (css * scale)
     let (_, work) = monitor.work_area;
     let margin = 32.0 * scale;
@@ -482,8 +489,7 @@ fn main_fit(monitor: &Monitor, scale: f64) -> ((u32, u32), (u32, u32)) {
     // before its fixed columns overflow and clip, so hold the window minimum there
     let (width, min_width) = main_dimension(1180.0, 1080.0, available_width, scale);
     let (height, min_height) = main_dimension(820.0, 600.0, available_height, scale);
-    let logical = |physical: f64| (physical / monitor_scale(monitor)).round() as u32;
-    ((logical(width), logical(height)), (logical(min_width), logical(min_height)))
+    ((width, height), (min_width, min_height))
 }
 
 fn main_dimension(preferred: f64, minimum: f64, available: f64, webview_scale: f64) -> (f64, f64) {

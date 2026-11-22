@@ -632,8 +632,7 @@ fn fit_host(app: &ceri::AppHandle, windows: &WindowControl, count: usize, scale:
         .or_else(|| monitor.as_ref().map(crate::monitor_scale))
         .unwrap_or_else(current_scale);
     let size = host_size(count, scale);
-    let (width, height) = logical_size(size, monitor.as_ref());
-    windows.act(LABEL, WindowAction::Size(width, height));
+    windows.act(LABEL, WindowAction::PhysicalSize(size.0.round() as u32, size.1.round() as u32));
     if let Some(monitor) = &monitor {
         let (x, y) = corner_position(monitor, size);
         windows.act(LABEL, WindowAction::Position(x, y));

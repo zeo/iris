@@ -181,8 +181,8 @@ pub fn run() {
         // closing the main window drops its page; the tray, the card host
         // and the pipe client keep running until the tray's "Quit"
         .keep_running()
-        // --remote-debugging-port inspects the pages, as webview2's browser arguments did
-        .devtools(true)
+        // only a test build serves --remote-debugging-port, so no local process can drive a shipped iris
+        .devtools(cfg!(feature = "devtools"))
         .single_instance(|app, args, _| {
             if !args.iter().any(|arg| arg == "--tray") {
                 reveal(app);

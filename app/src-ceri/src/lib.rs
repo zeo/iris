@@ -38,8 +38,13 @@ fn handle() -> ceri::AppHandle {
     APP.get().expect("commands run after the app is built").clone()
 }
 
-static RUNTIME: LazyLock<tokio::runtime::Runtime> =
-    LazyLock::new(|| tokio::runtime::Runtime::new().expect("could not start the async runtime"));
+static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("could not start the async runtime")
+});
 
 /// where the pipe client and every async command run
 pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {

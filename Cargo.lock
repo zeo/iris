@@ -264,8 +264,8 @@ dependencies = [
 
 [[package]]
 name = "ceri"
-version = "0.1.7"
-source = "git+https://github.com/zeo/ceri?tag=v0.1.7#0a046c0e6853fee7681d4824da1f82a775f291c5"
+version = "0.1.8"
+source = "git+https://github.com/zeo/ceri?tag=v0.1.8#f4dce96925ee028fffb85b25d62232a7d538a985"
 dependencies = [
  "arboard",
  "ceri-build",
@@ -279,13 +279,13 @@ dependencies = [
 
 [[package]]
 name = "ceri-build"
-version = "0.1.7"
-source = "git+https://github.com/zeo/ceri?tag=v0.1.7#0a046c0e6853fee7681d4824da1f82a775f291c5"
+version = "0.1.8"
+source = "git+https://github.com/zeo/ceri?tag=v0.1.8#f4dce96925ee028fffb85b25d62232a7d538a985"
 
 [[package]]
 name = "ceri-engine"
-version = "0.1.7"
-source = "git+https://github.com/zeo/ceri?tag=v0.1.7#0a046c0e6853fee7681d4824da1f82a775f291c5"
+version = "0.1.8"
+source = "git+https://github.com/zeo/ceri?tag=v0.1.8#f4dce96925ee028fffb85b25d62232a7d538a985"
 dependencies = [
  "brotli-decompressor",
  "libmimalloc-sys",

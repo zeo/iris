@@ -122,15 +122,13 @@ platform implementations behind the same service surface.
 
 ## Installing
 
-Download the latest release from the repository's Releases page. On Windows,
-run the online or offline setup. It installs the app and the background engine
-together. On Linux, use the .deb, .rpm, or AppImage, or the Linux online or
-offline setup. If the engine is not running, the app offers to install it.
+Download the latest release from the repository's Releases page. On Windows or
+Linux, run the online or offline setup. It installs the app and the background
+engine together. If the engine is not running, the app offers to install it.
 
 ## Building
 
-Requires a recent stable Rust toolchain, Node 22, pnpm 9, and a ceri checkout
-at `../../hAugust/ceri`.
+Requires a recent stable Rust toolchain, Node 22, and pnpm 9.
 
 ```
 cd app

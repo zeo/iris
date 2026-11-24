@@ -8,7 +8,7 @@ members = [
     "crates/iris-plugin",
     "crates/iris-store",
     "service",
-    "app/src-tauri",
+    "app/src-ceri",
 ]
 
 [workspace.package]

@@ -212,7 +212,7 @@ pub fn run() {
     // a debug build loads the pages from `pnpm dev` so edits show up live
     #[cfg(debug_assertions)]
     let app = app.dev_url("http://localhost:1423");
-    // the tauri build kept the page's settings in webview2's storage, under the same identifier
+    // import page settings from prior webview2 storage under the same identifier
     #[cfg(windows)]
     let app = match ceri::dirs::local_data() {
         Some(data) => app.import_local_storage(

@@ -10,7 +10,7 @@ Iris is a Cargo workspace plus a ceri frontend:
 - `crates/` holds the platform-neutral core, the IPC protocol, the Windows and
   Linux backends, the plugin SDK, and the SQLite store.
 - `service/` is the privileged engine host (Windows service / systemd unit).
-- `app/` is the ceri + SolidJS desktop UI. `app/src-tauri/` is its Rust side.
+- `app/` is the ceri + SolidJS desktop UI. `app/src-ceri/` is its Rust side.
 
 The host compiles the built pages in, so `pnpm build` runs before any cargo
 command that builds `iris-app`. It looks for the engine at `engine/iris-engine`
@@ -18,8 +18,7 @@ beside its own executable, where a release package puts it.
 
 ## Building and running
 
-You need a recent stable Rust toolchain, Node 22, pnpm 9, and a ceri checkout
-at `../../hAugust/ceri`.
+You need a recent stable Rust toolchain, Node 22, and pnpm 9.
 
 ```
 cd app

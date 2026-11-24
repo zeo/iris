@@ -9,7 +9,6 @@ description = "Iris, a firewall and network monitor"
 
 [lib]
 name = "iris_app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
 name = "iris"

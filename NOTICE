@@ -11,7 +11,7 @@ IP-to-Country data
   https://db-ip.com/db/download/ip-to-country-lite
   Licensed under Creative Commons Attribution 4.0 International (CC-BY-4.0):
   https://creativecommons.org/licenses/by/4.0/
-  Shipped as app/src-tauri/resources/geo/dbip-country.mmdb and credited in the
+  Shipped as app/src-ceri/resources/geo/dbip-country.mmdb and credited in the
   application's Settings > About panel.
 
 Third-party software bundled with the Windows build:

@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@ceri/app':
-        specifier: https://github.com/zeo/ceri/releases/download/v0.1.5/ceri-app-0.1.5.tgz
-        version: https://github.com/zeo/ceri/releases/download/v0.1.5/ceri-app-0.1.5.tgz
+        specifier: https://github.com/zeo/ceri/releases/download/v0.1.6/ceri-app-0.1.6.tgz
+        version: https://github.com/zeo/ceri/releases/download/v0.1.6/ceri-app-0.1.6.tgz
       '@fontsource/geist-mono':
         specifier: ^5.3.0
         version: 5.3.0
@@ -145,9 +145,9 @@ packages:
     resolution: {integrity: sha512-ctxtJ/eA+t+6q2++vj5j7FYX3nRu311q1wfYH3xjlLOsczhlhxAg2FWNUXhpGvAw3BWo1xBcvOV6/YLc2r5FJw==}
     hasBin: true
 
-  '@ceri/app@https://github.com/zeo/ceri/releases/download/v0.1.5/ceri-app-0.1.5.tgz':
-    resolution: {integrity: sha512-gUbotb6yBTsSLh8oKdFtkBx6Y1fePNkkx2dki9wHR3lfBm91HjHa8KZVpwsZ1Ek+fVEhSz7DkqZTOuPiEc7Jsw==, tarball: https://github.com/zeo/ceri/releases/download/v0.1.5/ceri-app-0.1.5.tgz}
-    version: 0.1.5
+  '@ceri/app@https://github.com/zeo/ceri/releases/download/v0.1.6/ceri-app-0.1.6.tgz':
+    resolution: {integrity: sha512-OAVj2+KgqTJjj6vztMfItVHl3ihUrWMtMbmIdEkPtePqDg8Shs0qZ83eWzwmmLC81idx+a1qVNQXMMQ6snrZAQ==, tarball: https://github.com/zeo/ceri/releases/download/v0.1.6/ceri-app-0.1.6.tgz}
+    version: 0.1.6
 
   '@csstools/color-helpers@6.1.0':
     resolution: {integrity: sha512-064IFJdjTfUqnjpCVpMOdbr8FLQBhinbZj6yRv2An2E41O/pLEXqfFRWqGq/SxlE5PEUYTlvWsG2r8MswAVvkg==}
@@ -1086,7 +1086,7 @@ snapshots:
       css-tree: 3.2.1
     optional: true
 
-  '@ceri/app@https://github.com/zeo/ceri/releases/download/v0.1.5/ceri-app-0.1.5.tgz': {}
+  '@ceri/app@https://github.com/zeo/ceri/releases/download/v0.1.6/ceri-app-0.1.6.tgz': {}
 
   '@csstools/color-helpers@6.1.0':
     optional: true

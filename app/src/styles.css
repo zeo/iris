@@ -2106,6 +2106,20 @@ html {
   content-visibility: auto;
   contain-intrinsic-block-size: 49px;
 }
+.protect-table tbody tr.protect-spacer {
+  content-visibility: visible;
+  contain-intrinsic-block-size: auto;
+  pointer-events: none;
+}
+.protect-table tbody tr.protect-spacer td,
+.protect-table tbody tr.protect-spacer:hover td {
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 0;
+  line-height: 0;
+}
 .protect-table tr.dormant td {
   color: var(--muted);
 }

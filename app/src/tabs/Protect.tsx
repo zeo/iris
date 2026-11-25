@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { Key } from "@solid-primitives/keyed";
 import { invoke, revealItemInDir } from "../lib/host";
 import { AppIcon } from "../components/AppIcon";
@@ -78,6 +78,47 @@ export function isDormantRule(row: AppRow, direction: Direction, active: string 
 
 const DAY_MS = 86_400_000;
 const INACTIVE_AFTER_MS = 30 * DAY_MS;
+export const PROTECT_ROW_HEIGHT = 49;
+export const PROTECT_OVERSCAN = 7;
+
+export interface RowWindow {
+  start: number;
+  end: number;
+  topPx: number;
+  bottomPx: number;
+}
+
+export function visibleRowWindow(
+  total: number,
+  scrollTop: number,
+  viewportHeight: number,
+  sectionOffsetTop: number,
+  rowHeight = PROTECT_ROW_HEIGHT,
+  overscan = PROTECT_OVERSCAN,
+): RowWindow {
+  if (total <= 0) return { start: 0, end: 0, topPx: 0, bottomPx: 0 };
+  const step = Math.max(1, rowHeight);
+  const visibleStart = scrollTop - sectionOffsetTop;
+  const visibleEnd = visibleStart + Math.max(0, viewportHeight);
+  const rawStart = Math.floor(visibleStart / step) - overscan;
+  const rawEnd = Math.ceil(visibleEnd / step) + overscan;
+  const start = Math.max(0, Math.min(total, rawStart));
+  const end = Math.max(start, Math.min(total, rawEnd));
+  return {
+    start,
+    end,
+    topPx: start * step,
+    bottomPx: (total - end) * step,
+  };
+}
+
+const rowWindowEqual = (a: RowWindow, b: RowWindow) =>
+  a.start === b.start && a.end === b.end && a.topPx === b.topPx && a.bottomPx === b.bottomPx;
+
+const compareName =
+  typeof Intl !== "undefined" && typeof Intl.Collator === "function"
+    ? new Intl.Collator().compare
+    : (a: string, b: string) => a.localeCompare(b);
 
 // sort apps with no recent network activity into their own group at
 // the bottom, where they can be cleared out individually or all at once. iris
@@ -182,39 +223,152 @@ export function Protect() {
 
     const needle = query().trim().toLowerCase();
     const mode = filter();
-    return [...byPath.values()]
-      .filter((row) => mode === "all" || (mode === "active" ? row.sample?.online : row.rules.length > 0))
-      .filter((row) => {
-        if (!needle) return true;
-        const name = row.sample?.name ?? row.name ?? fileName(row.app);
-        return name.toLowerCase().includes(needle) || row.app.toLowerCase().includes(needle) || hostsFor(row.sample).toLowerCase().includes(needle);
-      })
-      .sort((a, b) => {
-        const name = (row: AppRow) => row.sample?.name ?? row.name ?? fileName(row.app);
-        const total = (row: AppRow) => (row.sample?.total.recv ?? 0) + (row.sample?.total.sent ?? 0);
-        let order = 0;
-        switch (sort()) {
-          case "down":
-            order = (a.sample?.rate_recv ?? 0) - (b.sample?.rate_recv ?? 0);
-            break;
-          case "up":
-            order = (a.sample?.rate_sent ?? 0) - (b.sample?.rate_sent ?? 0);
-            break;
-          case "session":
-            order = total(a) - total(b);
-            break;
-          default:
-            order = name(a).localeCompare(name(b));
+    const sortKey = sort();
+    const dir = sortDirection() === "desc" ? -1 : 1;
+    const entries: Array<{ row: AppRow; label: string; metric: number }> = [];
+
+    for (const row of byPath.values()) {
+      if (mode === "active" && !row.sample?.online) continue;
+      if (mode === "ruled" && row.rules.length === 0) continue;
+      const label = row.sample?.name ?? row.name ?? fileName(row.app);
+      if (needle) {
+        if (
+          !label.toLowerCase().includes(needle) &&
+          !row.app.toLowerCase().includes(needle) &&
+          !hostsFor(row.sample).toLowerCase().includes(needle)
+        ) {
+          continue;
         }
-        if (sortDirection() === "desc") order *= -1;
-        return order || name(a).localeCompare(name(b));
+      }
+      let metric = 0;
+      if (sortKey === "down") metric = row.sample?.rate_recv ?? 0;
+      else if (sortKey === "up") metric = row.sample?.rate_sent ?? 0;
+      else if (sortKey === "session") metric = (row.sample?.total.recv ?? 0) + (row.sample?.total.sent ?? 0);
+      entries.push({ row, label, metric });
+    }
+
+    if (sortKey === "app") {
+      entries.sort((a, b) => (a.label === b.label ? 0 : compareName(a.label, b.label) * dir));
+    } else {
+      entries.sort((a, b) => {
+        const order = (a.metric - b.metric) * dir;
+        if (order !== 0) return order;
+        return a.label === b.label ? 0 : compareName(a.label, b.label);
       });
+    }
+    return entries.map((entry) => entry.row);
   });
 
   // active rows first, then the inactive group. both keep the
   // chosen sort within the group.
-  const liveRows = createMemo(() => appRows().filter((row) => !isInactive(row, now())));
-  const inactiveRows = createMemo(() => appRows().filter((row) => isInactive(row, now())));
+  const partitionedRows = createMemo(() => {
+    const rows = appRows();
+    const current = now();
+    const live: AppRow[] = [];
+    const inactive: AppRow[] = [];
+    for (const row of rows) {
+      if (isInactive(row, current)) inactive.push(row);
+      else live.push(row);
+    }
+    return { live, inactive };
+  });
+  const liveRows = () => partitionedRows().live;
+  const inactiveRows = () => partitionedRows().inactive;
+
+  let sectionEl: HTMLElement | undefined;
+  let scroller: HTMLElement | null = null;
+  const [tbodyEl, setTbodyEl] = createSignal<HTMLTableSectionElement>();
+  const [scrollTop, setScrollTop] = createSignal(0);
+  const [viewportHeight, setViewportHeight] = createSignal(
+    typeof window !== "undefined" ? window.innerHeight : 720,
+  );
+  const [tbodyOffsetTop, setTbodyOffsetTop] = createSignal(0);
+
+  const measureScrollBounds = () => {
+    if (!scroller) scroller = (sectionEl?.closest(".content") as HTMLElement | null) ?? null;
+    if (!scroller) return;
+    setScrollTop(scroller.scrollTop);
+    if (scroller.clientHeight > 0) setViewportHeight(scroller.clientHeight);
+    const body = tbodyEl();
+    if (body) {
+      const offset =
+        body.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+      setTbodyOffsetTop(Math.max(0, offset));
+    }
+  };
+
+  onMount(() => {
+    scroller = (sectionEl?.closest(".content") as HTMLElement | null) ?? null;
+    if (!scroller) return;
+    const onScroll = () => setScrollTop(scroller!.scrollTop);
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", measureScrollBounds);
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(measureScrollBounds);
+      observer.observe(scroller);
+    }
+    measureScrollBounds();
+    const frame = requestAnimationFrame(measureScrollBounds);
+    onCleanup(() => {
+      cancelAnimationFrame(frame);
+      scroller?.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", measureScrollBounds);
+      observer?.disconnect();
+    });
+  });
+
+  createEffect(() => {
+    // re-measure tbody offset when the table mounts or blocks above it change height
+    const body = tbodyEl();
+    adding();
+    pendingProposals().length;
+    caps().length;
+    specialRules().length;
+    toolError();
+    toolNote();
+    if (!body) return;
+    measureScrollBounds();
+  });
+
+  createEffect(() => {
+    // sync scrollTop when filters shrink the table and clamp scroll position
+    query();
+    filter();
+    liveRows().length;
+    inactiveRows().length;
+    showInactive();
+    if (!scroller) return;
+    const frame = requestAnimationFrame(() => {
+      if (scroller) setScrollTop(scroller.scrollTop);
+    });
+    onCleanup(() => cancelAnimationFrame(frame));
+  });
+
+  const liveWindow = createMemo(
+    () => visibleRowWindow(liveRows().length, scrollTop(), viewportHeight(), tbodyOffsetTop()),
+    undefined,
+    { equals: rowWindowEqual },
+  );
+  const visibleLive = createMemo(() => {
+    const { start, end } = liveWindow();
+    return liveRows().slice(start, end);
+  });
+
+  const inactiveWindow = createMemo(
+    () => {
+      if (!showInactive()) return { start: 0, end: 0, topPx: 0, bottomPx: 0 };
+      const offset = tbodyOffsetTop() + (liveRows().length + 1) * PROTECT_ROW_HEIGHT;
+      return visibleRowWindow(inactiveRows().length, scrollTop(), viewportHeight(), offset);
+    },
+    undefined,
+    { equals: rowWindowEqual },
+  );
+  const visibleInactive = createMemo(() => {
+    if (!showInactive()) return [];
+    const { start, end } = inactiveWindow();
+    return inactiveRows().slice(start, end);
+  });
 
   const sweepInactive = async () => {
     const stale = inactiveRows();
@@ -341,7 +495,7 @@ export function Protect() {
   };
 
   return (
-    <section class="protect-console">
+    <section class="protect-console" ref={sectionEl}>
       <div class="protect-deck">
         <div class="protect-gauge">
           <span class="label">Enforcement</span>
@@ -609,8 +763,16 @@ export function Protect() {
                 <SortHeader label="session" value="session" numeric sort={sort()} direction={sortDirection()} choose={chooseSort} />
               </tr>
             </thead>
-            <tbody>
-              <Key each={liveRows()} by={(row) => pathKey(row.app)}>
+            <tbody ref={setTbodyEl}>
+              <Show when={liveWindow().topPx > 0}>
+                <tr class="protect-spacer" aria-hidden="true">
+                  <td
+                    colSpan={8}
+                    style={{ height: `${liveWindow().topPx}px`, padding: "0", border: "0" }}
+                  />
+                </tr>
+              </Show>
+              <Key each={visibleLive()} by={(row) => pathKey(row.app)}>
                 {(row) => (
                   <AppRowView
                     row={row()}
@@ -620,6 +782,14 @@ export function Protect() {
                   />
                 )}
               </Key>
+              <Show when={liveWindow().bottomPx > 0}>
+                <tr class="protect-spacer" aria-hidden="true">
+                  <td
+                    colSpan={8}
+                    style={{ height: `${liveWindow().bottomPx}px`, padding: "0", border: "0" }}
+                  />
+                </tr>
+              </Show>
 
               <Show when={inactiveRows().length > 0}>
                 <tr class="protect-group">
@@ -645,7 +815,15 @@ export function Protect() {
                   </td>
                 </tr>
                 <Show when={showInactive()}>
-                  <Key each={inactiveRows()} by={(row) => pathKey(row.app)}>
+                  <Show when={inactiveWindow().topPx > 0}>
+                    <tr class="protect-spacer" aria-hidden="true">
+                      <td
+                        colSpan={8}
+                        style={{ height: `${inactiveWindow().topPx}px`, padding: "0", border: "0" }}
+                      />
+                    </tr>
+                  </Show>
+                  <Key each={visibleInactive()} by={(row) => pathKey(row.app)}>
                     {(row) => (
                       <AppRowView
                         row={row()}
@@ -655,6 +833,18 @@ export function Protect() {
                       />
                     )}
                   </Key>
+                  <Show when={inactiveWindow().bottomPx > 0}>
+                    <tr class="protect-spacer" aria-hidden="true">
+                      <td
+                        colSpan={8}
+                        style={{
+                          height: `${inactiveWindow().bottomPx}px`,
+                          padding: "0",
+                          border: "0",
+                        }}
+                      />
+                    </tr>
+                  </Show>
                 </Show>
               </Show>
             </tbody>

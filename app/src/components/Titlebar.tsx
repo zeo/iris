@@ -34,7 +34,7 @@ export function Titlebar(props: {
           <span class="val" classList={{ hot: props.up > 0 }}>{rate(props.up)}</span>
         </span>
         <div class="spark">
-          <Sparkline data={engine.ring} />
+          <Sparkline data={engine.ring} theme={props.theme} />
         </div>
       </div>
       <div class="wc">

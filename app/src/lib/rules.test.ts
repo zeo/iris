@@ -3,7 +3,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("./host", () => ({ invoke }));
 
-import { blockHosts, blocksHosts, coversWholeApp, describeLifetime, describeScope, isBlocked, refreshRules } from "./rules";
+import {
+  blockHosts,
+  blocksHosts,
+  capFor,
+  coversWholeApp,
+  describeLifetime,
+  describeScope,
+  isBlocked,
+  refreshCaps,
+  refreshRules,
+} from "./rules";
 
 const blockedRule = {
   id: 1,
@@ -82,5 +92,17 @@ describe("host blocks", () => {
       options: { remote: "2001:db8::7" },
     });
     expect(invoke.mock.calls.filter(([command]) => command === "rule_add")).toHaveLength(1);
+  });
+});
+
+describe("rate cap index", () => {
+  it("resolves caps in constant time respecting platform path casing", async () => {
+    vi.stubGlobal("navigator", { userAgent: "Windows NT 10.0" });
+    invoke.mockResolvedValueOnce([
+      { app: "C:\\Program Files\\App\\app.exe", up_bytes_per_sec: 1024, down_bytes_per_sec: 2048 },
+    ]);
+    await refreshCaps();
+    expect(capFor("c:\\program files\\app\\app.exe")?.down_bytes_per_sec).toBe(2048);
+    expect(capFor("c:\\program files\\other\\other.exe")).toBeUndefined();
   });
 });

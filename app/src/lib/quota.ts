@@ -1,4 +1,4 @@
-import { createEffect, createSignal } from "solid-js";
+import { batch, createEffect, createSignal } from "solid-js";
 import { invoke } from "./host";
 import { engine } from "./engine";
 import { pathKey } from "./path";
@@ -36,17 +36,18 @@ export interface Quota {
 export const GB = 1_000_000_000;
 const POLL_MS = 60 * 1000;
 
-const [quotas, setQuotas] = createSignal<Quota[]>([]);
+const [planQuota, setPlanQuota] = createSignal<Quota | undefined>(undefined);
+const [quotasByKey, setQuotasByKey] = createSignal<Map<string, Quota>>(new Map());
 
 export function formatGb(bytesValue: number): string {
   return `${(bytesValue / GB).toFixed(1)} GB`;
 }
 
-const plan = () => quotas().find((q) => q.app === null);
+const plan = () => planQuota();
 
 export const quota = {
   plan,
-  forApp: (path: string) => quotas().find((q) => q.app !== null && pathKey(q.app) === pathKey(path)),
+  forApp: (path: string) => quotasByKey().get(pathKey(path)),
   fraction: () => {
     const p = plan();
     return p ? Math.min(p.used / p.limit.bytes, 1) : 0;
@@ -61,7 +62,17 @@ export const quota = {
 export async function refreshQuotas(): Promise<boolean> {
   if (!engine.online()) return false;
   try {
-    setQuotas(await invoke<Quota[]>("list_quotas"));
+    const next = await invoke<Quota[]>("list_quotas");
+    let foundPlan: Quota | undefined;
+    const map = new Map<string, Quota>();
+    for (const q of next) {
+      if (q.app === null) foundPlan = q;
+      else map.set(pathKey(q.app), q);
+    }
+    batch(() => {
+      setPlanQuota(foundPlan);
+      setQuotasByKey(map);
+    });
     return true;
   } catch {
     return false;

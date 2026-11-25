@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { invoke, listen } from "./host";
 import type { Sample } from "../components/BandwidthGraph";
 import { upsertProposal, type RuleProposal } from "./proposals";
@@ -120,6 +120,18 @@ function refreshHealth() {
 let started = false;
 let tickCadenceMs = 1000;
 let lastVisibleTick = 0;
+let lastRingAtMs = 0;
+const [activityExpanded, setActivityExpandedSignal] = createSignal(false);
+
+export { activityExpanded };
+
+export function setActivityExpanded(expanded: boolean) {
+  if (expanded && !activityExpanded()) {
+    // accept an immediate detailed tick re-emitted for the current timestamp
+    lastVisibleTick = 0;
+  }
+  setActivityExpandedSignal(expanded);
+}
 
 export function setTickCadence(milliseconds: number) {
   tickCadenceMs = milliseconds;
@@ -155,20 +167,29 @@ export function initEngine() {
       // the reconnect's first tick must land immediately, not wait out a stale
       // cadence window measured against the pre-outage stamp
       lastVisibleTick = 0;
+      lastRingAtMs = 0;
     }
   });
 
   listen<StatsTick>("engine-tick", (e) => {
     const t = e.payload;
-    // an out-of-order stamp (wall clock stepped back after sleep) must still
-    // pass the gate, or every view freezes on stale data until time catches up
-    if (t.at_ms < lastVisibleTick || t.at_ms - lastVisibleTick >= tickCadenceMs) {
-      setTick(t);
-      lastVisibleTick = t.at_ms;
-    }
-    setRing((r) => {
-      const next = [...r, { sent: t.total_rate_sent, recv: t.total_rate_recv }];
-      return next.length > RING ? next.slice(-RING) : next;
+    batch(() => {
+      // an out-of-order stamp (wall clock stepped back after sleep) must still
+      // pass the gate, or every view freezes on stale data until time catches up
+      if (t.at_ms < lastVisibleTick || t.at_ms - lastVisibleTick >= tickCadenceMs) {
+        setTick(t);
+        lastVisibleTick = t.at_ms;
+      }
+      if (t.at_ms !== lastRingAtMs) {
+        lastRingAtMs = t.at_ms;
+        const sample = { sent: t.total_rate_sent, recv: t.total_rate_recv };
+        setRing((r) => {
+          if (r.length < RING) return [...r, sample];
+          const next = r.slice(1);
+          next.push(sample);
+          return next;
+        });
+      }
     });
   });
 

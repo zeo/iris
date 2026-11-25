@@ -6,24 +6,29 @@ import { rateUnits } from "./settings";
 
 const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
 const BIT_UNITS = ["bit", "Kbit", "Mbit", "Gbit", "Tbit"];
+const LN_1024 = Math.log(1024);
+const LN_1000 = Math.log(1000);
 
-function scale(n: number, base: number, units: string[]): string {
+function scale(n: number, base: number, lnBase: number, units: string[]): string {
   if (n < 1) return `0 ${units[0]}`;
   // nudge past float error at exact powers so 1024 reads "1.0 KiB", not "1024 B"
-  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(base) + 1e-9));
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / lnBase + 1e-9));
   const v = n / Math.pow(base, i);
   const dp = v >= 100 || i === 0 ? 0 : 1;
   return `${v.toFixed(dp)} ${units[i]}`;
 }
 
 export function bytes(n: number): string {
-  return scale(n, 1024, BYTE_UNITS);
+  if (n < 1) return "0 B";
+  return scale(n, 1024, LN_1024, BYTE_UNITS);
 }
 
 export function rate(bytesPerSec: number): string {
   if (rateUnits() === "bits") {
+    if (bytesPerSec * 8 < 1) return "0 bit/s";
     // bits are quoted decimally (1 Mbit/s = 10^6 bit/s)
-    return `${scale(bytesPerSec * 8, 1000, BIT_UNITS)}/s`;
+    return `${scale(bytesPerSec * 8, 1000, LN_1000, BIT_UNITS)}/s`;
   }
-  return `${bytes(bytesPerSec)}/s`;
+  if (bytesPerSec < 1) return "0 B/s";
+  return `${scale(bytesPerSec, 1024, LN_1024, BYTE_UNITS)}/s`;
 }

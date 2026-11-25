@@ -7,30 +7,59 @@ function css(el: HTMLElement, name: string): string {
 
 // the mini instrument in the always-on readout. idles on a faint powered-on
 // marker and plots the recent ring once live.
-export function Sparkline(props: { data?: () => Sample[] }) {
+export function Sparkline(props: { data?: () => Sample[]; theme?: string }) {
   let canvas!: HTMLCanvasElement;
 
   onMount(() => {
     const ctx = canvas.getContext("2d")!;
     let raf = 0;
-    let looping = false;
+    let resizePending = false;
+    let cachedW = 0;
+    let cachedH = 0;
+    let cachedDpr = 0;
+    let cachedTheme: string | undefined;
+    let steel = "#9e9e9e";
+    let live = "#f4f4f4";
 
-    const frame = () => {
+    const readSize = () => {
+      cachedW = canvas.clientWidth;
+      cachedH = canvas.clientHeight;
+      cachedDpr = window.devicePixelRatio || 1;
+    };
+
+    const readColors = () => {
+      const theme = document.documentElement.dataset.theme;
+      if (theme === cachedTheme) return;
+      cachedTheme = theme;
+      steel = css(canvas, "--steel-dim") || "#9e9e9e";
+      live = css(canvas, "--live") || "#f4f4f4";
+    };
+
+    const draw = (samples: Sample[]) => {
       const dpr = window.devicePixelRatio || 1;
-      const w = canvas.clientWidth;
-      const h = canvas.clientHeight;
-      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-        canvas.width = w * dpr;
-        canvas.height = h * dpr;
+      if (cachedW <= 0 || cachedH <= 0 || dpr !== cachedDpr) {
+        readSize();
       }
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (cachedW <= 0 || cachedH <= 0) {
+        scheduleResize();
+        return;
+      }
+      const w = cachedW;
+      const h = cachedH;
+      // match integer canvas backing dimensions so fractional dpr does not reallocate every tick
+      const pw = Math.trunc(w * cachedDpr);
+      const ph = Math.trunc(h * cachedDpr);
+      if (canvas.width !== pw || canvas.height !== ph) {
+        canvas.width = pw;
+        canvas.height = ph;
+      }
+      ctx.setTransform(cachedDpr, 0, 0, cachedDpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
 
-      const steel = css(canvas, "--steel-dim") || "#9e9e9e";
-      const live = css(canvas, "--live") || "#f4f4f4";
-      const samples = props.data?.() ?? [];
+      readColors();
 
-      if (samples.length < 2) {
+      const n = samples.length;
+      if (n < 2) {
         const midY = h / 2 + 0.5;
         ctx.strokeStyle = steel;
         ctx.globalAlpha = 0.35;
@@ -39,47 +68,53 @@ export function Sparkline(props: { data?: () => Sample[] }) {
         ctx.moveTo(0, midY);
         ctx.lineTo(w, midY);
         ctx.stroke();
-        ctx.globalAlpha = 1;
         ctx.fillStyle = live;
         ctx.globalAlpha = 0.9;
         ctx.beginPath();
         ctx.arc(w * 0.16, midY, 1.6, 0, Math.PI * 2);
         ctx.fill();
         ctx.globalAlpha = 1;
-        looping = false;
         return;
       }
 
-      const peak = Math.max(1, ...samples.map((s) => s.sent + s.recv));
-      const n = samples.length;
+      let peak = 1;
+      for (let i = 0; i < n; i++) {
+        const total = samples[i].sent + samples[i].recv;
+        if (total > peak) peak = total;
+      }
+      const span = h - 3;
+      const denom = n - 1;
       ctx.strokeStyle = live;
       ctx.lineWidth = 1.2;
       ctx.beginPath();
-      samples.forEach((s, i) => {
-        const x = (i / (n - 1)) * w;
-        const y = h - ((s.sent + s.recv) / peak) * (h - 3) - 1;
-        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-      });
-      ctx.stroke();
-      looping = false;
-    };
-
-    const request = () => {
-      if (!looping) {
-        looping = true;
-        raf = requestAnimationFrame(frame);
+      for (let i = 0; i < n; i++) {
+        const x = (i / denom) * w;
+        const y = h - ((samples[i].sent + samples[i].recv) / peak) * span - 1;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
       }
+      ctx.stroke();
     };
 
-    // repaint only when the ring changes
+    const scheduleResize = () => {
+      if (resizePending) return;
+      resizePending = true;
+      raf = requestAnimationFrame(() => {
+        resizePending = false;
+        readSize();
+        draw(props.data?.() ?? []);
+      });
+    };
+
+    // draw synchronously inside the tick batch so readout and sparkline share one frame
     createEffect(() => {
-      props.data?.();
-      request();
+      props.theme;
+      draw(props.data?.() ?? []);
     });
-    window.addEventListener("resize", request);
+    window.addEventListener("resize", scheduleResize);
     onCleanup(() => {
       cancelAnimationFrame(raf);
-      window.removeEventListener("resize", request);
+      window.removeEventListener("resize", scheduleResize);
     });
   });
 

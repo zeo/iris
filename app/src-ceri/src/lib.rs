@@ -239,7 +239,7 @@ fn commands(app: ceri::App) -> ceri::App {
     app.blocking_json_command("engine_status", ceri::command!(|| ipc::engine_status()))
         .blocking_json_command(
             "set_tick_details",
-            ceri::command!(|enabled: bool, cadence_ms: u64| ipc::set_tick_details(enabled, cadence_ms)),
+            ceri::command!(|enabled: bool, cadence_ms: u64| ipc::set_tick_details(handle(), enabled, cadence_ms)),
         )
         .blocking_json_command("list_rules", ceri::command!(|| wait(ipc::list_rules())))
         .blocking_json_command("list_apps", ceri::command!(|| wait(ipc::list_apps())))

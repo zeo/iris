@@ -1,14 +1,20 @@
-import { createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from "solid-js";
 import { Key } from "@solid-primitives/keyed";
 import { Icon } from "../components/Icon";
 import { AppIcon } from "../components/AppIcon";
 import { ConnDetails } from "../components/ConnDetails";
-import { engine, type AppSample, type Conn } from "../lib/engine";
-import { blockApp, caps, downloadLimitsSupported, isBlocked, setCap, unblockApp } from "../lib/rules";
+import { engine, setActivityExpanded, type AppSample, type Conn } from "../lib/engine";
+import { blockApp, capFor, downloadLimitsSupported, isBlocked, setCap, unblockApp } from "../lib/rules";
 import { formatGb, GB, quota, setQuota, throttleRate, type QuotaPeriod } from "../lib/quota";
 import { persisted } from "../lib/persist";
 import { bytes, rate } from "../lib/format";
-import { fileName, pathKey } from "../lib/path";
+import { fileName } from "../lib/path";
+
+const compareName =
+  typeof Intl !== "undefined" && typeof Intl.Collator === "function"
+    ? new Intl.Collator().compare
+    : (a: string, b: string) => a.localeCompare(b);
+
 function label(s: AppSample): string {
   return s.name ?? fileName(s.app);
 }
@@ -65,30 +71,52 @@ export function Activity() {
     }
   };
 
+  createEffect(() => {
+    setActivityExpanded(openApps().size > 0);
+  });
+  onCleanup(() => setActivityExpanded(false));
+
   const rows = createMemo(() => {
     const needle = q().trim().toLowerCase();
     const f = filter();
-    let list = engine.apps();
-    if (f === "online") list = list.filter((s) => s.online);
-    else if (f === "offline") list = list.filter((s) => !s.online);
-    if (needle)
-      list = list.filter(
-        (s) => label(s).toLowerCase().includes(needle) || s.app.toLowerCase().includes(needle),
-      );
     const so = sort();
-    return [...list].sort((a, b) => {
+    const source = engine.apps();
+    const filtered: AppSample[] = [];
+    for (const s of source) {
+      if (f === "online" && !s.online) continue;
+      if (f === "offline" && s.online) continue;
+      if (needle && !label(s).toLowerCase().includes(needle) && !s.app.toLowerCase().includes(needle)) {
+        continue;
+      }
+      filtered.push(s);
+    }
+    if (so === "name") {
+      const entries = filtered.map((sample) => ({ sample, text: label(sample) }));
+      entries.sort((a, b) => (a.text === b.text ? 0 : compareName(a.text, b.text)));
+      return entries.map((entry) => entry.sample);
+    }
+    filtered.sort((a, b) => {
       switch (so) {
         case "down": return b.rate_recv - a.rate_recv;
         case "up": return b.rate_sent - a.rate_sent;
         case "conns": return b.connections - a.connections;
-        case "name": return label(a).localeCompare(label(b));
         default: return b.rate_recv + b.rate_sent - (a.rate_recv + a.rate_sent);
       }
     });
+    return filtered;
   });
 
-  const onlineCount = () => engine.apps().filter((s) => s.online).length;
-  const connTotal = () => engine.apps().reduce((n, s) => n + s.connections, 0);
+  const summary = createMemo(() => {
+    let online = 0;
+    let conns = 0;
+    for (const s of engine.apps()) {
+      if (s.online) online++;
+      conns += s.connections;
+    }
+    return { online, conns };
+  });
+  const onlineCount = () => summary().online;
+  const connTotal = () => summary().conns;
   const th = (key: Sort, cls: string, text: string) => (
     <th class={cls} classList={{ sorted: sort() === key }} aria-sort={sort() === key ? "descending" : "none"}>
       <button class="col-sort" onClick={() => setSort(key)}>
@@ -160,80 +188,94 @@ export function Activity() {
             </thead>
             <tbody>
               <Key each={rows()} by={(a) => a.app}>
-                {(app) => (
-                  <>
-                    <tr class="app-row" classList={{ off: !app().online }} onClick={() => toggleApp(app().app)}>
-                      <td>
-                        <div class="app-cell">
-                          <button class="chev" classList={{ open: openApps().has(app().app) }} aria-label="expand">
-                            <Icon name="chevron" size={12} />
-                          </button>
-                          <AppIcon path={app().app} />
-                          <span class="name" classList={{ offline: !app().online, blocked: isBlocked(app().app) }}>{label(app())}</span>
-                          <span class="grow" />
-                          <button
-                            class="block-btn"
-                            classList={{ on: isBlocked(app().app) }}
-                            title={isBlocked(app().app) ? "unblock" : "block"}
-                            aria-label={`${isBlocked(app().app) ? "Unblock" : "Block"} ${label(app())}`}
-                            aria-busy={pendingRules().has(app().app)}
-                            disabled={pendingRules().has(app().app)}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void toggleBlock(app());
-                            }}
-                          >
-                            <Icon name="block" size={13} />
-                          </button>
-                        </div>
-                      </td>
-                      <td class="num">{rate(app().rate_recv)}</td>
-                      <td class="num">{rate(app().rate_sent)}</td>
-                      <LimitCell app={app().app} name={label(app())} dir="down" onError={setRuleError} />
-                      <LimitCell app={app().app} name={label(app())} dir="up" onError={setRuleError} />
-                      <QuotaCell app={app().app} name={label(app())} onError={setRuleError} />
-                      <td class="num">{app().connections}</td>
-                      <td class="num">{bytes(app().total.sent + app().total.recv)}</td>
-                    </tr>
-                    <Show when={openApps().has(app().app)}>
-                      <Key each={app().processes} by={(p) => p.pid}>
-                        {(proc) => (
-                          <>
-                            <tr class="proc-row" classList={{ off: !proc().online }} onClick={() => toggleProc(proc().pid)}>
-                              <td>
-                                <div class="proc-cell">
-                                  <button class="chev" classList={{ open: openProcs().has(proc().pid) }} disabled={proc().conns.length === 0} aria-label="expand">
-                                    <Icon name="chevron" size={12} />
-                                  </button>
-                                  <Icon name="cpu" class="proc-ico" size={13} />
-                                  <span class="name" classList={{ offline: !proc().online }}>
-                                    {proc().service ?? `Process ${proc().pid}`}
-                                  </span>
-                                  <Show when={proc().service}>
-                                    <span class="pid">#{proc().pid}</span>
+                {(app) => {
+                  // the row key stays fixed across ticks, so read it once and memoize slow-changing fields
+                  const appPath = untrack(() => app().app);
+                  const appName = createMemo(() => label(app()));
+                  const online = createMemo(() => app().online);
+                  const blocked = createMemo(() => isBlocked(appPath));
+                  const expanded = createMemo(() => openApps().has(appPath));
+                  const pending = createMemo(() => pendingRules().has(appPath));
+                  return (
+                    <>
+                      <tr class="app-row" classList={{ off: !online() }} onClick={() => toggleApp(appPath)}>
+                        <td>
+                          <div class="app-cell">
+                            <button class="chev" classList={{ open: expanded() }} aria-label="expand">
+                              <Icon name="chevron" size={12} />
+                            </button>
+                            <AppIcon path={appPath} />
+                            <span class="name" classList={{ offline: !online(), blocked: blocked() }}>{appName()}</span>
+                            <span class="grow" />
+                            <button
+                              class="block-btn"
+                              classList={{ on: blocked() }}
+                              title={blocked() ? "unblock" : "block"}
+                              aria-label={`${blocked() ? "Unblock" : "Block"} ${appName()}`}
+                              aria-busy={pending()}
+                              disabled={pending()}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void toggleBlock(app());
+                              }}
+                            >
+                              <Icon name="block" size={13} />
+                            </button>
+                          </div>
+                        </td>
+                        <td class="num">{rate(app().rate_recv)}</td>
+                        <td class="num">{rate(app().rate_sent)}</td>
+                        <LimitCell app={appPath} name={appName()} dir="down" onError={setRuleError} />
+                        <LimitCell app={appPath} name={appName()} dir="up" onError={setRuleError} />
+                        <QuotaCell app={appPath} name={appName()} onError={setRuleError} />
+                        <td class="num">{app().connections}</td>
+                        <td class="num">{bytes(app().total.sent + app().total.recv)}</td>
+                      </tr>
+                      <Show when={expanded()}>
+                        <Key each={app().processes} by={(p) => p.pid}>
+                          {(proc) => {
+                            const pid = untrack(() => proc().pid);
+                            const procOnline = createMemo(() => proc().online);
+                            const procOpen = createMemo(() => openProcs().has(pid));
+                            return (
+                              <>
+                                <tr class="proc-row" classList={{ off: !procOnline() }} onClick={() => toggleProc(pid)}>
+                                  <td>
+                                    <div class="proc-cell">
+                                      <button class="chev" classList={{ open: procOpen() }} disabled={proc().conns.length === 0} aria-label="expand">
+                                        <Icon name="chevron" size={12} />
+                                      </button>
+                                      <Icon name="cpu" class="proc-ico" size={13} />
+                                      <span class="name" classList={{ offline: !procOnline() }}>
+                                        {proc().service ?? `Process ${pid}`}
+                                      </span>
+                                      <Show when={proc().service}>
+                                        <span class="pid">#{pid}</span>
+                                      </Show>
+                                    </div>
+                                  </td>
+                                  <td class="num">{rate(proc().rate_recv)}</td>
+                                  <td class="num">{rate(proc().rate_sent)}</td>
+                                  <td colSpan={3} />
+                                  <td class="num">{proc().conns.length}</td>
+                                  <td class="num">{bytes(proc().total.sent + proc().total.recv)}</td>
+                                </tr>
+                                <Show when={procOpen()}>
+                                  <Key each={proc().conns} by={(c) => `${c.remote.protocol}:${c.remote.addr}:${c.remote.port}:${c.local_port}`}>
+                                    {(c) => <ConnRow c={c()} onSelect={() => setSel({ app: appPath, conn: c() })} />}
+                                  </Key>
+                                  <Show when={proc().conns.length === 0}>
+                                    <tr class="conn-row"><td colSpan={8} class="conn-empty">no active connections</td></tr>
                                   </Show>
-                                </div>
-                              </td>
-                              <td class="num">{rate(proc().rate_recv)}</td>
-                              <td class="num">{rate(proc().rate_sent)}</td>
-                              <td colSpan={3} />
-                              <td class="num">{proc().conns.length}</td>
-                              <td class="num">{bytes(proc().total.sent + proc().total.recv)}</td>
-                            </tr>
-                            <Show when={openProcs().has(proc().pid)}>
-                              <Key each={proc().conns} by={(c) => `${c.remote.protocol}:${c.remote.addr}:${c.remote.port}:${c.local_port}`}>
-                                {(c) => <ConnRow c={c()} onSelect={() => setSel({ app: app().app, conn: c() })} />}
-                              </Key>
-                              <Show when={proc().conns.length === 0}>
-                                <tr class="conn-row"><td colSpan={8} class="conn-empty">no active connections</td></tr>
-                              </Show>
-                            </Show>
-                          </>
-                        )}
-                      </Key>
-                    </Show>
-                  </>
-                )}
+                                </Show>
+                              </>
+                            );
+                          }}
+                        </Key>
+                      </Show>
+                    </>
+                  );
+                }}
               </Key>
             </tbody>
           </table>
@@ -305,7 +347,7 @@ function LimitCell(props: { app: string; name: string; dir: "down" | "up"; onErr
   }
   const edit = useInlineEdit();
   let input!: HTMLInputElement;
-  const cap = () => caps().find((c) => pathKey(c.app) === pathKey(props.app));
+  const cap = () => capFor(props.app);
   const value = () => (props.dir === "down" ? cap()?.down_bytes_per_sec : cap()?.up_bytes_per_sec) ?? null;
   const word = () => (props.dir === "down" ? "download" : "upload");
   const save = async () => {

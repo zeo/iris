@@ -54,6 +54,23 @@ impl Default for TickDetailState {
 }
 
 static TICK_DETAILS: LazyLock<TickDetailState> = LazyLock::new(TickDetailState::default);
+static LAST_TICK: LazyLock<Mutex<Option<StatsTick>>> = LazyLock::new(|| Mutex::new(None));
+
+fn store_last_tick(tick: &StatsTick) {
+    if let Ok(mut slot) = LAST_TICK.lock() {
+        *slot = Some(tick.clone());
+    }
+}
+
+fn take_last_tick() -> Option<StatsTick> {
+    LAST_TICK.lock().ok().and_then(|mut slot| slot.take())
+}
+
+fn clear_last_tick() {
+    if let Ok(mut slot) = LAST_TICK.lock() {
+        *slot = None;
+    }
+}
 
 /// what the UI asks the engine to do; the session task assigns the wire id
 pub enum EngineCmd {
@@ -113,12 +130,17 @@ pub fn engine_status() -> Status {
         .unwrap_or_default()
 }
 
-pub fn set_tick_details(enabled: bool, cadence_ms: u64) {
+pub fn set_tick_details(app: AppHandle, enabled: bool, cadence_ms: u64) {
     let state = &*TICK_DETAILS;
-    state.detailed.store(enabled, Ordering::Release);
+    let was_detailed = state.detailed.swap(enabled, Ordering::AcqRel);
     state
         .cadence_ms
         .store(cadence_ms.max(1_000), Ordering::Release);
+    if enabled && !was_detailed {
+        if let Some(tick) = take_last_tick() {
+            app.emit_to("main", "engine-tick", tick);
+        }
+    }
 }
 
 async fn dispatch(cmd: EngineCmd) -> Result<Reply, String> {
@@ -550,6 +572,9 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                     let want_full = crate::main_open(app);
                     if want_full != full_feed {
                         full_feed = want_full;
+                        if !want_full {
+                            clear_last_tick();
+                        }
                         let level = if want_full { ClientMessage::Subscribe } else { ClientMessage::SubscribeTotals };
                         transport::write_frame(&mut send, &level).await?;
                     }
@@ -559,6 +584,7 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                         // only the main window draws ticks; skip the json and the
                         // page round trip while it is closed
                         if !crate::main_open(app) {
+                            clear_last_tick();
                             continue;
                         }
                         let state = &*TICK_DETAILS;
@@ -574,11 +600,15 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                         last_tick_emit = tick.at_ms;
                         let detailed = state.detailed.load(Ordering::Acquire);
                         if !detailed {
+                            // keep the latest full tick so expanding an activity row populates immediately
+                            store_last_tick(&tick);
                             for sample in &mut tick.apps {
                                 sample.processes.clear();
                             }
+                        } else {
+                            clear_last_tick();
                         }
-                        app.emit("engine-tick", tick);
+                        app.emit_to("main", "engine-tick", tick);
                     }
                     ServerMessage::Alert(alert) => {
                         crate::prompt::show(app, &alert);
@@ -586,13 +616,13 @@ async fn session(app: &AppHandle, rx: &mut mpsc::Receiver<Command>) -> anyhow::R
                         app.emit("engine-alert", alert);
                     }
                     ServerMessage::Enrichment { target, annotations } => {
-                        app.emit("engine-enrichment", EnrichmentEvent { target, annotations });
+                        app.emit_to("main", "engine-enrichment", EnrichmentEvent { target, annotations });
                     }
                     ServerMessage::Proposal(proposal) => {
-                        app.emit("engine-proposal", proposal);
+                        app.emit_to("main", "engine-proposal", proposal);
                     }
                     ServerMessage::CaptureDegraded { degraded } => {
-                        app.emit("engine-capture-degraded", degraded);
+                        app.emit_to("main", "engine-capture-degraded", degraded);
                     }
                     ServerMessage::Reply { req, result } => {
                         if let Some(resp) = pending.remove(&req) {
@@ -770,5 +800,33 @@ fn set_status(app: &AppHandle, online: bool, version: Option<String>, mismatch: 
     if let Ok(mut s) = STATUS.0.lock() {
         *s = status.clone();
     }
-    app.emit("engine-status", status);
+    if !online {
+        clear_last_tick();
+    }
+    app.emit_to("main", "engine-status", status);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clear_last_tick, store_last_tick, take_last_tick};
+    use iris_core::{FirewallMode, StatsTick};
+
+    #[test]
+    fn cached_tick_roundtrips_and_clears() {
+        clear_last_tick();
+        let tick = StatsTick {
+            at_ms: 42,
+            total_rate_sent: 10,
+            total_rate_recv: 20,
+            apps: Vec::new(),
+            adapters: Vec::new(),
+            mode: FirewallMode::Ask,
+        };
+        store_last_tick(&tick);
+        assert_eq!(take_last_tick().map(|t| t.at_ms), Some(42));
+        assert!(take_last_tick().is_none());
+        store_last_tick(&tick);
+        clear_last_tick();
+        assert!(take_last_tick().is_none());
+    }
 }

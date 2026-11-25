@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { invoke } from "./host";
 import { pathKey } from "./path";
 
@@ -39,6 +39,7 @@ export interface StoredRule {
 }
 
 const [rules, setRules] = createSignal<StoredRule[]>([]);
+const [blockedApps, setBlockedApps] = createSignal<Set<string>>(new Set());
 export { rules };
 
 /// a rule over all of an app's traffic in its direction, the kind the Protect
@@ -72,7 +73,17 @@ export function describeLifetime(rule: Rule, now = Date.now()): string {
 
 export async function refreshRules(): Promise<void> {
   try {
-    setRules(await invoke<StoredRule[]>("list_rules"));
+    const next = await invoke<StoredRule[]>("list_rules");
+    const blocked = new Set<string>();
+    for (const r of next) {
+      if (r.enabled && r.rule.action === "block" && coversWholeApp(r.rule)) {
+        blocked.add(r.rule.app);
+      }
+    }
+    batch(() => {
+      setRules(next);
+      setBlockedApps(blocked);
+    });
   } catch {
     /* engine offline */
   }
@@ -80,10 +91,7 @@ export async function refreshRules(): Promise<void> {
 
 /// is there an enabled block rule covering this app path?
 export function isBlocked(path: string): boolean {
-  const p = pathKey(path);
-  return rules().some(
-    (r) => r.enabled && r.rule.action === "block" && r.rule.app === p && coversWholeApp(r.rule),
-  );
+  return blockedApps().has(pathKey(path));
 }
 
 const blocksOnly = (rule: Rule, addr: string): boolean => {
@@ -140,11 +148,22 @@ export interface RateCap {
 }
 
 const [caps, setCaps] = createSignal<RateCap[]>([]);
+const [capsByKey, setCapsByKey] = createSignal<Map<string, RateCap>>(new Map());
 export { caps };
+
+export function capFor(path: string): RateCap | undefined {
+  return capsByKey().get(pathKey(path));
+}
 
 export async function refreshCaps(): Promise<void> {
   try {
-    setCaps(await invoke<RateCap[]>("list_caps"));
+    const next = await invoke<RateCap[]>("list_caps");
+    const map = new Map<string, RateCap>();
+    for (const cap of next) map.set(pathKey(cap.app), cap);
+    batch(() => {
+      setCaps(next);
+      setCapsByKey(map);
+    });
   } catch {
     /* engine offline */
   }

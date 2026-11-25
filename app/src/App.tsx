@@ -4,7 +4,7 @@ import { Titlebar } from "./components/Titlebar";
 import { Icon } from "./components/Icon";
 import { createTheme } from "./lib/theme";
 import { persisted } from "./lib/persist";
-import { engine, initEngine, serviceOffer, setTickCadence } from "./lib/engine";
+import { activityExpanded, engine, initEngine, serviceOffer, setTickCadence } from "./lib/engine";
 import { initAlerts, refreshAlerts, unackedCount } from "./lib/alerts";
 import { initQuota } from "./lib/quota";
 import { Protect } from "./tabs/Protect";
@@ -76,7 +76,10 @@ export function App() {
     const liveView = tab() === "activity" || tab() === "graph";
     const cadenceMs = liveView ? 1000 : 4000;
     setTickCadence(cadenceMs);
-    void invoke("set_tick_details", { enabled: tab() === "activity", cadenceMs });
+    void invoke("set_tick_details", {
+      enabled: tab() === "activity" && activityExpanded(),
+      cadenceMs,
+    });
   });
 
   onMount(() => {

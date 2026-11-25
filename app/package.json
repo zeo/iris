@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@ceri/app": "https://github.com/zeo/ceri/releases/download/v0.1.15/ceri-app-0.1.15.tgz",
+    "@ceri/app": "https://github.com/zeo/ceri/releases/download/v0.1.16/ceri-app-0.1.16.tgz",
     "@fontsource/geist-mono": "^5.3.0",
     "@fontsource/hanken-grotesk": "^5.3.0",
     "@fontsource/newsreader": "^5.3.0",
